@@ -9,6 +9,7 @@
 #include <tuple>
 #include <unistd.h>
 #include <utility>
+#include <algorithm>
 
 #include "logging.hpp"
 #include "zygisk.hpp"
@@ -19,11 +20,10 @@ using zygisk::ServerSpecializeArgs;
 using namespace std::string_view_literals;
 
 template <size_t N> struct FixedString {
-    // NOLINTNEXTLINE(*-explicit-constructor)
-    [[maybe_unused]] consteval inline FixedString(const char (&str)[N]) {
+    [[maybe_unused]] consteval FixedString(const char (&str)[N]) {
         std::copy_n(str, N, data);
     }
-    consteval inline FixedString() = default;
+    consteval FixedString() = default;
     char data[N] = {};
 };
 
@@ -63,7 +63,6 @@ using SpoofConfig = std::tuple<
     Prop<jint, "DEVICE_INITIAL_SDK_INT", true>
 >;
 
-
 ssize_t xread(int fd, void *buffer, size_t count) {
     ssize_t total = 0;
     char *buf = (char *)buffer;
@@ -79,7 +78,7 @@ ssize_t xread(int fd, void *buffer, size_t count) {
 
 ssize_t xwrite(int fd, const void *buffer, size_t count) {
     ssize_t total = 0;
-    char *buf = (char *)buffer;
+    const char *buf = (const char *)buffer;
     while (count > 0) {
         ssize_t ret = write(fd, buf, count);
         if (ret < 0) return -1;
@@ -92,7 +91,10 @@ ssize_t xwrite(int fd, const void *buffer, size_t count) {
 
 void trim(std::string_view &str) {
     str.remove_prefix(std::min(str.find_first_not_of(" \t"), str.size()));
-    str.remove_suffix(std::min(str.size() - str.find_last_not_of(" \t") - 1, str.size()));
+    auto pos = str.find_last_not_of(" \t");
+    if (pos != std::string_view::npos) {
+        str.remove_suffix(str.size() - pos - 1);
+    }
 }
 
 class TrickyStore : public zygisk::ModuleBase {
@@ -215,11 +217,7 @@ private:
 
 void read_config(FILE *config, SpoofConfig &spoof_config) {
     char *l = nullptr;
-    struct finally {
-        char *(&l);
-
-        ~finally() { free(l); }
-    } finally{l};
+    std::unique_ptr<char, decltype(&free)> finally(l, free);
     size_t len = 0;
     ssize_t n;
     while ((n = getline(&l, &len, config)) != -1) {
@@ -229,7 +227,7 @@ void read_config(FILE *config, SpoofConfig &spoof_config) {
             line.remove_suffix(1);
         }
         auto d = line.find_first_of('=');
-        if (d == std::string_view::npos) {
+               if (d == std::string_view::npos) {
             LOGW("Ignore invalid line %.*s", static_cast<int>(line.size()), line.data());
             continue;
         }
@@ -243,8 +241,7 @@ void read_config(FILE *config, SpoofConfig &spoof_config) {
                     static_cast<int>(value.size()), value.data()),
                       args.value.size() >= value.size() + 1 ?
                       (args.has_value = true,
-                              strlcpy(args.value.data(), value.data(),
-                                      std::min(args.value.size(), value.size() + 1))) :
+                              std::copy_n(value.data(), std::min(args.value.size(), value.size() + 1), args.value.data())) :
                       (LOGW("Config value %.*s for %.*s is too long, ignored",
                             static_cast<int>(value.size()), value.data(),
                             static_cast<int>(key.size()), key.data()), true))) || ...);
@@ -292,7 +289,7 @@ SECURITY_PATCH=2019-05-05
     }
 
     SpoofConfig spoof_config{};
-    std::unique_ptr<FILE, decltype([](auto *f) { fclose(f); })> config{fdopen(cfd, "r")};
+    std::unique_ptr<FILE, decltype([](auto *f) { fclose(f); })> config{fdopen(cfd, "r"), fclose};
     read_config(config.get(), spoof_config);
 
     xwrite(fd, &spoof_config, sizeof(spoof_config));
