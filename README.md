@@ -83,6 +83,12 @@ io.github.vvb2060.keyattestation
 # use certificate generating mode for gms
 com.google.android.gms!
 ```
+## Custom ROMs support
+
+If you are using a custom ROM and it passes Play Integrity (BASIC & DEVICE) by default, there is a good chance that this module won't work for you as your ROM is probably blocking Key Attestation.
+To see if your ROM is compatible, look in the `android_frameworks_base` repo of your ROM and search for `PixelPropsUtils` or `setProps`.
+
+To fix this issue, search for `engineGetCertificateChain` in that repo and see if there's some block of code that throws an exception if some condition that checks if it's related to key attestation (e.g. `PixelPropsUtils.getIsKeyAttest()` or `isCallerSafetyNet()`) is filled. You can delete this block of code and build your ROM yourself, or submit a commit to the maintainer of your ROM to add, for example, a system property to enable/disable this blocking. See [this commit](https://github.com/PixelBuildsROM/android_frameworks_base/commit/378ae3b7034d441fd0455639dc1a4b29b2876798) for reference.
 
 ## TODO
 
