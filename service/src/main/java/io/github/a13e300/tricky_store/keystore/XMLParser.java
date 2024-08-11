@@ -29,7 +29,7 @@ public class XMLParser {
 
     private Map<String, String> readData(XmlPullParser parser, String[] tags) throws IOException, XmlPullParserException {
         int index = 0;
-        Map<String, Integer> tagCounts = new HashMap<>();
+        int[] tagCounts = new int[tags.length];
 
         while (parser.next() != XmlPullParser.END_DOCUMENT) {
             if (parser.getEventType() != XmlPullParser.START_TAG) {
@@ -42,10 +42,10 @@ public class XMLParser {
 
                 String[] tagParts = tags[index].split("\\[");
                 if (tagParts.length > 1) {
-                    int tagIndex = tagCounts.getOrDefault(name, 0) + 1;
-                    tagCounts.put(name, tagIndex);
-
-                    if (tagIndex == Integer.parseInt(tagParts[1].replace("]", ""))) {
+                    int targetIndex = Integer.parseInt(tagParts[1].replace("]", ""));
+                    if (tagCounts[index] < targetIndex) {
+                        tagCounts[index]++;
+                    } else {
                         if (index == tags.length - 1) {
                             return readAttributes(parser);
                         } else {
