@@ -49,10 +49,12 @@ class SecurityLevelInterceptor(
                 val keyDescriptor =
                     data.readTypedObject(KeyDescriptor.CREATOR) ?: return@runCatching
                 val attestationKeyDescriptor = data.readTypedObject(KeyDescriptor.CREATOR)
-                val params = data.createTypedArray(KeyParameter.CREATOR)!!
+                // Read Keyparameters directly into a List
+                val paramsList = mutableListOf<KeyParameter>()
+                data.readTypedList(paramsList, KeyParameter.CREATOR)
                 // val aFlags = data.readInt()
                 // val entropy = data.createByteArray()
-                val kgp = KeyGenParameters(params)
+                val kgp = KeyGenParameters(paramsList) 
                 if (kgp.attestationChallenge != null) {
                     if (attestationKeyDescriptor != null) {
                         Logger.e("warn: attestation key not supported now")
