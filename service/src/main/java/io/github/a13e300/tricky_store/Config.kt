@@ -13,11 +13,13 @@ object Config {
     private fun updateTargetPackages(f: File?) = runCatching {
         hackPackages.clear()
         generatePackages.clear()
-        f?.readLines()?.forEach {
-            if (it.isNotBlank() && !it.startsWith("#")) {
-                val n = it.trim()
-                if (n.endsWith("!")) generatePackages.add(n.removeSuffix("!").trim())
-                else hackPackages.add(n)
+        f?.useLines { lines -> 
+            lines.forEach {
+                if (it.isNotBlank() && !it.startsWith("#")) {
+                    val n = it.trim()
+                    if (n.endsWith("!")) generatePackages.add(n.removeSuffix("!").trim())
+                    else hackPackages.add(n)
+                }
             }
         }
         Logger.i("update hack packages: $hackPackages, generate packages=$generatePackages")
