@@ -25,10 +25,11 @@ fun verifySelf() {
     val prop = File("./module.prop")
     runCatching {
         if (prop.canonicalPath != "/data/adb/modules/tricky_store/module.prop") error("wrong directory ${prop.canonicalPath}!")
-        prop.forEachLine(Charsets.UTF_8) {
-            val a = it.split("=", limit = 2)
-            if (a.size != 2) return@forEachLine
-            kv[a[0]] = a[1]
+        prop.useLines(Charsets.UTF_8) { lines -> 
+            lines.forEach { 
+                val a = it.split("=", limit = 2)
+                if (a.size == 2) kv[a[0]] = a[1]
+            }
         }
         val checksum = MessageDigest.getInstance("SHA-256").run {
             update(kv["id"]!!.toByteArray(Charsets.UTF_8))
