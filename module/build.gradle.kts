@@ -111,7 +111,8 @@ afterEvaluate {
                     "DEBUG" to if (buildTypeLowered == "debug") "true" else "false",
                     "SONAME" to moduleId,
                     "SUPPORTED_ABIS" to supportedAbis,
-                    "MIN_SDK" to androidMinSdkVersion.toString()
+                    "MIN_SDK" to androidMinSdkVersion.toString(),
+                    "MODULENAME" to moduleName
                 )
                 filter<ReplaceTokens>("tokens" to tokens)
                 filter<FixCrLfFilter>("eol" to FixCrLfFilter.CrLf.newInstance("lf"))
