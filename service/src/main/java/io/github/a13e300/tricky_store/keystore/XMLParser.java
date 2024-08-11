@@ -24,12 +24,13 @@ public class XMLParser {
         parser.setInput(new StringReader(xml));
 
         String[] tags = path.split("\\.");
-
-        return readData(parser, tags, 0, new HashMap<>());
+        return readData(parser, tags);
     }
 
-    private Map<String, String> readData(XmlPullParser parser, String[] tags, int index,
-                                         Map<String, Integer> tagCounts) throws IOException, XmlPullParserException {
+    private Map<String, String> readData(XmlPullParser parser, String[] tags) throws IOException, XmlPullParserException {
+        int index = 0;
+        Map<String, Integer> tagCounts = new HashMap<>();
+
         while (parser.next() != XmlPullParser.END_DOCUMENT) {
             if (parser.getEventType() != XmlPullParser.START_TAG) {
                 continue;
@@ -41,21 +42,21 @@ public class XMLParser {
 
                 String[] tagParts = tags[index].split("\\[");
                 if (tagParts.length > 1) {
-                    if (tagCounts.getOrDefault(name, 0) < Integer.parseInt(tagParts[1].replace("]", ""))) {
-                        tagCounts.put(name, tagCounts.getOrDefault(name, 0) + 1);
-                        return readData(parser, tags, index, tagCounts);
-                    } else {
+                    int tagIndex = tagCounts.getOrDefault(name, 0) + 1;
+                    tagCounts.put(name, tagIndex);
+
+                    if (tagIndex == Integer.parseInt(tagParts[1].replace("]", ""))) {
                         if (index == tags.length - 1) {
                             return readAttributes(parser);
                         } else {
-                            return readData(parser, tags, index + 1, tagCounts);
+                            index++;
                         }
                     }
                 } else {
                     if (index == tags.length - 1) {
                         return readAttributes(parser);
                     } else {
-                        return readData(parser, tags, index + 1, tagCounts);
+                        index++;
                     }
                 }
             } else {
