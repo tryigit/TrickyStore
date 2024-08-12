@@ -256,17 +256,17 @@ static void companion_handler(int fd) {
     constexpr auto kSpoofConfigFile = "/data/adb/tricky_store/spoof_build_vars"sv;
     constexpr auto kDefaultSpoofConfig =
 R"EOF(MANUFACTURER=Google
-MODEL=Pixel
-FINGERPRINT=google/sailfish/sailfish:10/QPP3.190404.015/5505587:user/release-keys
+MODEL=Pixel 8 Pro
+FINGERPRINT=google/husky_beta/husky:15/AP31.240617.010/12136053:user/release-keys
 BRAND=google
-PRODUCT=sailfish
-DEVICE=sailfish
-RELEASE=10
-ID=QPP3.190404.015
-INCREMENTAL=5505587
+PRODUCT=husky_beta
+DEVICE=husky
+RELEASE=15
+ID=AP31.240617.010
+INCREMENTAL=12136053
 TYPE=user
 TAGS=release-keys
-SECURITY_PATCH=2019-05-05
+SECURITY_PATCH=2024-07-05
 )EOF"sv;
     struct stat st{};
     int enabled = stat(kSpoofConfigFile.data(), &st) == 0;
