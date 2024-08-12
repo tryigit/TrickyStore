@@ -2,3 +2,6 @@ com.google.android.gms
 io.github.vvb2060.keyattestation
 io.github.vvb2060.mahoshojo
 icu.nullptr.nativetest
+com.zhenxi.hunter
+com.reveny.nativecheck
+me.garfieldhan.holmes
