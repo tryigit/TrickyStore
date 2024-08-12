@@ -5,3 +5,6 @@ icu.nullptr.nativetest
 com.zhenxi.hunter
 com.reveny.nativecheck
 me.garfieldhan.holmes
+com.CIB.Digital.MB
+com.whatsapp
+com.bet365.authenticator
