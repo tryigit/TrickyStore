@@ -29,6 +29,3 @@ target_link_libraries(libinject.so PRIVATE lsplt my_logging)
 
 add_library(${MODULE_NAME} SHARED binder_interceptor.cpp)
 target_link_libraries(${MODULE_NAME} PRIVATE log binder utils elf_util my_logging)
-
-add_library(tszygisk SHARED zygisk/main.cpp)
-target_link_libraries(tszygisk PRIVATE log my_logging)
