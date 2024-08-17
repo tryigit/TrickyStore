@@ -53,14 +53,9 @@ open class BinderInterceptor : Binder() {
                 val callingUid = data.readInt()
                 val callingPid = data.readInt()
                 val sz = data.readLong()
-
-                // Use a temporary buffer to avoid creating a new Parcel
-                val buffer = ByteArray(sz.toInt())
-                data.readByteArray(buffer)
-
                 val theData = Parcel.obtain()
                 try {
-                    theData.unmarshall(buffer, 0, buffer.size)
+                    theData.appendFrom(data, data.dataPosition(), sz.toInt())
                     theData.setDataPosition(0)
                     onPreTransact(target, theCode, theFlags, callingUid, callingPid, theData)
                 } finally {
