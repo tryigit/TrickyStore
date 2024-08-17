@@ -24,13 +24,12 @@ public class XMLParser {
         parser.setInput(new StringReader(xml));
 
         String[] tags = path.split("\\.");
-        return readData(parser, tags);
+
+        return readData(parser, tags, 0, new HashMap<>());
     }
 
-    private Map<String, String> readData(XmlPullParser parser, String[] tags) throws IOException, XmlPullParserException {
-        int index = 0;
-        int[] tagCounts = new int[tags.length];
-
+    private Map<String, String> readData(XmlPullParser parser, String[] tags, int index,
+                                         Map<String, Integer> tagCounts) throws IOException, XmlPullParserException {
         while (parser.next() != XmlPullParser.END_DOCUMENT) {
             if (parser.getEventType() != XmlPullParser.START_TAG) {
                 continue;
@@ -42,21 +41,21 @@ public class XMLParser {
 
                 String[] tagParts = tags[index].split("\\[");
                 if (tagParts.length > 1) {
-                    int targetIndex = Integer.parseInt(tagParts[1].replace("]", ""));
-                    if (tagCounts[index] < targetIndex) {
-                        tagCounts[index]++;
+                    if (tagCounts.getOrDefault(name, 0) < Integer.parseInt(tagParts[1].replace("]", ""))) {
+                        tagCounts.put(name, tagCounts.getOrDefault(name, 0) + 1);
+                        return readData(parser, tags, index, tagCounts);
                     } else {
                         if (index == tags.length - 1) {
                             return readAttributes(parser);
                         } else {
-                            index++;
+                            return readData(parser, tags, index + 1, tagCounts);
                         }
                     }
                 } else {
                     if (index == tags.length - 1) {
                         return readAttributes(parser);
                     } else {
-                        index++;
+                        return readData(parser, tags, index + 1, tagCounts);
                     }
                 }
             } else {
