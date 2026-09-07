@@ -182,10 +182,7 @@ mod fixture {
         verify_signature(&output, &issuer, algorithm);
     }
 
-    pub(super) fn run_prepared_rejects_extra_outer_field(
-        xml: &[u8],
-        algorithm: SigningAlgorithm,
-    ) {
+    pub(super) fn run_prepared_rejects_extra_outer_field(xml: &[u8], algorithm: SigningAlgorithm) {
         let document = parse_keybox_xml_bytes(xml).expect("fixture XML");
         let key = document.keys.first().expect("fixture key");
         let private_key = normalize_private_key_pkcs8(&key.algorithm, &key.private_key_pem)
@@ -238,10 +235,7 @@ mod fixture {
         ));
     }
 
-    pub(super) fn run_prepared_rejects_v2_with_extensions(
-        xml: &[u8],
-        algorithm: SigningAlgorithm,
-    ) {
+    pub(super) fn run_prepared_rejects_v2_with_extensions(xml: &[u8], algorithm: SigningAlgorithm) {
         let document = parse_keybox_xml_bytes(xml).expect("fixture XML");
         let key = document.keys.first().expect("fixture key");
         let private_key = normalize_private_key_pkcs8(&key.algorithm, &key.private_key_pem)
