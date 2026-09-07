@@ -47,7 +47,7 @@ import static org.mockito.Mockito.when;
 
 public class AttestationInterceptorContractTest {
     @Test
-    public void callerSelectedAttestKeyStripsChallenge() throws Exception {
+    public void callerSelectedAttestKeyContinuesPreTransactAndSkipsPostTransact() throws Exception {
         Binder target = new Binder();
         int code = field(SecurityLevelInterceptor.class, "generateKeyTransaction").getInt(null);
         Parcel request = AttestationRequestContractTest.request(true);
@@ -59,21 +59,28 @@ public class AttestationInterceptorContractTest {
             backend.when(CertHack::canHack).thenReturn(true);
             BinderInterceptor.Result result = new SecurityLevelInterceptor().onPreTransact(
                     target, code, 0, 10_001, 42, request);
-            assertTrue("Expected OverrideData for explicit AttestKey",
-                    result instanceof BinderInterceptor.OverrideData);
-            BinderInterceptor.OverrideData overrideData = (BinderInterceptor.OverrideData) result;
-            assertNotNull(overrideData.getData());
-            overrideData.getData().recycle();
+            assertSame(BinderInterceptor.Continue.INSTANCE, result);
+
+            // In onPostTransact, explicit AttestKey requests return Skip, preserving genuine hardware child cert
+            KeyPair parent = keyPair("EC");
+            KeyPair childKey = keyPair("EC");
+            X509Certificate childCert = certificate(childKey, parent, "child", "parent");
+            KeyMetadata metadata = metadata(childCert, childCert.getEncoded());
+            Parcel reply = generatedReply(metadata);
+            BinderInterceptor.Result postResult = generate(request, reply);
+            assertSame(BinderInterceptor.Skip.INSTANCE, postResult);
+            childCert.verify(parent.getPublic());
+
             backend.verify(CertHack::canHack);
             backend.verifyNoMoreInteractions();
         } finally {
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
         }
-        verify(request).setDataPosition(28);
+        verify(request, org.mockito.Mockito.atLeastOnce()).setDataPosition(28);
     }
 
     @Test
-    public void generateKeyStripsExplicitAttestKeyAndContinuesDefault() throws Exception {
+    public void generateKeyPermitsExplicitAttestKeyNativelyAndContinuesDefault() throws Exception {
         Binder strongboxTarget = new Binder();
         Field strongboxTargetField = field(KeystoreInterceptor.class, "strongboxTarget");
         strongboxTargetField.set(KeystoreInterceptor.INSTANCE, strongboxTarget);
@@ -92,13 +99,11 @@ public class AttestationInterceptorContractTest {
                         strongboxTarget, code, 0, 10_001, 42, defaultRequest);
                 assertSame(BinderInterceptor.Continue.INSTANCE, defaultResult);
 
-                // Explicit attest key requests strip the challenge via OverrideData
+                // Explicit attest key requests also return Continue natively to let hardware execute
                 Parcel explicitRequest = AttestationRequestContractTest.request(true);
                 BinderInterceptor.Result explicitResult = new SecurityLevelInterceptor().onPreTransact(
                         strongboxTarget, code, 0, 10_001, 42, explicitRequest);
-                assertTrue("Expected OverrideData for explicit AttestKey",
-                        explicitResult instanceof BinderInterceptor.OverrideData);
-                ((BinderInterceptor.OverrideData) explicitResult).getData().recycle();
+                assertSame(BinderInterceptor.Continue.INSTANCE, explicitResult);
 
                 backend.verify(CertHack::canHack, org.mockito.Mockito.times(2));
                 backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean(), anyBoolean()), never());
@@ -203,13 +208,13 @@ public class AttestationInterceptorContractTest {
                         assertSame(BinderInterceptor.Skip.INSTANCE,
                                 generate(AttestationRequestContractTest.request(false), generatedReply(metadata)));
                     } else {
-                        // Caller-selected AttestKey children are stripped via OverrideData in pre-transact
+                        // Caller-selected AttestKey children continue in pre-transact and skip in post-transact
                         int code = field(SecurityLevelInterceptor.class, "generateKeyTransaction").getInt(null);
                         BinderInterceptor.Result preResult = new SecurityLevelInterceptor().onPreTransact(
                                 target, code, 0, 10_001, 42, AttestationRequestContractTest.request(true));
-                        assertTrue("Expected OverrideData for explicit AttestKey",
-                                preResult instanceof BinderInterceptor.OverrideData);
-                        ((BinderInterceptor.OverrideData) preResult).getData().recycle();
+                        assertSame(BinderInterceptor.Continue.INSTANCE, preResult);
+                        assertSame(BinderInterceptor.Skip.INSTANCE,
+                                generate(AttestationRequestContractTest.request(true), generatedReply(metadata)));
                     }
 
                     for (int read = 0; read < 320; read++) {
