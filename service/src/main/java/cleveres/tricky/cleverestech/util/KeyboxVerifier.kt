@@ -34,7 +34,7 @@ object KeyboxVerifier {
         val certificateSerial: String? = null,
         val snapshotSha256: String? = null,
         internal val retryableBackendFailure: Boolean = false,
-        val securityLevel: String = "TEE",
+        val securityLevel: String = "Unknown",
     )
 
     enum class Status {
@@ -529,7 +529,7 @@ object KeyboxVerifier {
         storageId: String,
         crlFetcher: () -> RevocationSource?,
     ): Result {
-        var trackedSecurityLevel = "TEE"
+        var trackedSecurityLevel = "Unknown"
         return try {
             if (!isSafeKeyboxFile(file)) {
                 return Result(file, file.name, Status.ERROR, "Unsafe or oversized keybox file", storageId = storageId)
@@ -537,7 +537,12 @@ object KeyboxVerifier {
             val parsed = KeyboxLoader.parseFileSnapshot(scope, filename, storageId)
             val snapshotSha256 = parsed.snapshotSha256?.takeIf(FULL_SHA256_PATTERN::matches)
             val keyboxes = parsed.keyboxes
-            trackedSecurityLevel = if (keyboxes.any(CertHack::isStrongBoxKeybox)) "StrongBox" else "TEE"
+            trackedSecurityLevel =
+                when {
+                    keyboxes.any(CertHack::isStrongBoxKeybox) -> "StrongBox"
+                    keyboxes.any(CertHack::isTeeKeybox) -> "TEE"
+                    else -> "Unknown"
+                }
             val securityLevel = trackedSecurityLevel
             if (keyboxes.isEmpty()) {
                 return Result(

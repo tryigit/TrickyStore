@@ -15,9 +15,6 @@ import java.security.cert.Certificate
  * operation remain owned by the platform security level.
  *
  * This interceptor is registered on both the TEE and StrongBox child binders.
- * Targeted generateKey and getKeyEntry calls use the same certificate-compatibility
- * path. No synthetic timing delay is added here; certificate caching in
- * CertHack handles repeated reads without parking Keystore threads.
  */
 class SecurityLevelInterceptor : BinderInterceptor() {
     companion object {
@@ -114,7 +111,6 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 originalLeafOnly,
                 callingUid,
                 true,
-                false,
             )
             if (rewritten === originalLeafOnly) {
                 replacement.recycle()

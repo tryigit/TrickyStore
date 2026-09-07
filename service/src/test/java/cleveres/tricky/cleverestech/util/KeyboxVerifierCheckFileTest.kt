@@ -264,4 +264,51 @@ class KeyboxVerifierCheckFileTest {
         assertTrue(result.details.contains("RuntimeException"))
         assertEquals("StrongBox", result.securityLevel)
     }
+
+    @Test
+    fun `checkFile preserves Unknown securityLevel on parse failure or empty keyboxes`() {
+        tempFile.writeText("corrupt")
+        KeyboxLoader.fileParserOverride = { _, _ ->
+            KeyboxLoader.ParsedFile(
+                snapshotSha256 = null,
+                keyboxes = emptyList(),
+            )
+        }
+
+        val result = KeyboxVerifier.checkFile(
+            tempFile,
+            KeyboxLoader.FileScope.CONFIG_ROOT,
+            tempFile.name,
+            "storage123",
+        ) { null }
+
+        assertEquals(KeyboxVerifier.Status.INVALID, result.status)
+        assertEquals("Unknown", result.securityLevel)
+    }
+
+    @Test
+    fun `checkFile classifies TEE securityLevel when TEE keybox is present`() {
+        tempFile.writeText("content")
+        val mockKeyBox = Mockito.mock(CertHack.KeyBox::class.java)
+        Mockito.`when`(mockKeyBox.filename()).thenReturn("tee_keybox.xml")
+
+        KeyboxLoader.fileParserOverride = { _, _ ->
+            KeyboxLoader.ParsedFile(
+                snapshotSha256 = null,
+                keyboxes = listOf(mockKeyBox),
+            )
+        }
+
+        val result = KeyboxVerifier.checkFile(
+            tempFile,
+            KeyboxLoader.FileScope.CONFIG_ROOT,
+            tempFile.name,
+            "storage123",
+        ) {
+            throw RuntimeException("test")
+        }
+
+        assertEquals(KeyboxVerifier.Status.ERROR, result.status)
+        assertEquals("TEE", result.securityLevel)
+    }
 }

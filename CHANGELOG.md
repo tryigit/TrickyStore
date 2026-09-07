@@ -10,7 +10,7 @@
   - Added clear, mobile-friendly **StrongBox** and **TEE** badges next to keyboxes in the Keybox Hub, making it easy to identify keybox capabilities at a glance.
   - Localized remote server status messages for all supported interface languages.
 - **Module Installation & Compatibility:**
-  - Automatically detects and removes conflicting or outdated Play Integrity Fix modules during installation to prevent conflicts and ensure a clean setup.
+  - Automatically detects and removes conflicting or outdated third-party attestation modules during installation to prevent conflicts and ensure a clean setup.
 - **Performance & Reliability:**
   - Faster keystore response times with zero delay when applications check certificates.
   - Consistent readback cache synchronization between key generation and entry queries.

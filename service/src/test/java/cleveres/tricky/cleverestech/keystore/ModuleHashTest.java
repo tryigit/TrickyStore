@@ -302,7 +302,7 @@ public class ModuleHashTest {
             Assert.assertEquals(2, hackedChain.length);
             X509Certificate hackedLeaf = (X509Certificate) hackedChain[0];
             hackedLeaf.verify(ecPair.getPublic());
-            Assert.assertEquals("EC", CertHack.signingKeyAlgorithm(hackedLeaf.getSigAlgName()));
+            Assert.assertTrue(hackedLeaf.getSigAlgName().contains("ECDSA"));
             Assert.assertArrayEquals(
                     attestationLeaf.getPublicKey().getEncoded(), hackedLeaf.getPublicKey().getEncoded());
         } finally {

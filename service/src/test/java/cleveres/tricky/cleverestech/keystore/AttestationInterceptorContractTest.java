@@ -81,9 +81,7 @@ public class AttestationInterceptorContractTest {
 
     @Test
     public void generateKeyPermitsExplicitAttestKeyNativelyAndContinuesDefault() throws Exception {
-        Binder strongboxTarget = new Binder();
-        Field strongboxTargetField = field(KeystoreInterceptor.class, "strongboxTarget");
-        strongboxTargetField.set(KeystoreInterceptor.INSTANCE, strongboxTarget);
+        Binder target = new Binder();
         Field globalModeField = field(Config.class, "isGlobalMode");
         boolean prevGlobalMode = (boolean) globalModeField.get(Config.INSTANCE);
         globalModeField.set(Config.INSTANCE, true);
@@ -96,20 +94,19 @@ public class AttestationInterceptorContractTest {
                 // Default request returns Continue natively
                 Parcel defaultRequest = AttestationRequestContractTest.request(false);
                 BinderInterceptor.Result defaultResult = new SecurityLevelInterceptor().onPreTransact(
-                        strongboxTarget, code, 0, 10_001, 42, defaultRequest);
+                        target, code, 0, 10_001, 42, defaultRequest);
                 assertSame(BinderInterceptor.Continue.INSTANCE, defaultResult);
 
                 // Explicit attest key requests also return Continue natively to let hardware execute
                 Parcel explicitRequest = AttestationRequestContractTest.request(true);
                 BinderInterceptor.Result explicitResult = new SecurityLevelInterceptor().onPreTransact(
-                        strongboxTarget, code, 0, 10_001, 42, explicitRequest);
+                        target, code, 0, 10_001, 42, explicitRequest);
                 assertSame(BinderInterceptor.Continue.INSTANCE, explicitResult);
 
                 backend.verify(CertHack::canHack, org.mockito.Mockito.times(2));
-                backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean(), anyBoolean()), never());
+                backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()), never());
             }
         } finally {
-            strongboxTargetField.set(KeystoreInterceptor.INSTANCE, null);
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
         }
     }
@@ -150,7 +147,7 @@ public class AttestationInterceptorContractTest {
                 assertArrayEquals(original, metadata.certificate);
                 assertSame(chain, metadata.certificateChain);
             }
-            backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean(), anyBoolean()), never());
+            backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()), never());
         } finally {
             keystore.set(null, previous);
         }
@@ -189,7 +186,7 @@ public class AttestationInterceptorContractTest {
 
         try (MockedStatic<CertHack> backend = mockStatic(CertHack.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
             backend.when(CertHack::canHack).thenReturn(true);
-            backend.when(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean(), anyBoolean()))
+            backend.when(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()))
                     .thenReturn(new Certificate[] {ab, ab});
 
             for (X509Certificate child : new X509Certificate[] {ab, bc, ordinary}) {
@@ -244,33 +241,8 @@ public class AttestationInterceptorContractTest {
     }
 
     @Test
-    public void strongBoxKeyGenerationWithAttestationRewritesEvenWhenNoDedicatedStrongBoxKeybox() throws Exception {
-        KeyPair issuer = keyPair("EC");
-        X509Certificate child = certificate(keyPair("EC"), issuer, "strongbox_child", "issuer");
-        KeyMetadata metadata = metadata(child, child.getEncoded());
-        metadata.keySecurityLevel = SecurityLevel.STRONGBOX;
-
-        Parcel request = AttestationRequestContractTest.request(false);
-        Parcel reply = generatedReply(metadata);
-        Certificate[] replacement = new Certificate[] {child, child};
-
-        try (MockedStatic<CertHack> backend = mockStatic(CertHack.class)) {
-            backend.when(CertHack::canHack).thenReturn(true);
-            backend.when(() -> CertHack.hasStrongBoxKeybox(anyInt())).thenReturn(false);
-            backend.when(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean(), anyBoolean())).thenReturn(replacement);
-
-            BinderInterceptor.Result result = generate(request, reply);
-            org.junit.Assert.assertTrue(result instanceof BinderInterceptor.OverrideReply);
-            backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean(), anyBoolean()));
-            ((BinderInterceptor.OverrideReply) result).getReply().recycle();
-        }
-    }
-
-    @Test
     public void nonAttestedKeyGenerationContinuesPreTransactAndSkipsPostTransact() throws Exception {
-        Binder strongboxTarget = new Binder();
-        Field strongboxTargetField = field(KeystoreInterceptor.class, "strongboxTarget");
-        strongboxTargetField.set(KeystoreInterceptor.INSTANCE, strongboxTarget);
+        Binder target = new Binder();
         Field globalModeField = field(Config.class, "isGlobalMode");
         boolean prevGlobalMode = (boolean) globalModeField.get(Config.INSTANCE);
         globalModeField.set(Config.INSTANCE, true);
@@ -279,15 +251,13 @@ public class AttestationInterceptorContractTest {
             Parcel request = AttestationRequestContractTest.request(false);
             try (MockedStatic<CertHack> backend = mockStatic(CertHack.class)) {
                 backend.when(CertHack::canHack).thenReturn(true);
-                backend.when(() -> CertHack.hasStrongBoxKeybox(anyInt())).thenReturn(false);
 
                 int code = field(SecurityLevelInterceptor.class, "generateKeyTransaction").getInt(null);
                 BinderInterceptor.Result result = new SecurityLevelInterceptor().onPreTransact(
-                        strongboxTarget, code, 0, 10_001, 42, request);
+                        target, code, 0, 10_001, 42, request);
                 assertSame(BinderInterceptor.Continue.INSTANCE, result);
             }
         } finally {
-            strongboxTargetField.set(KeystoreInterceptor.INSTANCE, null);
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
         }
 
@@ -317,12 +287,11 @@ public class AttestationInterceptorContractTest {
 
         try (MockedStatic<CertHack> backend = mockStatic(CertHack.class)) {
             backend.when(CertHack::canHack).thenReturn(true);
-            backend.when(() -> CertHack.hasStrongBoxKeybox(anyInt())).thenReturn(true);
-            backend.when(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean(), anyBoolean())).thenReturn(replacement);
+            backend.when(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean())).thenReturn(replacement);
 
             BinderInterceptor.Result result = generate(request, reply);
             org.junit.Assert.assertTrue(result instanceof BinderInterceptor.OverrideReply);
-            backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean(), anyBoolean()));
+            backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()));
             ((BinderInterceptor.OverrideReply) result).getReply().recycle();
         }
     }
@@ -334,11 +303,11 @@ public class AttestationInterceptorContractTest {
         KeyMetadata metadata = metadata(child, child.getEncoded());
         Certificate[] replacement = new Certificate[] {child, child};
         try (MockedStatic<CertHack> backend = mockStatic(CertHack.class)) {
-            backend.when(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean(), anyBoolean())).thenReturn(replacement);
+            backend.when(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean())).thenReturn(replacement);
             BinderInterceptor.Result result =
                     generate(AttestationRequestContractTest.request(false), generatedReply(metadata));
             org.junit.Assert.assertTrue(result instanceof BinderInterceptor.OverrideReply);
-            backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean(), anyBoolean()));
+            backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()));
             ((BinderInterceptor.OverrideReply) result).getReply().recycle();
         }
     }

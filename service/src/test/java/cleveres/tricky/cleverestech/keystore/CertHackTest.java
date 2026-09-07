@@ -109,28 +109,6 @@ public class CertHackTest {
         assertEquals(0, ManagedKeyboxStateOracle.parse(new StringReader(mixedXml), "mixed.xml").size());
     }
 
-    @Test
-    public void testAttestationIdOverridesRequireOriginalTag() {
-        byte[] serial = "serial".getBytes(StandardCharsets.UTF_8);
-        byte[] imei = "imei".getBytes(StandardCharsets.UTF_8);
-        Map<Integer, byte[]> configured = new HashMap<>();
-        configured.put(713, serial);
-        configured.put(714, imei);
-
-        Map<Integer, byte[]> selected =
-                CertHack.selectPresentAttestationIdOverrides(configured, List.of(714, 716));
-
-        assertEquals(1, selected.size());
-        assertTrue(selected.containsKey(714));
-        assertArrayEquals(imei, selected.get(714));
-    }
-
-    @Test
-    public void testSigningKeyAlgorithmUsesCertificateSigner() {
-        assertEquals("EC", CertHack.signingKeyAlgorithm("SHA256withECDSA"));
-        assertEquals("RSA", CertHack.signingKeyAlgorithm("SHA256withRSA"));
-        assertEquals(null, CertHack.signingKeyAlgorithm("Ed25519"));
-    }
 
     @Test
     public void testVerifiedBootDigestSelectionWithFallback() {
@@ -286,7 +264,6 @@ public class CertHackTest {
             assertEquals("StrongBox", CertHack.getKeyboxSecurityLevel("root:keybox.xml"));
             assertEquals("TEE", CertHack.getKeyboxSecurityLevel("keyboxes:keybox.xml"));
             assertEquals("StrongBox", CertHack.getKeyboxSecurityLevel("keybox.xml"));
-            assertTrue(CertHack.hasStrongBoxKeybox());
             assertTrue(CertHack.isStrongBoxKeybox(rootKeybox));
             assertFalse(CertHack.isStrongBoxKeybox(managedKeybox));
         } finally {
@@ -295,9 +272,7 @@ public class CertHackTest {
     }
 
     @Test
-    public void testEmptyStateStrongBoxFastPath() {
-        assertFalse(CertHack.hasStrongBoxKeybox());
-        assertFalse(CertHack.hasStrongBoxKeybox(1000));
+    public void testEmptyStateSecurityLevelFastPath() {
         assertEquals("Unknown", CertHack.getKeyboxSecurityLevel("any.xml"));
     }
 
