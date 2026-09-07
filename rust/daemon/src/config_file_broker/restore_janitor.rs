@@ -45,9 +45,7 @@ fn run_restore_janitor(root: Arc<TrustedDir>) {
                 let (guard, _) = match wake().wait_timeout(transactions, wait) {
                     Ok(result) => result,
                     Err(poisoned) => {
-                        eprintln!(
-                            "cleverestrickyd: restore janitor recovered poisoned timed wait"
-                        );
+                        eprintln!("cleverestrickyd: restore janitor recovered poisoned timed wait");
                         poisoned.into_inner()
                     }
                 };
