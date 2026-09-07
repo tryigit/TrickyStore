@@ -67,9 +67,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         return try {
             reply.readException()
             val metadata = reply.readTypedObject(KeyMetadata.CREATOR) ?: return Skip
-            val isFullChain = Utils.isCertificateChainRewriteCandidate(metadata)
-            val isLeafOnly = Utils.hasRewritableLeafCertificate(metadata)
-            if (!isFullChain && !isLeafOnly) {
+            if (!Utils.isCertificateChainRewriteCandidate(metadata) && !Utils.hasRewritableLeafCertificate(metadata)) {
                 return Skip
             }
 
@@ -102,19 +100,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             if (!CertHack.applyCachedCertificateChain(metadata)) {
                 Utils.putCertificateChain(metadata, rewritten)
             }
-            val replacement = Parcel.obtain()
-            try {
-                replacement.writeNoException()
-                replacement.writeTypedObject(metadata, 0)
-                OverrideReply(0, replacement)
-            } catch (t: Throwable) {
-                replacement.recycle()
-                throw t
-            }
-        } catch (error: Throwable) {
-            if (error.javaClass.simpleName != "ServiceSpecificException") {
-                Logger.e("Could not rewrite a generated attestation chain: ${error.javaClass.simpleName}")
-            }
+            reply.setDataSize(0)
+            reply.setDataPosition(0)
+            reply.writeNoException()
+            reply.writeTypedObject(metadata, 0)
+            OverrideReply(0, reply)
+        } catch (_: Throwable) {
             Skip
         }
     }

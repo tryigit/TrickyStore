@@ -122,7 +122,7 @@ public final class CertHack {
                 byte[] issuerChainEncoded,
                 boolean leafOnlySafe
         ) {
-            this.certificates = certificates.clone();
+            this.certificates = certificates;
             this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded");
             this.issuerChainEncoded = Objects.requireNonNull(issuerChainEncoded, "issuerChainEncoded");
             this.passthrough = false;
@@ -793,7 +793,6 @@ public final class CertHack {
             Certificate[] replacement = cached.certificateCopy();
             return replacement == null ? caList : replacement;
         } catch (Throwable error) {
-            Logger.e("Could not resolve a cached attestation chain", error);
             return null;
         }
     }
@@ -820,7 +819,6 @@ public final class CertHack {
             State currentState = state;
             byte[] leafEncoded = caList[0].getEncoded();
             if (leafEncoded.length == 0 || leafEncoded.length > MAX_LEAF_CERTIFICATE_BYTES) {
-                Logger.e("Attestation leaf certificate has an invalid size");
                 return caList;
             }
             CacheKey cacheKey = new CacheKey(leafEncoded);
@@ -925,7 +923,6 @@ public final class CertHack {
                 }
             }
             if (list.isEmpty()) {
-                Logger.w("No compatible keybox is available for security level (isStrongbox=" + isStrongbox + ")");
                 return caList;
             }
 
@@ -936,7 +933,6 @@ public final class CertHack {
             if (signingAlgorithm == 0) return caList;
 
             if (verifiedBootKey == null || verifiedBootHash == null) {
-                Logger.e("Verified boot key/hash is unavailable; preserving the original certificate chain");
                 return caList;
             }
 
@@ -959,9 +955,6 @@ public final class CertHack {
                     verifiedBootKey,
                     verifiedBootHash);
             if (rewrittenDer == null || rewrittenDer.length == 0 || rewrittenDer.length > MAX_LEAF_CERTIFICATE_BYTES) {
-                if (rewrittenDer != null && rewrittenDer.length > MAX_LEAF_CERTIFICATE_BYTES) {
-                    Logger.e("Rewritten certificate exceeds maximum leaf size: " + rewrittenDer.length);
-                }
                 return caList;
             }
             Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer);
@@ -983,7 +976,6 @@ public final class CertHack {
             }
             return result;
         } catch (Throwable t) {
-            Logger.e("Exception in hackCertificateChain", t);
             return caList;
         } finally {
             if (keyId != null) Arrays.fill(keyId, (byte) 0);
@@ -1000,6 +992,7 @@ public final class CertHack {
 
 
     private static Map<Integer, byte[]> presentIdOverrides(int uid, int mask) {
+        if (mask == 0) return Collections.emptyMap();
         Map<Integer, byte[]> overrides = new HashMap<>();
         for (int index = 0; index < ATTESTATION_ID_TAGS.length; index++) {
             if ((mask & (1 << index)) == 0) continue;

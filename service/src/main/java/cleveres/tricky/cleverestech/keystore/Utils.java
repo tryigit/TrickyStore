@@ -133,7 +133,6 @@ public final class Utils {
             return (X509Certificate) factory.generateCertificate(
                     new ByteArrayInputStream(encoded));
         } catch (CertificateException | ClassCastException error) {
-            Log.w(TAG, "Could not parse an X.509 certificate");
             return null;
         }
     }
@@ -152,7 +151,6 @@ public final class Utils {
         try {
             return x509Certificate.getExtensionValue(ANDROID_ATTESTATION_EXTENSION_OID) != null;
         } catch (RuntimeException error) {
-            Log.w(TAG, "Could not inspect Android attestation extension");
             return false;
         }
     }
@@ -179,7 +177,6 @@ public final class Utils {
             }
             return certificates;
         } catch (CertificateException error) {
-            Log.w(TAG, "Could not parse an X.509 certificate chain");
             return List.of();
         }
     }

@@ -225,6 +225,52 @@ class GenerateKeyTimingFastPathTest {
         assertTrue("Eager CertificateFactory call must not exist on the rewrite completion path", eagerFactory < 0)
     }
 
+    @Test
+    fun `generateKey reply stream reuses existing reply parcel in place without Parcel obtain allocation`() {
+        val root = locateRoot()
+        val source =
+            File(
+                root,
+                "service/src/main/java/cleveres/tricky/cleverestech/SecurityLevelInterceptor.kt",
+            ).readText()
+        val postTransact = source.indexOf("override fun onPostTransact")
+        val inPlaceReset = source.indexOf("reply.setDataSize(0)", postTransact)
+        val inPlacePosition = source.indexOf("reply.setDataPosition(0)", postTransact)
+        val inPlaceNoException = source.indexOf("reply.writeNoException()", postTransact)
+        val inPlaceTypedObject = source.indexOf("reply.writeTypedObject(metadata, 0)", postTransact)
+        val inPlaceReply = source.indexOf("OverrideReply(0, reply)", postTransact)
+        val parcelObtain = source.indexOf("Parcel.obtain()", postTransact)
+
+        assertTrue(postTransact >= 0)
+        assertTrue(inPlaceReset > postTransact)
+        assertTrue(inPlacePosition > inPlaceReset)
+        assertTrue(inPlaceNoException > inPlacePosition)
+        assertTrue(inPlaceTypedObject > inPlaceNoException)
+        assertTrue(inPlaceReply > inPlaceTypedObject)
+        assertTrue("Hot path onPostTransact must not allocate new Parcel instances via Parcel.obtain()", parcelObtain < 0)
+    }
+
+    @Test
+    fun `hot path interceptor and CertHack completion path contain zero Logger calls`() {
+        val root = locateRoot()
+        val interceptorSource =
+            File(
+                root,
+                "service/src/main/java/cleveres/tricky/cleverestech/SecurityLevelInterceptor.kt",
+            ).readText()
+        assertFalse("SecurityLevelInterceptor must contain zero Logger calls", interceptorSource.contains("Logger."))
+
+        val certHackSource =
+            File(
+                root,
+                "service/src/main/java/cleveres/tricky/cleverestech/keystore/CertHack.java",
+            ).readText()
+        val method = certHackSource.indexOf("public static Certificate[] hackCertificateChain")
+        val methodEnd = certHackSource.indexOf("private static Config.AttestationPatchLevels keepPatchLevels", method)
+        val hackMethodBody = certHackSource.substring(method, methodEnd)
+        assertFalse("CertHack.hackCertificateChain must contain zero Logger calls", hackMethodBody.contains("Logger."))
+    }
+
     private fun locateRoot(): File {
         var current = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
         repeat(6) {
