@@ -437,3 +437,83 @@ fn encode_signed_certificate(
         .map_err(|_| Error::Encoding)?;
     encode_sequence(&[tbs_der, algorithm_der, &signature])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_sequence_and_explicit_length_boundaries() {
+        let zero = encode_sequence(&[]).unwrap();
+        assert_eq!(zero, &[0x30, 0x00]);
+
+        let payload_127 = vec![0x11; 127];
+        let seq_127 = encode_sequence(&[&payload_127]).unwrap();
+        assert_eq!(&seq_127[..2], &[0x30, 0x7f]);
+        assert_eq!(&seq_127[2..], payload_127.as_slice());
+
+        let payload_128 = vec![0x22; 128];
+        let seq_128 = encode_sequence(&[&payload_128]).unwrap();
+        assert_eq!(&seq_128[..3], &[0x30, 0x81, 0x80]);
+        assert_eq!(&seq_128[3..], payload_128.as_slice());
+
+        let payload_255 = vec![0x33; 255];
+        let seq_255 = encode_sequence(&[&payload_255]).unwrap();
+        assert_eq!(&seq_255[..3], &[0x30, 0x81, 0xff]);
+        assert_eq!(&seq_255[3..], payload_255.as_slice());
+
+        let payload_256 = vec![0x44; 256];
+        let seq_256 = encode_sequence(&[&payload_256]).unwrap();
+        assert_eq!(&seq_256[..4], &[0x30, 0x82, 0x01, 0x00]);
+        assert_eq!(&seq_256[4..], payload_256.as_slice());
+
+        let payload_65535 = vec![0x55; 65535];
+        let seq_65535 = encode_sequence(&[&payload_65535]).unwrap();
+        assert_eq!(&seq_65535[..4], &[0x30, 0x82, 0xff, 0xff]);
+        assert_eq!(&seq_65535[4..], payload_65535.as_slice());
+
+        let payload_65536 = vec![0x66; 65536];
+        let seq_65536 = encode_sequence(&[&payload_65536]).unwrap();
+        assert_eq!(&seq_65536[..5], &[0x30, 0x83, 0x01, 0x00, 0x00]);
+        assert_eq!(&seq_65536[5..], payload_65536.as_slice());
+
+        let payload_max = vec![0x77; MAX_CERTIFICATE_DER_BYTES];
+        let seq_max = encode_sequence(&[&payload_max]).unwrap();
+        assert_eq!(&seq_max[..5], &[0x30, 0x83, 0x04, 0x00, 0x00]);
+        assert_eq!(&seq_max[5..], payload_max.as_slice());
+
+        let payload_over = vec![0x88; MAX_CERTIFICATE_DER_BYTES + 1];
+        assert_eq!(encode_sequence(&[&payload_over]), Err(Error::Bounds));
+
+        // Test encode_explicit (tag < 31)
+        let exp_0 = encode_explicit(3, &[]).unwrap();
+        assert_eq!(exp_0, &[0xa3, 0x00]);
+
+        let exp_127 = encode_explicit(3, &payload_127).unwrap();
+        assert_eq!(&exp_127[..2], &[0xa3, 0x7f]);
+        assert_eq!(&exp_127[2..], payload_127.as_slice());
+
+        let exp_128 = encode_explicit(3, &payload_128).unwrap();
+        assert_eq!(&exp_128[..3], &[0xa3, 0x81, 0x80]);
+        assert_eq!(&exp_128[3..], payload_128.as_slice());
+
+        let exp_256 = encode_explicit(3, &payload_256).unwrap();
+        assert_eq!(&exp_256[..4], &[0xa3, 0x82, 0x01, 0x00]);
+        assert_eq!(&exp_256[4..], payload_256.as_slice());
+
+        let exp_65536 = encode_explicit(3, &payload_65536).unwrap();
+        assert_eq!(&exp_65536[..5], &[0xa3, 0x83, 0x01, 0x00, 0x00]);
+        assert_eq!(&exp_65536[5..], payload_65536.as_slice());
+
+        let exp_max = encode_explicit(3, &payload_max).unwrap();
+        assert_eq!(&exp_max[..5], &[0xa3, 0x83, 0x04, 0x00, 0x00]);
+        assert_eq!(&exp_max[5..], payload_max.as_slice());
+
+        assert_eq!(encode_explicit(3, &payload_over), Err(Error::Bounds));
+
+        // Test encode_explicit (tag >= 31, uses Any::new)
+        let exp_high = encode_explicit(31, &[0x01, 0x02]).unwrap();
+        assert_eq!(&exp_high[..3], &[0xbf, 0x1f, 0x02]);
+        assert_eq!(&exp_high[3..], &[0x01, 0x02]);
+    }
+}

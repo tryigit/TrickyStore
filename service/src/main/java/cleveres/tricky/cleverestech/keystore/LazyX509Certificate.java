@@ -56,7 +56,12 @@ public final class LazyX509Certificate extends X509Certificate {
     private volatile X509Certificate delegate;
 
     public LazyX509Certificate(byte[] der) {
-        this.der = Objects.requireNonNull(der, "der").clone();
+        this(der, true);
+    }
+
+    LazyX509Certificate(byte[] der, boolean copy) {
+        Objects.requireNonNull(der, "der");
+        this.der = copy ? der.clone() : der;
     }
 
     boolean hasAttestationExtension() {
@@ -379,8 +384,12 @@ public final class LazyX509Certificate extends X509Certificate {
         if (other instanceof LazyX509Certificate lazy) {
             return Arrays.equals(this.der, lazy.der);
         }
-        if (other instanceof Certificate) {
-            return delegate().equals(other);
+        if (other instanceof Certificate cert) {
+            try {
+                return Arrays.equals(this.der, cert.getEncoded());
+            } catch (CertificateEncodingException ignored) {
+                return false;
+            }
         }
         return false;
     }

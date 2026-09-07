@@ -217,7 +217,7 @@ class GenerateKeyTimingFastPathTest {
             ).readText()
         val method = source.indexOf("public static Certificate[] hackCertificateChain")
         val backendRewrite = source.indexOf("byte[] rewrittenDer = CertificateBackend.rewrite", method)
-        val lazyLeaf = source.indexOf("Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer)", backendRewrite)
+        val lazyLeaf = source.indexOf("Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer", backendRewrite)
         val eagerFactory = source.indexOf("CERTIFICATE_FACTORY.get().generateCertificate", backendRewrite)
 
         assertTrue(backendRewrite > method)

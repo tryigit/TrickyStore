@@ -16,10 +16,13 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import java.io.ByteArrayInputStream;
 import java.math.BigInteger;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.NoSuchProviderException;
 import java.security.Security;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Date;
 import java.util.concurrent.CountDownLatch;
@@ -100,7 +103,32 @@ public class LazyX509CertificateTest {
                 lazy1.isDelegateInstantiatedForTesting());
         assertFalse(lazy2.isDelegateInstantiatedForTesting());
 
-        assertTrue("Lazy cert must equal genuine cert with same DER", lazy1.equals(original));
+        LazyX509Certificate lazyNoDelegate = new LazyX509Certificate(encoded);
+        assertTrue("Lazy cert must equal genuine cert with same DER", lazyNoDelegate.equals(original));
+        assertFalse("Equality check against genuine cert must not instantiate delegate",
+                lazyNoDelegate.isDelegateInstantiatedForTesting());
+        assertTrue("Genuine cert must equal lazy cert with same DER", original.equals(lazyNoDelegate));
+        assertFalse("Equality check from genuine cert must not instantiate delegate",
+                lazyNoDelegate.isDelegateInstantiatedForTesting());
+        assertEquals("Hash codes must match between lazy and genuine cert", original.hashCode(), lazyNoDelegate.hashCode());
+        assertFalse("HashCode check must not instantiate delegate",
+                lazyNoDelegate.isDelegateInstantiatedForTesting());
+
+        try {
+            CertificateFactory sunFactory = CertificateFactory.getInstance("X.509", "SUN");
+            X509Certificate sunCert = (X509Certificate) sunFactory.generateCertificate(new ByteArrayInputStream(encoded));
+            assertEquals("Standard platform cert hash must match lazy cert hash", sunCert.hashCode(), lazyNoDelegate.hashCode());
+        } catch (NoSuchProviderException ignored) {
+            // SUN provider not on Android, only on JVM
+        }
+    }
+
+    @Test
+    public void zeroCopyConstructorSharesArrayWithoutCloning() {
+        byte[] buffer = new byte[] { 0x30, 0x03, 0x02, 0x01, 0x01 };
+        LazyX509Certificate lazy = new LazyX509Certificate(buffer, false);
+        assertArrayEquals(buffer, lazy.getEncoded());
+        assertFalse(lazy.isDelegateInstantiatedForTesting());
     }
 
     @Test

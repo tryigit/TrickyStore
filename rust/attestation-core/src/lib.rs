@@ -1190,4 +1190,46 @@ mod tests {
     fn assert_sorted(fields: &[TaggedTlv]) {
         assert!(fields.windows(2).all(|pair| pair[0].tag <= pair[1].tag));
     }
+
+    #[test]
+    fn encode_sequence_length_boundaries() {
+        let zero = encode_sequence([]).unwrap();
+        assert_eq!(zero, &[0x30, 0x00]);
+
+        let payload_127 = vec![0xaa; 127];
+        let enc_127 = encode_sequence([payload_127.as_slice()]).unwrap();
+        assert_eq!(&enc_127[..2], &[0x30, 0x7f]);
+        assert_eq!(&enc_127[2..], payload_127.as_slice());
+
+        let payload_128 = vec![0xbb; 128];
+        let enc_128 = encode_sequence([payload_128.as_slice()]).unwrap();
+        assert_eq!(&enc_128[..3], &[0x30, 0x81, 0x80]);
+        assert_eq!(&enc_128[3..], payload_128.as_slice());
+
+        let payload_255 = vec![0xcc; 255];
+        let enc_255 = encode_sequence([payload_255.as_slice()]).unwrap();
+        assert_eq!(&enc_255[..3], &[0x30, 0x81, 0xff]);
+        assert_eq!(&enc_255[3..], payload_255.as_slice());
+
+        let payload_256 = vec![0xdd; 256];
+        let enc_256 = encode_sequence([payload_256.as_slice()]).unwrap();
+        assert_eq!(&enc_256[..4], &[0x30, 0x82, 0x01, 0x00]);
+        assert_eq!(&enc_256[4..], payload_256.as_slice());
+
+        let payload_65535 = vec![0xee; 65535];
+        let enc_65535 = encode_sequence([payload_65535.as_slice()]).unwrap();
+        assert_eq!(&enc_65535[..4], &[0x30, 0x82, 0xff, 0xff]);
+        assert_eq!(&enc_65535[4..], payload_65535.as_slice());
+
+        let payload_max = vec![0x11; MAX_ATTESTATION_EXTENSION_BYTES];
+        let enc_max = encode_sequence([payload_max.as_slice()]).unwrap();
+        assert_eq!(&enc_max[..5], &[0x30, 0x83, 0x01, 0x00, 0x00]);
+        assert_eq!(&enc_max[5..], payload_max.as_slice());
+
+        let payload_over = vec![0x22; MAX_ATTESTATION_EXTENSION_BYTES + 1];
+        assert_eq!(
+            encode_sequence([payload_over.as_slice()]),
+            Err(Error::Bounds)
+        );
+    }
 }

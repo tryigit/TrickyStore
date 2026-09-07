@@ -957,7 +957,7 @@ public final class CertHack {
             if (rewrittenDer == null || rewrittenDer.length == 0 || rewrittenDer.length > MAX_LEAF_CERTIFICATE_BYTES) {
                 return caList;
             }
-            Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer);
+            Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer, false);
             Certificate[] result = new Certificate[prepared.issuerChain.length + 1];
             result[0] = rewrittenLeaf;
             System.arraycopy(prepared.issuerChain, 0, result, 1, prepared.issuerChain.length);
