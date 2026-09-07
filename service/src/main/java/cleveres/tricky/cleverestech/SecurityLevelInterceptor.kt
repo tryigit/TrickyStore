@@ -32,15 +32,15 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): Result {
-        if (
-            code == generateKeyTransaction &&
-            CertHack.canHack() &&
-            Config.needHack(callingUid)
-        ) {
-            // Both default attestation and caller-selected AttestKey continue to hardware.
-            // Hardware executes the key generation natively without custom exception replies
-            // or parcel byte mutation.
-            return Continue
+        if (code == generateKeyTransaction) {
+            // Caller-selected AttestKeys (!usesDefaultAttestationKey) must execute natively on hardware KeyMint.
+            if (!Utils.usesDefaultAttestationKey(data)) {
+                return Continue
+            }
+
+            if (CertHack.canHack() && Config.needHack(callingUid)) {
+                return Continue
+            }
         }
 
         return Skip

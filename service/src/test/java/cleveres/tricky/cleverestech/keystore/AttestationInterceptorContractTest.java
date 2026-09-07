@@ -71,8 +71,8 @@ public class AttestationInterceptorContractTest {
             assertSame(BinderInterceptor.Skip.INSTANCE, postResult);
             childCert.verify(parent.getPublic());
 
-            backend.verify(CertHack::canHack);
-            backend.verifyNoMoreInteractions();
+            backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()), never());
+            backend.verifyNoInteractions();
         } finally {
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
         }
@@ -103,11 +103,25 @@ public class AttestationInterceptorContractTest {
                         target, code, 0, 10_001, 42, explicitRequest);
                 assertSame(BinderInterceptor.Continue.INSTANCE, explicitResult);
 
-                backend.verify(CertHack::canHack, org.mockito.Mockito.times(2));
+                backend.verify(CertHack::canHack, org.mockito.Mockito.times(1));
                 backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()), never());
             }
         } finally {
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
+        }
+    }
+
+    @Test
+    public void callerSelectedAttestKeyContinuesEvenWhenCertHackCannotHack() throws Exception {
+        Binder target = new Binder();
+        int code = field(SecurityLevelInterceptor.class, "generateKeyTransaction").getInt(null);
+        Parcel explicitRequest = AttestationRequestContractTest.request(true);
+        try (MockedStatic<CertHack> backend = mockStatic(CertHack.class)) {
+            backend.when(CertHack::canHack).thenReturn(false);
+            BinderInterceptor.Result result = new SecurityLevelInterceptor().onPreTransact(
+                    target, code, 0, 10_001, 42, explicitRequest);
+            assertSame(BinderInterceptor.Continue.INSTANCE, result);
+            backend.verify(CertHack::canHack, never());
         }
     }
 
