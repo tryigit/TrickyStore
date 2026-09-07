@@ -1,6 +1,7 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
 #[path = "pidfd_signal.rs"]
 mod pidfd_signal;
+mod restore_janitor;
 
 use cleverestricky_service_core::secure_fs::TrustedDir;
 use std::collections::HashMap;
@@ -76,6 +77,10 @@ pub fn prepare_root() -> io::Result<TrustedDir> {
     }
     let parent = TrustedDir::open(Path::new(CONFIG_PARENT))?;
     prepare_root_from(&parent)
+}
+
+pub(crate) fn spawn_restore_janitor(root: Arc<TrustedDir>) -> io::Result<()> {
+    restore_janitor::spawn_restore_janitor(root)
 }
 
 fn prepare_root_from(parent: &TrustedDir) -> io::Result<TrustedDir> {
@@ -567,6 +572,8 @@ fn finish_streaming_restore_mutation(token: &str) -> io::Result<()> {
     }
     transaction.mutation_in_progress = false;
     transaction.touched = Instant::now();
+    drop(transactions);
+    restore_janitor::notify();
     Ok(())
 }
 
@@ -732,6 +739,8 @@ fn restore_begin(root: &TrustedDir, request: &str) -> io::Result<()> {
             touched: Instant::now(),
         },
     );
+    drop(transactions);
+    restore_janitor::notify();
     Ok(())
 }
 
