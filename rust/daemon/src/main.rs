@@ -66,7 +66,7 @@ fn process_identity_record(pid: u32) -> io::Result<String> {
     if stat.len() as u64 > MAX_PROC_STAT_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "process status exceeds its size limit",
+            "process status exceeds size limit",
         ));
     }
     let start_ticks = parse_process_start_ticks(&stat)
@@ -181,6 +181,7 @@ fn run() -> io::Result<()> {
     validate_module_directory(&module_dir)?;
 
     let config_root = Arc::new(config_file_broker::prepare_root()?);
+    config_file_broker::spawn_restore_janitor(Arc::clone(&config_root))?;
     let web_listener = match bind_abstract(DAEMON_SOCKET_NAME) {
         Ok(listener) => listener,
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
