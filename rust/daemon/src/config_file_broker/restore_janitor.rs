@@ -6,7 +6,7 @@ use super::{
 use cleverestricky_service_core::secure_fs::TrustedDir;
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Condvar, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
