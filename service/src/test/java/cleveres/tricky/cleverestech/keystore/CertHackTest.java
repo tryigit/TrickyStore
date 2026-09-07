@@ -200,12 +200,22 @@ public class CertHackTest {
         CertHack.KeyBox filenameTeeBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "device_tee.xml");
         assertEquals(CertHack.KeyboxSecurityLevel.TEE, CertHack.classifyKeyboxSecurityLevel(filenameTeeBox));
 
-        CertHack.KeyBox unclassifiedBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "keybox.xml");
+        CertHack.KeyBox standardBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "keybox.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.TEE, CertHack.classifyKeyboxSecurityLevel(standardBox));
+        assertTrue(CertHack.isTeeKeybox(standardBox));
+        assertFalse(CertHack.isStrongBoxKeybox(standardBox));
+        assertEquals(List.of(standardBox), CertHack.filterKeyboxesBySecurityLevel(List.of(standardBox), false));
+        assertTrue(CertHack.filterKeyboxesBySecurityLevel(List.of(standardBox), true).isEmpty());
+
+        CertHack.KeyBox unknownBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "unknown.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(unknownBox));
+        assertFalse(CertHack.isTeeKeybox(unknownBox));
+        assertFalse(CertHack.isStrongBoxKeybox(unknownBox));
+        assertTrue(CertHack.filterKeyboxesBySecurityLevel(List.of(unknownBox), false).isEmpty());
+        assertTrue(CertHack.filterKeyboxesBySecurityLevel(List.of(unknownBox), true).isEmpty());
+
+        CertHack.KeyBox unclassifiedBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "custom_unclassified.xml");
         assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(unclassifiedBox));
-        assertFalse(CertHack.isTeeKeybox(unclassifiedBox));
-        assertFalse(CertHack.isStrongBoxKeybox(unclassifiedBox));
-        assertTrue(CertHack.filterKeyboxesBySecurityLevel(List.of(unclassifiedBox), false).isEmpty());
-        assertTrue(CertHack.filterKeyboxesBySecurityLevel(List.of(unclassifiedBox), true).isEmpty());
     }
 
     @Test

@@ -522,6 +522,9 @@ public final class CertHack {
             if (lower.contains("strongbox")) {
                 return KeyboxSecurityLevel.STRONGBOX;
             }
+            if (lower.contains("unknown") || lower.contains("unclassified")) {
+                return KeyboxSecurityLevel.UNKNOWN;
+            }
             if (lower.contains("tee")) {
                 return KeyboxSecurityLevel.TEE;
             }
@@ -540,7 +543,14 @@ public final class CertHack {
                 }
             }
         }
-        return KeyboxSecurityLevel.UNKNOWN;
+        if (keybox.certificates() == null || keybox.certificates().isEmpty()) {
+            return KeyboxSecurityLevel.UNKNOWN;
+        }
+        // In standard Android Keystore architecture, standard keyboxes (such as keybox.xml,
+        // OEM provisioned keys, and standard CA chains) do not contain "tee" markers in filenames
+        // or DNs and are by definition TEE keyboxes. Unless explicitly identified as StrongBox
+        // or failing provenance, valid keyboxes default to TEE.
+        return KeyboxSecurityLevel.TEE;
     }
 
     private static boolean isTeeDn(String dn) {

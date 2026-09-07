@@ -311,4 +311,32 @@ class KeyboxVerifierCheckFileTest {
         assertEquals(KeyboxVerifier.Status.ERROR, result.status)
         assertEquals("TEE", result.securityLevel)
     }
+
+    @Test
+    fun `checkFile classifies TEE securityLevel for standard keybox without StrongBox markers`() {
+        tempFile.writeText("content")
+        val mockKeyBox = Mockito.mock(CertHack.KeyBox::class.java)
+        val mockCert = Mockito.mock(java.security.cert.X509Certificate::class.java)
+        Mockito.`when`(mockKeyBox.filename()).thenReturn("keybox.xml")
+        Mockito.`when`(mockKeyBox.certificates()).thenReturn(listOf(mockCert))
+
+        KeyboxLoader.fileParserOverride = { _, _ ->
+            KeyboxLoader.ParsedFile(
+                snapshotSha256 = null,
+                keyboxes = listOf(mockKeyBox),
+            )
+        }
+
+        val result = KeyboxVerifier.checkFile(
+            tempFile,
+            KeyboxLoader.FileScope.CONFIG_ROOT,
+            tempFile.name,
+            "storage123",
+        ) {
+            throw RuntimeException("test")
+        }
+
+        assertEquals(KeyboxVerifier.Status.ERROR, result.status)
+        assertEquals("TEE", result.securityLevel)
+    }
 }
