@@ -6,7 +6,7 @@ use super::{
 use cleverestricky_service_core::secure_fs::TrustedDir;
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Condvar, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,12 +29,18 @@ pub(super) fn spawn_restore_janitor(root: Arc<TrustedDir>) -> io::Result<()> {
     Ok(())
 }
 
+fn recover_poison<T, U>(mutex: &Mutex<T>, poisoned: PoisonError<U>) -> U {
+    mutex.clear_poison();
+    poisoned.into_inner()
+}
+
 fn run_restore_janitor(root: Arc<TrustedDir>) {
-    let mut transactions = match restore_transactions().lock() {
+    let mutex = restore_transactions();
+    let mut transactions = match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             eprintln!("cleverestrickyd: restore janitor recovered poisoned transaction state");
-            poisoned.into_inner()
+            recover_poison(mutex, poisoned)
         }
     };
     loop {
@@ -46,7 +52,7 @@ fn run_restore_janitor(root: Arc<TrustedDir>) {
                     Ok(result) => result,
                     Err(poisoned) => {
                         eprintln!("cleverestrickyd: restore janitor recovered poisoned timed wait");
-                        poisoned.into_inner()
+                        recover_poison(mutex, poisoned)
                     }
                 };
                 transactions = guard;
@@ -56,7 +62,7 @@ fn run_restore_janitor(root: Arc<TrustedDir>) {
                     Ok(guard) => guard,
                     Err(poisoned) => {
                         eprintln!("cleverestrickyd: restore janitor recovered poisoned wait");
-                        poisoned.into_inner()
+                        recover_poison(mutex, poisoned)
                     }
                 };
             }
@@ -83,6 +89,7 @@ fn next_expiry_wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     fn transaction(touched: Instant, mutation_in_progress: bool) -> RestoreTransaction {
         RestoreTransaction {
@@ -140,5 +147,21 @@ mod tests {
         );
 
         assert_eq!(next_expiry_wait(&transactions, now), None);
+    }
+
+    #[test]
+    fn poison_recovery_clears_shared_mutex_state() {
+        let mutex = Mutex::new(());
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = mutex.lock().expect("initial lock");
+            panic!("poison test mutex");
+        }));
+        assert!(mutex.is_poisoned());
+
+        let poisoned = mutex.lock().expect_err("mutex should remain poisoned until recovery");
+        drop(recover_poison(&mutex, poisoned));
+
+        assert!(!mutex.is_poisoned());
+        assert!(mutex.lock().is_ok());
     }
 }
