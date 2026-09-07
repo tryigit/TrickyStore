@@ -94,8 +94,8 @@ class SecurityLevelInterceptor : BinderInterceptor() {
 
             // Parse only the leaf first. A normal asymmetric key without an Android attestation
             // challenge still has a self-signed X.509 leaf, but it must never cross the Rust
-            // certificate backend boundary. 2.5.8 rejected that case locally; preserving the same
-            // zero-backend fast path avoids a measurable non-attested-only UDS/parser cost.
+            // certificate backend boundary. Preserving this zero-backend fast path avoids
+            // a measurable non-attested-only UDS/parser cost.
             val originalLeaf = Utils.getLeafCertificate(metadata)
             if (
                 originalLeaf == null ||

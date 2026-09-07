@@ -38,11 +38,9 @@ Keybox verification और application-specific attestation identity handling।
 
 https://github.com/tryigit/CleveresTricky/pull/79
 
-**#1199, 2026-09-06**
-
-क्षमता-जागरूक StrongBox फ़ॉलबैक रूटिंग, App AttestKey के लिए हार्डवेयर हस्ताक्षर संरक्षण, सुरक्षा स्तर के आधार पर उम्मीदवारों को फ़िल्टर करना, और WebUI हार्डवेयर बैज।
-
-https://github.com/tryigit/CleveresTricky/pull/1199
+- **#1199, 2026-09-07**
+  स्कोप-जागरूक StrongBox और TEE keybox इंडेक्सिंग, कॉलर-चयनित AttestKey हस्ताक्षर संरक्षण, रीडबैक कैश स्थिरता, और WebUI हार्डवेयर बैज।
+  https://github.com/tryigit/CleveresTricky/pull/1199
 
 ## Profiles, application scope और runtime
 
@@ -106,12 +104,6 @@ StrongBox to TEE redirection और attestation security-level harmonization। 
 
 https://github.com/tryigit/CleveresTricky/pull/1132
 
-**#1199, 2026-09-06**
-
-क्षमता-जागरूक StrongBox फ़ॉलबैक रूटिंग: StrongBox keybox उपलब्ध न होने पर हार्डवेयर KeyMint जेनरेशन से पहले शीघ्र अस्वीकृति, जिससे एलियास टकराव रुकता है और TEE पर सहज फ़ॉलबैक सुनिश्चित होता है।
-
-https://github.com/tryigit/CleveresTricky/pull/1199
-
 ## समयरेखा
 
 | तारीख | PR | क्षेत्र |
@@ -122,4 +114,4 @@ https://github.com/tryigit/CleveresTricky/pull/1199
 | 2026-08-09 | #871 | Dual-SIM और app-facing identity |
 | 2026-08-09 | #876 | Rust/native runtime architecture |
 | 2026-08-30 | #1132 | StrongBox और TEE redirection |
-| 2026-09-06 | #1199 | StrongBox रूटिंग और AttestKey संगतता |
+| 2026-09-07 | #1199 | StrongBox और TEE keybox इंडेक्सिंग और AttestKey संरक्षण |

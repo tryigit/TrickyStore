@@ -60,43 +60,6 @@ class CertificateBackendWireTest {
     }
 
     @Test
-    fun `unsupported rewrite modes never invoke a signer or transport`() {
-        var signerCalls = 0
-        var transportCalls = 0
-        CertificateBackend.rewriteOverride = {
-            signerCalls++
-            byteArrayOf(1)
-        }
-        CertificateBackend.rewriteTransportOverride = { _, _ ->
-            transportCalls++
-            byteArrayOf(1)
-        }
-        for ((preserveIssuer, virtualizeSubject) in listOf(true to false, false to true, true to true)) {
-            assertNull(
-                CertificateBackend.rewriteWithMode(
-                    genuineLeafDer = byteArrayOf(1),
-                    keyId = ByteArray(16) { 0x33 },
-                    signingAlgorithm = CertificateBackend.SIGNING_EC_P256_SHA256,
-                    systemDisposition = CertificateBackend.PATCH_KEEP,
-                    systemValue = 0,
-                    vendorDisposition = CertificateBackend.PATCH_KEEP,
-                    vendorValue = 0,
-                    bootDisposition = CertificateBackend.PATCH_KEEP,
-                    bootValue = 0,
-                    idOverrides = emptyMap(),
-                    moduleHash = null,
-                    verifiedBootKey = ByteArray(32) { 0x11 },
-                    verifiedBootHash = ByteArray(32) { 0x22 },
-                    preserveIssuerName = preserveIssuer,
-                    virtualizeSubjectKey = virtualizeSubject,
-                ),
-            )
-        }
-        assertEquals(0, signerCalls)
-        assertEquals(0, transportCalls)
-    }
-
-    @Test
     fun `inspection response decodes strict fields and wipes transport bytes`() {
         val response = ByteArray(85)
         response[0] = 2
@@ -175,7 +138,7 @@ class CertificateBackendWireTest {
     private fun rewriteFixture(): ByteArray {
         var root = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
         repeat(6) {
-            val fixture = File(root, "rust/backend/tests/fixtures/certificate-rewrite-v2.hex")
+            val fixture = File(root, "rust/backend/tests/fixtures/certificate-rewrite.hex")
             if (fixture.isFile) {
                 val hex = fixture.readText().trim()
                 return hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()

@@ -332,7 +332,7 @@ mod tests {
     fn strict_rewrite_wire_parses_opaque_key_and_bounded_fields() {
         // The managed production serializer emits this same fixture. A one-sided wire
         // version/layout change must fail even when a managed signing oracle still passes.
-        let hex = include_str!("../tests/fixtures/certificate-rewrite-v2.hex").trim();
+        let hex = include_str!("../tests/fixtures/certificate-rewrite.hex").trim();
         assert_eq!(hex.len() % 2, 0);
         let input: Vec<u8> = (0..hex.len())
             .step_by(2)

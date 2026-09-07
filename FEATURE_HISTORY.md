@@ -76,10 +76,6 @@ This page records the public development history of major CleveresTricky feature
   StrongBox to TEE redirection and attestation security-level harmonization. This change was later reverted and is not part of the current `master` state.
   https://github.com/tryigit/CleveresTricky/pull/1132
 
-- **#1199, 2026-09-06**
-  Capability-aware StrongBox fallback routing: early rejection before native KeyMint generation when no StrongBox keybox is present, preventing hardware alias conflicts and ensuring smooth TEE fallback.
-  https://github.com/tryigit/CleveresTricky/pull/1199
-
 ## Feature timeline
 
 | Date | PR | Area |
@@ -90,6 +86,6 @@ This page records the public development history of major CleveresTricky feature
 | 2026-08-09 | #871 | Dual-SIM and app-facing identity |
 | 2026-08-09 | #876 | Rust/native runtime architecture |
 | 2026-08-30 | #1132 | StrongBox and TEE redirection |
-| 2026-09-06 | #1199 | Capability-aware StrongBox routing & AttestKey parity |
+| 2026-09-07 | #1199 | StrongBox and TEE keybox indexing & AttestKey preservation |
 
 All links above point directly to the project's public GitHub development records.

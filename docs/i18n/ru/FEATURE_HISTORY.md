@@ -38,11 +38,9 @@ https://github.com/tryigit/CleveresTricky/pull/77
 
 https://github.com/tryigit/CleveresTricky/pull/79
 
-**#1199, 2026-09-06**
-
-Интеллектуальная маршрутизация StrongBox fallback, сохранение аппаратных подписей для App AttestKey, фильтрация кандидатов по уровню безопасности и значки аппаратного уровня в WebUI.
-
-https://github.com/tryigit/CleveresTricky/pull/1199
+- **#1199, 2026-09-07**
+  Индексация keybox для StrongBox и TEE с учетом области видимости, нативное сохранение подписей AttestKey, согласованность кэша при чтении и аппаратные значки в WebUI.
+  https://github.com/tryigit/CleveresTricky/pull/1199
 
 ## Профили, app scope и runtime
 
@@ -106,12 +104,6 @@ https://github.com/tryigit/CleveresTricky/pull/952
 
 https://github.com/tryigit/CleveresTricky/pull/1132
 
-**#1199, 2026-09-06**
-
-Интеллектуальная маршрутизация StrongBox fallback: ранний отказ до генерации в аппаратном KeyMint при отсутствии keybox для StrongBox, предотвращающий конфликты псевдонимов и обеспечивающий плавный переход на TEE.
-
-https://github.com/tryigit/CleveresTricky/pull/1199
-
 ## Временная шкала
 
 | Дата | PR | Область |
@@ -122,4 +114,4 @@ https://github.com/tryigit/CleveresTricky/pull/1199
 | 2026-08-09 | #871 | Dual-SIM и app-facing identity |
 | 2026-08-09 | #876 | Rust/native runtime architecture |
 | 2026-08-30 | #1132 | StrongBox и TEE redirection |
-| 2026-09-06 | #1199 | Маршрутизация StrongBox и совместимость AttestKey |
+| 2026-09-07 | #1199 | Индексация keybox StrongBox и TEE & сохранение AttestKey |
