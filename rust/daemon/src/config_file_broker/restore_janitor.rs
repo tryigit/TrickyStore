@@ -1,7 +1,7 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../../NOTICE.
 use super::{
-    prune_stale_restore_transactions, restore_transactions, RestoreTransaction,
-    RESTORE_TRANSACTION_TTL,
+    prune_stale_restore_transactions, refresh_restore_transaction, restore_transactions,
+    RestoreTransaction, RESTORE_TRANSACTION_TTL,
 };
 use cleverestricky_service_core::secure_fs::TrustedDir;
 use std::collections::HashMap;
@@ -147,6 +147,22 @@ mod tests {
         );
 
         assert_eq!(next_expiry_wait(&transactions, now), None);
+    }
+
+    #[test]
+    fn operation_completion_restarts_full_expiry_window() {
+        let before_refresh = Instant::now();
+        let mut refreshed = transaction(before_refresh - RESTORE_TRANSACTION_TTL, false);
+        refresh_restore_transaction(&mut refreshed);
+        assert!(refreshed.touched >= before_refresh);
+
+        let refreshed_at = refreshed.touched;
+        let mut transactions = HashMap::new();
+        transactions.insert("refreshed".to_string(), refreshed);
+        assert_eq!(
+            next_expiry_wait(&transactions, refreshed_at),
+            Some(RESTORE_TRANSACTION_TTL)
+        );
     }
 
     #[test]
