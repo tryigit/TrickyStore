@@ -88,7 +88,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 val newLeaf = rewritten[0].encoded
                 val newChain = Utils.encodeIssuerChain(rewritten)
                 Utils.rewriteKeyMetadataParcel(reply, parsed, newLeaf, newChain)
-                return OverrideReply(resultCode = 0, reply = reply)
+                return OverrideReply(code = 0, reply = reply)
             }
 
             // Contract-compliant fallback for non-standard parcels or test mocks
