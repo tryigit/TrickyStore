@@ -29,12 +29,18 @@ fn detector_does_not_promote_tee_to_strongbox() {
 }
 
 #[test]
-fn detector_preserves_software_security_level() {
+fn detector_rejects_software_security_level() {
     let original = key_description(SOFTWARE, SOFTWARE);
-    let rewritten = rewrite(&original);
+    let result = rewrite_extension(&RewriteRequest {
+        extension_der: &original,
+        patch_levels: PatchLevels::default(),
+        id_overrides: &[],
+        module_hash: None,
+        verified_boot_key: &BOOT_KEY,
+        verified_boot_hash: &BOOT_HASH,
+    });
 
-    assert_eq!(security_level(&rewritten, 1), SOFTWARE);
-    assert_eq!(security_level(&rewritten, 3), SOFTWARE);
+    assert!(result.is_err());
 }
 
 #[test]

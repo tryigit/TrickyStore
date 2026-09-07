@@ -155,7 +155,7 @@ pub fn rewrite_extension(request: &RewriteRequest<'_>) -> Result<RewriteResult, 
     let supports_module_hash = attestation_version >= 400 && keymint_version >= 400;
 
     let valid_hardware = matches!((attestation_level, keymint_level), (1, 1) | (2, 2) | (1, 2));
-    if !valid_hardware && (attestation_level != 0 || keymint_level != 0) {
+    if !valid_hardware {
         return Err(Error::InvalidStructure);
     }
 
