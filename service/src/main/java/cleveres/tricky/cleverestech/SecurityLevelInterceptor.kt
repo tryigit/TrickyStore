@@ -67,7 +67,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         return try {
             reply.readException()
 
-            // Fast parcel check: parse just the byte offsets without allocating the full KeyMetadata
+            // Fast parcel check: parse just the byte offsets without allocating the full KeyMetadata.
             val parsed = Utils.parseKeyMetadataParcel(reply)
             if (parsed != null) {
                 val originalLeaf = cleveres.tricky.cleverestech.keystore.LazyX509Certificate(parsed.leafEncoded, false)
@@ -76,13 +76,25 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 }
 
                 val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
-                val rewritten = CertHack.hackCertificateChain(
-                    originalLeafOnly,
-                    callingUid,
-                    true,
-                )
+                val rewritten =
+                    CertHack.hackCertificateChain(
+                        originalLeafOnly,
+                        callingUid,
+                        true,
+                    )
                 if (rewritten === originalLeafOnly) {
                     return Skip
+                }
+
+                // hackCertificateChain publishes the completed rewrite bytes in its epoch-protected
+                // cache before returning. Reuse those exact bytes here instead of calling getEncoded()
+                // on the rewritten leaf and DER-encoding the issuer chain a second time. A state/epoch
+                // race can legitimately prevent publication, so retain the allocation-heavy fallback.
+                if (
+                    CertHack.applyCachedCertificateChain(reply, parsed) ==
+                        CertHack.CachedParcelAction.REWRITTEN
+                ) {
+                    return OverrideReply(code = 0, reply = reply)
                 }
 
                 val newLeaf = rewritten[0].encoded
@@ -93,7 +105,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 return OverrideReply(code = 0, reply = reply)
             }
 
-            // Contract-compliant fallback for non-standard parcels or test mocks
+            // Contract-compliant fallback for non-standard parcels or test mocks.
             val metadata = reply.readTypedObject(KeyMetadata.CREATOR) ?: return Skip
             if (!Utils.isCertificateChainRewriteCandidate(metadata) && !Utils.hasRewritableLeafCertificate(metadata)) {
                 return Skip
@@ -108,11 +120,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             }
 
             val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
-            val rewritten = CertHack.hackCertificateChain(
-                originalLeafOnly,
-                callingUid,
-                true,
-            )
+            val rewritten =
+                CertHack.hackCertificateChain(
+                    originalLeafOnly,
+                    callingUid,
+                    true,
+                )
             if (rewritten === originalLeafOnly) {
                 return Skip
             }
