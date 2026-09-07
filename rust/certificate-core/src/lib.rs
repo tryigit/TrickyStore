@@ -241,74 +241,34 @@ pub fn rewrite_certificate_prepared(
     if cert_seq.tag() != Tag::Sequence {
         return Err(Error::InvalidCertificate);
     }
-    let cert_fields = split_tlvs(cert_seq.value())?;
-    if cert_fields.len() != 3 {
-        return Err(Error::InvalidCertificate);
-    }
-    if parse_any(cert_fields[1])?.tag() != Tag::Sequence
-        || parse_any(cert_fields[2])?.tag() != Tag::BitString
+    let mut cert_iter = TlvIterator::new(cert_seq.value());
+    let tbs_der = next_required_tlv(&mut cert_iter)?;
+    let outer_algorithm_der = next_required_tlv(&mut cert_iter)?;
+    let outer_signature_der = next_required_tlv(&mut cert_iter)?;
+    if cert_iter.next().is_some()
+        || parse_any(outer_algorithm_der)?.tag() != Tag::Sequence
+        || parse_any(outer_signature_der)?.tag() != Tag::BitString
     {
         return Err(Error::InvalidCertificate);
     }
 
-    let tbs_seq = parse_any(cert_fields[0])?;
+    let tbs_seq = parse_any(tbs_der)?;
     if tbs_seq.tag() != Tag::Sequence {
         return Err(Error::InvalidCertificate);
     }
-    let tbs_fields = split_tlvs(tbs_seq.value())?;
-    if tbs_fields.len() < 8 {
-        return Err(Error::InvalidCertificate);
-    }
-
-    let first_tag = parse_any(tbs_fields[0])?.tag();
-    let has_version = matches!(
-        first_tag,
-        Tag::ContextSpecific {
-            constructed: true,
-            number: TagNumber(0),
-        }
-    );
-
-    let (version, serial, validity, subject, spki, optional_start) = if has_version {
-        (
-            Some(tbs_fields[0]),
-            tbs_fields[1],
-            tbs_fields[4],
-            tbs_fields[5],
-            tbs_fields[6],
-            7,
-        )
-    } else {
-        (
-            None,
-            tbs_fields[0],
-            tbs_fields[3],
-            tbs_fields[4],
-            tbs_fields[5],
-            6,
-        )
-    };
-
-    let extensions_explicit_der = *tbs_fields.last().ok_or(Error::InvalidCertificate)?;
-    let extensions_explicit = parse_any(extensions_explicit_der)?;
-    if !matches!(
-        extensions_explicit.tag(),
-        Tag::ContextSpecific {
-            constructed: true,
-            number: TagNumber(3)
-        }
-    ) {
-        return Err(Error::MissingAttestationExtension);
-    }
-
-    // RFC 5280 sections 4.1 and 4.1.2.1: extensions are legal only on v3 certificates.
-    validate_v3_version(version.ok_or(Error::InvalidCertificate)?)?;
+    let mut tbs_iter = TlvIterator::new(tbs_seq.value());
+    let version = next_required_tlv(&mut tbs_iter)?;
+    validate_v3_version(version)?;
+    let serial = next_required_tlv(&mut tbs_iter)?;
+    let original_tbs_algorithm = next_required_tlv(&mut tbs_iter)?;
+    let original_issuer = next_required_tlv(&mut tbs_iter)?;
+    let validity = next_required_tlv(&mut tbs_iter)?;
+    let subject = next_required_tlv(&mut tbs_iter)?;
+    let spki = next_required_tlv(&mut tbs_iter)?;
 
     if parse_any(serial)?.tag() != Tag::Integer
-        || parse_any(if has_version { tbs_fields[2] } else { tbs_fields[1] })?.tag()
-            != Tag::Sequence
-        || parse_any(if has_version { tbs_fields[3] } else { tbs_fields[2] })?.tag()
-            != Tag::Sequence
+        || parse_any(original_tbs_algorithm)?.tag() != Tag::Sequence
+        || parse_any(original_issuer)?.tag() != Tag::Sequence
         || parse_any(validity)?.tag() != Tag::Sequence
         || parse_any(subject)?.tag() != Tag::Sequence
         || parse_any(spki)?.tag() != Tag::Sequence
@@ -316,52 +276,65 @@ pub fn rewrite_certificate_prepared(
         return Err(Error::InvalidCertificate);
     }
 
-    let optional_end = tbs_fields.len() - 1;
-    if optional_start > optional_end {
-        return Err(Error::InvalidCertificate);
-    }
     let mut issuer_unique_id = None;
     let mut subject_unique_id = None;
-    for field in &tbs_fields[optional_start..optional_end] {
+    let mut extensions_explicit_der = None;
+    for optional in tbs_iter {
+        let field = optional?;
         match parse_any(field)?.tag() {
             Tag::ContextSpecific {
                 constructed: false,
                 number: TagNumber(1),
-            } if issuer_unique_id.is_none() && subject_unique_id.is_none() => {
-                issuer_unique_id = Some(*field);
+            } if issuer_unique_id.is_none()
+                && subject_unique_id.is_none()
+                && extensions_explicit_der.is_none() =>
+            {
+                issuer_unique_id = Some(field);
             }
             Tag::ContextSpecific {
                 constructed: false,
                 number: TagNumber(2),
-            } if subject_unique_id.is_none() => {
-                subject_unique_id = Some(*field);
+            } if subject_unique_id.is_none() && extensions_explicit_der.is_none() => {
+                subject_unique_id = Some(field);
+            }
+            Tag::ContextSpecific {
+                constructed: true,
+                number: TagNumber(3),
+            } if extensions_explicit_der.is_none() => {
+                extensions_explicit_der = Some(field);
             }
             _ => return Err(Error::InvalidCertificate),
         }
     }
 
+    let extensions_explicit_der =
+        extensions_explicit_der.ok_or(Error::MissingAttestationExtension)?;
+    let extensions_explicit = parse_any(extensions_explicit_der)?;
     let extensions_seq = parse_any(extensions_explicit.value())?;
     if extensions_seq.tag() != Tag::Sequence {
         return Err(Error::InvalidCertificate);
     }
-    let extensions = split_tlvs(extensions_seq.value())?;
 
     let mut attestation_info = None;
-    for (index, ext_der) in extensions.iter().enumerate() {
+    let mut extension_count = 0usize;
+    for ext_field in TlvIterator::new(extensions_seq.value()) {
+        let ext_der = ext_field?;
         let parsed = parse_extension(ext_der)?;
         let extn_id = parse_any(parsed.id_der)?;
-        if extn_id.value() == ANDROID_ATTESTATION_OID_BYTES
-            && attestation_info
-                .replace((
-                    index,
-                    parsed.id_der,
-                    parsed.critical_der,
-                    parsed.value_bytes,
-                ))
-                .is_some()
-        {
-            return Err(Error::DuplicateAttestationExtension);
+        if extn_id.value() == ANDROID_ATTESTATION_OID_BYTES {
+            if attestation_info.is_some() {
+                return Err(Error::DuplicateAttestationExtension);
+            }
+            attestation_info = Some((
+                extension_count,
+                parsed.id_der,
+                parsed.critical_der,
+                parsed.value_bytes,
+            ));
         }
+        extension_count = extension_count
+            .checked_add(1)
+            .ok_or(Error::InvalidCertificate)?;
     }
 
     let (index, id_der, critical_der, extn_value) =
@@ -387,39 +360,39 @@ pub fn rewrite_certificate_prepared(
         None => encode_sequence(&[id_der, &new_extn_value_der])?,
     };
 
-    let mut final_extensions = Vec::with_capacity(extensions.len());
-    for (i, ext_der) in extensions.iter().enumerate() {
-        if i == index {
-            final_extensions.push(new_ext.as_slice());
-        } else {
-            final_extensions.push(ext_der);
-        }
-    }
-
-    let new_extensions_seq = encode_sequence(&final_extensions)?;
+    let new_extensions_seq =
+        encode_sequence_replacing_tlv(extensions_seq.value(), index, &new_ext)?;
     let new_extensions_explicit = encode_explicit(3, &new_extensions_seq)?;
 
     let algorithm_der = signature_algorithm_der(request.issuer.algorithm());
-
-    let mut tbs_out = Vec::with_capacity(10);
-    if let Some(v) = version {
-        tbs_out.push(v);
-    }
-    tbs_out.push(serial);
-    tbs_out.push(algorithm_der);
-    tbs_out.push(&request.issuer.issuer_name_der);
-    tbs_out.push(validity);
-    tbs_out.push(subject);
-    tbs_out.push(spki);
+    let mut tbs_out: [&[u8]; 10] = [&[]; 10];
+    let mut tbs_len = 0usize;
+    tbs_out[tbs_len] = version;
+    tbs_len += 1;
+    tbs_out[tbs_len] = serial;
+    tbs_len += 1;
+    tbs_out[tbs_len] = algorithm_der;
+    tbs_len += 1;
+    tbs_out[tbs_len] = &request.issuer.issuer_name_der;
+    tbs_len += 1;
+    tbs_out[tbs_len] = validity;
+    tbs_len += 1;
+    tbs_out[tbs_len] = subject;
+    tbs_len += 1;
+    tbs_out[tbs_len] = spki;
+    tbs_len += 1;
     if let Some(uid) = issuer_unique_id {
-        tbs_out.push(uid);
+        tbs_out[tbs_len] = uid;
+        tbs_len += 1;
     }
     if let Some(uid) = subject_unique_id {
-        tbs_out.push(uid);
+        tbs_out[tbs_len] = uid;
+        tbs_len += 1;
     }
-    tbs_out.push(&new_extensions_explicit);
+    tbs_out[tbs_len] = &new_extensions_explicit;
+    tbs_len += 1;
 
-    let tbs_der = encode_sequence(&tbs_out)?;
+    let tbs_der = encode_sequence(&tbs_out[..tbs_len])?;
 
     let leaf_der = request.issuer.sign_certificate(&tbs_der, algorithm_der)?;
     if leaf_der.len() > MAX_CERTIFICATE_DER_BYTES {
@@ -563,19 +536,70 @@ impl<'a> Iterator for TlvIterator<'a> {
     }
 }
 
-pub(crate) fn split_tlvs(mut encoded: &[u8]) -> Result<Vec<&[u8]>, Error> {
-    let mut output = Vec::new();
-    while !encoded.is_empty() {
-        let (_, rest): (AnyRef<'_>, &[u8]) =
-            X509Decode::from_der_partial(encoded).map_err(|_| Error::InvalidCertificate)?;
-        let consumed = encoded
-            .len()
-            .checked_sub(rest.len())
-            .ok_or(Error::InvalidCertificate)?;
-        output.push(&encoded[..consumed]);
-        encoded = rest;
+fn next_required_tlv<'a>(iter: &mut TlvIterator<'a>) -> Result<&'a [u8], Error> {
+    match iter.next() {
+        Some(field) => field,
+        None => Err(Error::InvalidCertificate),
     }
-    Ok(output)
+}
+
+fn encode_sequence_replacing_tlv(
+    encoded_fields: &[u8],
+    target_index: usize,
+    replacement: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let mut total_len = 0usize;
+    let mut field_count = 0usize;
+    for field in TlvIterator::new(encoded_fields) {
+        let field = field?;
+        let field_len = if field_count == target_index {
+            replacement.len()
+        } else {
+            field.len()
+        };
+        total_len = total_len.checked_add(field_len).ok_or(Error::Encoding)?;
+        field_count = field_count
+            .checked_add(1)
+            .ok_or(Error::InvalidCertificate)?;
+    }
+    if target_index >= field_count || total_len > MAX_CERTIFICATE_DER_BYTES {
+        return Err(Error::Bounds);
+    }
+
+    let mut encoded = Vec::with_capacity(total_len + 5);
+    encoded.push(0x30);
+    push_der_length(&mut encoded, total_len)?;
+    for (index, field) in TlvIterator::new(encoded_fields).enumerate() {
+        let field = field?;
+        encoded.extend_from_slice(if index == target_index {
+            replacement
+        } else {
+            field
+        });
+    }
+    Ok(encoded)
+}
+
+fn push_der_length(encoded: &mut Vec<u8>, total_len: usize) -> Result<(), Error> {
+    if total_len > MAX_CERTIFICATE_DER_BYTES {
+        return Err(Error::Bounds);
+    }
+    if total_len < 128 {
+        encoded.push(total_len as u8);
+    } else if total_len <= 0xff {
+        encoded.push(0x81);
+        encoded.push(total_len as u8);
+    } else if total_len <= 0xffff {
+        encoded.push(0x82);
+        encoded.push((total_len >> 8) as u8);
+        encoded.push((total_len & 0xff) as u8);
+    } else {
+        encoded.push(0x83);
+        encoded.push((total_len >> 16) as u8);
+        encoded.push(((total_len >> 8) & 0xff) as u8);
+        encoded.push((total_len & 0xff) as u8);
+    }
+    Ok(())
 }
 
 fn encode_explicit(tag: u32, inner: &[u8]) -> Result<Vec<u8>, Error> {
@@ -598,23 +622,7 @@ fn encode_explicit(tag: u32, inner: &[u8]) -> Result<Vec<u8>, Error> {
         .to_der()
         .map_err(|_| Error::Encoding);
     }
-    if total_len < 128 {
-        encoded.push(total_len as u8);
-    } else if total_len <= 0xff {
-        encoded.push(0x81);
-        encoded.push(total_len as u8);
-    } else if total_len <= 0xffff {
-        encoded.push(0x82);
-        encoded.push((total_len >> 8) as u8);
-        encoded.push((total_len & 0xff) as u8);
-    } else if total_len <= MAX_CERTIFICATE_DER_BYTES {
-        encoded.push(0x83);
-        encoded.push((total_len >> 16) as u8);
-        encoded.push(((total_len >> 8) & 0xff) as u8);
-        encoded.push((total_len & 0xff) as u8);
-    } else {
-        return Err(Error::Encoding);
-    }
+    push_der_length(&mut encoded, total_len)?;
     encoded.extend_from_slice(inner);
     Ok(encoded)
 }
@@ -629,23 +637,7 @@ fn encode_sequence(fields: &[&[u8]]) -> Result<Vec<u8>, Error> {
     }
     let mut encoded = Vec::with_capacity(total_len + 5);
     encoded.push(0x30);
-    if total_len < 128 {
-        encoded.push(total_len as u8);
-    } else if total_len <= 0xff {
-        encoded.push(0x81);
-        encoded.push(total_len as u8);
-    } else if total_len <= 0xffff {
-        encoded.push(0x82);
-        encoded.push((total_len >> 8) as u8);
-        encoded.push((total_len & 0xff) as u8);
-    } else if total_len <= MAX_CERTIFICATE_DER_BYTES {
-        encoded.push(0x83);
-        encoded.push((total_len >> 16) as u8);
-        encoded.push(((total_len >> 8) & 0xff) as u8);
-        encoded.push((total_len & 0xff) as u8);
-    } else {
-        return Err(Error::Encoding);
-    }
+    push_der_length(&mut encoded, total_len)?;
     for field in fields {
         encoded.extend_from_slice(field);
     }
