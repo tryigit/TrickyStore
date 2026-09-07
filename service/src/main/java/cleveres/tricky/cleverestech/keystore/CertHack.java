@@ -849,8 +849,10 @@ public final class CertHack {
         }
 
         State currentState = state;
-        CachedCertificateChain cached =
-                currentState.certificateCache.get(new CacheKey(parsed.leafEncoded));
+        CachedCertificateChain cached;
+        synchronized (currentState.certificateCache) {
+            cached = currentState.certificateCache.get(new CacheKey(parsed.leafEncoded));
+        }
         if (cached == null || (parsed.hasLeafOnlyCertificate() && !cached.leafOnlySafe)) {
             return CachedParcelAction.MISS;
         }

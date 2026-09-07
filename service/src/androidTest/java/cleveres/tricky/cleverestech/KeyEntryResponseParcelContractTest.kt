@@ -7,8 +7,12 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import cleveres.tricky.cleverestech.keystore.CertHack
 import cleveres.tricky.cleverestech.keystore.Utils
 import java.security.cert.Certificate
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -57,6 +61,46 @@ class KeyEntryResponseParcelContractTest {
             assertEquals("timing-key", metadata.key.alias)
             assertEquals(reply.dataSize(), reply.dataPosition())
         } finally {
+            synchronized(cache) {
+                if (previous == null) {
+                    cache.remove(key)
+                } else {
+                    cache[key] = previous
+                }
+            }
+            reply.recycle()
+        }
+    }
+
+    @Test
+    fun `raw cached reply lookup synchronizes on the certificate cache`() {
+        val originalLeaf = ByteArray(257) { index -> (index * 17).toByte() }
+        val reply = keyEntryReply(originalLeaf, ByteArray(513), 1L)
+        val parsed = requireNotNull(Utils.parseKeyEntryResponseParcel(reply))
+        val cache = certificateCache()
+        val key = cacheKey(originalLeaf)
+        val value = cachedChain(ByteArray(333), ByteArray(777))
+        val previous = synchronized(cache) { cache.put(key, value) }
+        val started = CountDownLatch(1)
+        val completed = CountDownLatch(1)
+        val action = AtomicReference<CertHack.CachedParcelAction>()
+        val lookup =
+            Thread {
+                started.countDown()
+                action.set(CertHack.applyCachedCertificateChain(reply, parsed))
+                completed.countDown()
+            }
+
+        try {
+            synchronized(cache) {
+                lookup.start()
+                assertTrue(started.await(1, TimeUnit.SECONDS))
+                assertFalse(completed.await(250, TimeUnit.MILLISECONDS))
+            }
+            assertTrue(completed.await(5, TimeUnit.SECONDS))
+            assertEquals(CertHack.CachedParcelAction.REWRITTEN, action.get())
+        } finally {
+            lookup.join(TimeUnit.SECONDS.toMillis(5))
             synchronized(cache) {
                 if (previous == null) {
                     cache.remove(key)
