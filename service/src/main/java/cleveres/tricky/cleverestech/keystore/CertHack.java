@@ -122,7 +122,7 @@ public final class CertHack {
                 byte[] issuerChainEncoded,
                 boolean leafOnlySafe
         ) {
-            this.certificates = certificates;
+            this.certificates = certificates.clone();
             this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded");
             this.issuerChainEncoded = Objects.requireNonNull(issuerChainEncoded, "issuerChainEncoded");
             this.passthrough = false;

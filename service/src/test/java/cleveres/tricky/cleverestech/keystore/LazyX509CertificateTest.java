@@ -130,9 +130,12 @@ public class LazyX509CertificateTest {
             });
         }
 
-        assertTrue("All threads should complete within timeout",
-                latch.await(5, TimeUnit.SECONDS));
-        assertFalse("No concurrent access error should occur", errorOccurred.get());
-        executor.shutdown();
+        try {
+            assertTrue("All threads should complete within timeout",
+                    latch.await(5, TimeUnit.SECONDS));
+            assertFalse("No concurrent access error should occur", errorOccurred.get());
+        } finally {
+            executor.shutdownNow();
+        }
     }
 }
