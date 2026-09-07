@@ -4,7 +4,7 @@ use crate::{
     ANDROID_ATTESTATION_OID_BYTES, MAX_CERTIFICATE_DER_BYTES,
 };
 use attestation_der::asn1::AnyRef;
-use attestation_der::{Decode as AttestationDecode, Tag, Tagged};
+use attestation_der::{Decode as AttestationDecode, Tag, TagNumber, Tagged};
 use cleverestricky_attestation_core::{inspect_captured_patch_levels, CapturedPatchLevels};
 
 const SOFTWARE_INDEX: usize = 6;
@@ -72,33 +72,59 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
         return Err(Error::InvalidCertificate);
     }
     let mut tbs_iter = TlvIterator::new(tbs_seq.value());
-    let mut field_count = 0usize;
-    let mut first_field = None;
-    let mut last_field = None;
-    for field in tbs_iter.by_ref() {
-        let f = field?;
-        if first_field.is_none() {
-            first_field = Some(f);
-        }
-        field_count += 1;
-        last_field = Some(f);
-    }
-    if field_count < 8 {
+    let version = tbs_iter.next().ok_or(Error::InvalidCertificate)??;
+    validate_v3_version(version)?;
+    let serial = tbs_iter.next().ok_or(Error::InvalidCertificate)??;
+    let tbs_algorithm = tbs_iter.next().ok_or(Error::InvalidCertificate)??;
+    let issuer = tbs_iter.next().ok_or(Error::InvalidCertificate)??;
+    let validity = tbs_iter.next().ok_or(Error::InvalidCertificate)??;
+    let subject = tbs_iter.next().ok_or(Error::InvalidCertificate)??;
+    let spki = tbs_iter.next().ok_or(Error::InvalidCertificate)??;
+    if parse_any(serial)?.tag() != Tag::Integer
+        || parse_any(tbs_algorithm)?.tag() != Tag::Sequence
+        || parse_any(issuer)?.tag() != Tag::Sequence
+        || parse_any(validity)?.tag() != Tag::Sequence
+        || parse_any(subject)?.tag() != Tag::Sequence
+        || parse_any(spki)?.tag() != Tag::Sequence
+        || tbs_algorithm != algo_der
+    {
         return Err(Error::InvalidCertificate);
     }
 
-    let extensions_explicit = parse_any(last_field.ok_or(Error::MissingAttestationExtension)?)?;
-    if !matches!(
-        extensions_explicit.tag(),
-        Tag::ContextSpecific {
-            constructed: true,
-            number
-        } if number.value() == 3
-    ) {
-        return Err(Error::MissingAttestationExtension);
+    let mut issuer_unique_id_seen = false;
+    let mut subject_unique_id_seen = false;
+    let mut extensions_explicit_der = None;
+    for optional in tbs_iter {
+        let field = optional?;
+        match parse_any(field)?.tag() {
+            Tag::ContextSpecific {
+                constructed: false,
+                number: TagNumber(1),
+            } if !issuer_unique_id_seen
+                && !subject_unique_id_seen
+                && extensions_explicit_der.is_none() =>
+            {
+                issuer_unique_id_seen = true;
+            }
+            Tag::ContextSpecific {
+                constructed: false,
+                number: TagNumber(2),
+            } if !subject_unique_id_seen && extensions_explicit_der.is_none() => {
+                subject_unique_id_seen = true;
+            }
+            Tag::ContextSpecific {
+                constructed: true,
+                number: TagNumber(3),
+            } if extensions_explicit_der.is_none() => {
+                extensions_explicit_der = Some(field);
+            }
+            _ => return Err(Error::InvalidCertificate),
+        }
     }
-    validate_v3_version(first_field.ok_or(Error::InvalidCertificate)?)?;
 
+    let extensions_explicit_der =
+        extensions_explicit_der.ok_or(Error::MissingAttestationExtension)?;
+    let extensions_explicit = parse_any(extensions_explicit_der)?;
     let extensions_seq = parse_any(extensions_explicit.value())?;
     if extensions_seq.tag() != Tag::Sequence {
         return Err(Error::InvalidCertificate);
