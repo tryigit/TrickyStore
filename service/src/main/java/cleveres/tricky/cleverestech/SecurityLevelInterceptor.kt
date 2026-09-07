@@ -24,10 +24,10 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         private val generateKeyTransaction =
             getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "generateKey")
 
-        /** KeyMint Tag.ATTESTATION_CHALLENGE — the tag value we scan for and strip. */
+        /** KeyMint Tag.ATTESTATION_CHALLENGE: the tag value we scan for and strip. */
         private const val TAG_ATTESTATION_CHALLENGE = -1879047484
 
-        /** KeyMint Tag.INVALID — overwrites the challenge tag so hardware ignores it. */
+        /** KeyMint Tag.INVALID: overwrites the challenge tag so hardware ignores it. */
         private const val TAG_INVALID = 0
 
         val INTERCEPTED_CODES = validTransactCodes(generateKeyTransaction)
