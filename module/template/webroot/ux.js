@@ -3331,12 +3331,16 @@
             const name = document.createElement('div');
             name.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;overflow-wrap:anywhere;word-break:break-word;font-weight:500;';
             const nameText = document.createElement('span');
-            nameText.textContent = String(item.filename || '');
-            const badge = document.createElement('span');
             const isStrongBox = item.security_level === 'StrongBox';
-            badge.className = 'ct-badge ' + (isStrongBox ? 'ct-badge-strongbox' : 'ct-badge-tee');
-            badge.textContent = isStrongBox ? 'StrongBox' : 'TEE';
-            name.append(nameText, badge);
+            const isTee = item.security_level === 'TEE';
+            if (isStrongBox || isTee) {
+                const badge = document.createElement('span');
+                badge.className = 'ct-badge ' + (isStrongBox ? 'ct-badge-strongbox' : 'ct-badge-tee');
+                badge.textContent = isStrongBox ? 'StrongBox' : 'TEE';
+                name.append(nameText, badge);
+            } else {
+                name.append(nameText);
+            }
             const meta = document.createElement('div');
             meta.style.cssText = 'font-size:.78em;color:#888;margin-top:3px;overflow-wrap:anywhere;word-break:break-word;';
             const scope = item.scope === 'root' ? t('root') : t('managed');
@@ -3385,7 +3389,7 @@
                     filename: String(item?.filename ?? '').slice(0, 256),
                     scope: item?.scope === 'root' || item?.scope === 'keyboxes' || item?.scope === 'managed' ? item.scope : '',
                     certificate_serial: String(item?.certificate_serial ?? '').slice(0, 256),
-                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : 'TEE'
+                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'Unknown' ? 'Unknown' : 'TEE')
                 })).filter(item => item.id && item.filename && item.scope)
                 : [];
             const ids = new Set(inventory.map(item => item.id));
@@ -3612,11 +3616,16 @@
             title.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-weight:600;';
             const titleText = document.createElement('span');
             titleText.textContent = String(item.filename || '') + ' - ' + String(item.status || '');
-            const badge = document.createElement('span');
             const isStrongBox = item.security_level === 'StrongBox';
-            badge.className = 'ct-badge ' + (isStrongBox ? 'ct-badge-strongbox' : 'ct-badge-tee');
-            badge.textContent = isStrongBox ? 'StrongBox' : 'TEE';
-            title.append(titleText, badge);
+            const isTee = item.security_level === 'TEE';
+            if (isStrongBox || isTee) {
+                const badge = document.createElement('span');
+                badge.className = 'ct-badge ' + (isStrongBox ? 'ct-badge-strongbox' : 'ct-badge-tee');
+                badge.textContent = isStrongBox ? 'StrongBox' : 'TEE';
+                title.append(titleText, badge);
+            } else {
+                title.append(titleText);
+            }
             const meta = document.createElement('div');
             meta.style.cssText = 'font-size:.8em;color:#888;margin-top:2px';
             meta.textContent = item.certificate_serial ? t('cert') + ': ' + item.certificate_serial : t('certMissing');
@@ -3646,7 +3655,7 @@
                     filename: String(item?.filename ?? '').slice(0, 256),
                     status: String(item?.status ?? 'UNKNOWN').slice(0, 128),
                     certificate_serial: String(item?.certificate_serial ?? '').slice(0, 256),
-                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : 'TEE',
+                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'Unknown' ? 'Unknown' : 'TEE'),
                     details: String(item?.details ?? '').slice(0, 2048)
                 })).filter(item => item.filename)
                 : [];

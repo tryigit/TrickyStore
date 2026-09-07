@@ -90,26 +90,14 @@ object ManagedCertificateBackendOracle {
             require(fields.size > 7)
             val attLevel = decodeSecurityLevel(fields[1])
             val kmLevel = decodeSecurityLevel(fields[3])
-            val attestationIsHardware =
-                attLevel == CertificateBackend.SECURITY_LEVEL_TEE ||
-                    attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
-            val keymintIsHardware =
-                kmLevel == CertificateBackend.SECURITY_LEVEL_TEE ||
-                    kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
-            val isSoftware =
-                attLevel == CertificateBackend.SECURITY_LEVEL_SOFTWARE ||
-                    kmLevel == CertificateBackend.SECURITY_LEVEL_SOFTWARE
-            require(!isSoftware && attestationIsHardware && keymintIsHardware)
-            val targetLevel =
-                if (attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX ||
-                    kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
-                ) {
-                    CertificateBackend.SECURITY_LEVEL_STRONGBOX
-                } else {
-                    CertificateBackend.SECURITY_LEVEL_TEE
-                }
-            fields[1] = ASN1Enumerated(targetLevel)
-            fields[3] = ASN1Enumerated(targetLevel)
+            val validHardware =
+                (attLevel == CertificateBackend.SECURITY_LEVEL_TEE &&
+                    kmLevel == CertificateBackend.SECURITY_LEVEL_TEE) ||
+                    (attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX &&
+                        kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX) ||
+                    (attLevel == CertificateBackend.SECURITY_LEVEL_TEE &&
+                        kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX)
+            require(validHardware) { "Invalid hardware provenance: att=$attLevel, km=$kmLevel" }
             val listSix = ASN1Sequence.getInstance(fields[6])
             val listSeven = ASN1Sequence.getInstance(fields[7])
             val sixSummary = summarize(listSix)

@@ -154,19 +154,10 @@ pub fn rewrite_extension(request: &RewriteRequest<'_>) -> Result<RewriteResult, 
     let keymint_level = decode_security_level(&fields[3])?;
     let supports_module_hash = attestation_version >= 400 && keymint_version >= 400;
 
-    let target_security_level = if attestation_level == 2 || keymint_level == 2 {
-        2u8
-    } else if attestation_level == 1 || keymint_level == 1 {
-        1u8
-    } else {
-        attestation_level
-    };
-    let encoded_level = Any::new(Tag::Enumerated, vec![target_security_level])
-        .map_err(|_| Error::Der)?
-        .to_der()
-        .map_err(|_| Error::Der)?;
-    fields[1] = encoded_level.clone();
-    fields[3] = encoded_level;
+    let valid_hardware = matches!((attestation_level, keymint_level), (1, 1) | (2, 2) | (1, 2));
+    if !valid_hardware && (attestation_level != 0 || keymint_level != 0) {
+        return Err(Error::InvalidStructure);
+    }
 
     let list_six = parse_authorization_list(&fields[AUTHORIZATION_LIST_SOFTWARE_INDEX])?;
     let list_seven = parse_authorization_list(&fields[AUTHORIZATION_LIST_TEE_INDEX])?;

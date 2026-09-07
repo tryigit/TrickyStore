@@ -58,15 +58,17 @@ pub fn inspect_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'static str>
 }
 
 fn validate_hardware_provenance(provenance: &CertificateInspection) -> Result<(), &'static str> {
-    let attestation_is_hardware = provenance.attestation_security_level
-        == SecurityLevel::TrustedEnvironment
-        || provenance.attestation_security_level == SecurityLevel::StrongBox;
-    let keymint_is_hardware = provenance.keymint_security_level
-        == SecurityLevel::TrustedEnvironment
-        || provenance.keymint_security_level == SecurityLevel::StrongBox;
-    let is_software = provenance.attestation_security_level == SecurityLevel::Software
-        || provenance.keymint_security_level == SecurityLevel::Software;
-    if is_software || !attestation_is_hardware || !keymint_is_hardware {
+    let valid_pairing = match (
+        provenance.attestation_security_level,
+        provenance.keymint_security_level,
+    ) {
+        (SecurityLevel::TrustedEnvironment, SecurityLevel::TrustedEnvironment) => true,
+        (SecurityLevel::StrongBox, SecurityLevel::StrongBox) => true,
+        // Known mixed hardware architecture: StrongBox KeyMint + TEE attestation signer
+        (SecurityLevel::TrustedEnvironment, SecurityLevel::StrongBox) => true,
+        _ => false,
+    };
+    if !valid_pairing {
         return Err("certificate rewrite provenance is not hardware compatible");
     }
     Ok(())

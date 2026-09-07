@@ -1,10 +1,34 @@
 package cleveres.tricky.cleverestech.keystore;
 
+import org.bouncycastle.asn1.ASN1Boolean;
+import org.bouncycastle.asn1.ASN1EncodableVector;
+import org.bouncycastle.asn1.ASN1Enumerated;
+import org.bouncycastle.asn1.ASN1Integer;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.DEROctetString;
+import org.bouncycastle.asn1.DERSequence;
+import org.bouncycastle.asn1.DERTaggedObject;
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.cert.X509v3CertificateBuilder;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.operator.ContentSigner;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.io.StringReader;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.Security;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
+import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -12,17 +36,31 @@ import java.util.Map;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import cleveres.tricky.cleverestech.Logger;
+import cleveres.tricky.cleverestech.ManagedCertificateBackendOracle;
+import cleveres.tricky.cleverestech.ManagedOpaqueKeyOracle;
 import cleveres.tricky.cleverestech.TestKeyboxFixtures;
 
 public class CertHackTest {
+    static {
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
+    }
+
+    @Before
+    public void setUp() {
+        ManagedCertificateBackendOracle.install();
+    }
 
     @After
     public void tearDown() {
+        ManagedCertificateBackendOracle.reset();
         ManagedKeyboxStateOracle.readFromXml(null);
     }
 
@@ -150,8 +188,41 @@ public class CertHackTest {
 
     @Test
     public void testGetKeyboxSecurityLevelDefaultsSafely() {
-        assertEquals("TEE", CertHack.getKeyboxSecurityLevel(null));
-        assertEquals("TEE", CertHack.getKeyboxSecurityLevel("non_existent.xml"));
+        assertEquals("Unknown", CertHack.getKeyboxSecurityLevel(null));
+        assertEquals("Unknown", CertHack.getKeyboxSecurityLevel("non_existent.xml"));
+    }
+
+    @Test
+    public void testClassifyKeyboxSecurityLevel() {
+        assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(null));
+
+        java.security.KeyPair keyPair = org.mockito.Mockito.mock(java.security.KeyPair.class);
+        CertHack.KeyBox emptyBox = new CertHack.KeyBox(keyPair, List.of(), "empty.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(emptyBox));
+
+        java.security.cert.X509Certificate teeCert = org.mockito.Mockito.mock(java.security.cert.X509Certificate.class);
+        org.mockito.Mockito.when(teeCert.getSubjectX500Principal())
+                .thenReturn(new javax.security.auth.x500.X500Principal("CN=Android KeyMint CA, O=Google LLC, C=US"));
+        CertHack.KeyBox teeBox = new CertHack.KeyBox(keyPair, List.of(teeCert), "custom.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.TEE, CertHack.classifyKeyboxSecurityLevel(teeBox));
+
+        java.security.cert.X509Certificate sbCert = org.mockito.Mockito.mock(java.security.cert.X509Certificate.class);
+        org.mockito.Mockito.when(sbCert.getSubjectX500Principal())
+                .thenReturn(new javax.security.auth.x500.X500Principal("CN=Google StrongBox KeyMint CA, O=Google LLC, C=US"));
+        CertHack.KeyBox sbBox = new CertHack.KeyBox(keyPair, List.of(sbCert), "custom.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.STRONGBOX, CertHack.classifyKeyboxSecurityLevel(sbBox));
+
+        java.security.cert.X509Certificate plainCert = org.mockito.Mockito.mock(java.security.cert.X509Certificate.class);
+        org.mockito.Mockito.when(plainCert.getSubjectX500Principal())
+                .thenReturn(new javax.security.auth.x500.X500Principal("CN=Generic Unbranded CA, O=Custom, C=US"));
+        CertHack.KeyBox filenameSbBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "device_strongbox.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.STRONGBOX, CertHack.classifyKeyboxSecurityLevel(filenameSbBox));
+
+        CertHack.KeyBox filenameTeeBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "device_tee.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.TEE, CertHack.classifyKeyboxSecurityLevel(filenameTeeBox));
+
+        CertHack.KeyBox unclassifiedBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "keybox.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(unclassifiedBox));
     }
 
     @Test
@@ -223,6 +294,131 @@ public class CertHackTest {
     public void testEmptyStateStrongBoxFastPath() {
         assertFalse(CertHack.hasStrongBoxKeybox());
         assertFalse(CertHack.hasStrongBoxKeybox(1000));
-        assertEquals("TEE", CertHack.getKeyboxSecurityLevel("any.xml"));
+        assertEquals("Unknown", CertHack.getKeyboxSecurityLevel("any.xml"));
+    }
+
+    @Test
+    public void testHackCertificateChainTeeWithOnlyStrongBoxKeyboxDoesNotRewrite() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", "BC");
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+        X509Certificate strongboxCert = generateIssuerCert(kp, "CN=Google StrongBox KeyMint CA, O=Google LLC, C=US");
+        CertHack.KeyBox strongBoxKeybox = ManagedOpaqueKeyOracle.wrap(
+                kp, List.of(strongboxCert), "sb.xml");
+
+        Map<String, List<CertHack.KeyBox>> newKeyboxes = new HashMap<>();
+        newKeyboxes.put("RSA", List.of(strongBoxKeybox));
+        Map<String, List<CertHack.KeyBox>> newKeyboxFiles = new HashMap<>();
+        newKeyboxFiles.put("sb.xml", List.of(strongBoxKeybox));
+
+        Class<?> stateClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$State");
+        java.lang.reflect.Constructor<?> ctor = stateClass.getDeclaredConstructor(Map.class, Map.class);
+        ctor.setAccessible(true);
+        Object newState = ctor.newInstance(newKeyboxes, newKeyboxFiles);
+
+        java.lang.reflect.Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object previousState = stateField.get(null);
+        stateField.set(null, newState);
+
+        try {
+            // Genuine TEE leaf (attestation=1, keymint=1)
+            X509Certificate teeLeaf = generateAttestationCert(kp, 1, 1);
+            Certificate[] inputChain = new Certificate[]{teeLeaf};
+            Certificate[] resultChain = CertHack.hackCertificateChain(inputChain, 0);
+
+            // Must NOT rewrite using StrongBox keybox: returns original chain untouched
+            assertSame("TEE leaf must not fall back to StrongBox keybox", inputChain, resultChain);
+        } finally {
+            stateField.set(null, previousState);
+        }
+    }
+
+    @Test
+    public void testHackCertificateChainStrongBoxWithOnlyTeeKeyboxFallsBackToTee() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", "BC");
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+        X509Certificate teeCert = generateIssuerCert(kp, "CN=Android KeyMint CA, O=Google LLC, C=US");
+        CertHack.KeyBox teeKeybox = ManagedOpaqueKeyOracle.wrap(
+                kp, List.of(teeCert), "tee.xml");
+
+        Map<String, List<CertHack.KeyBox>> newKeyboxes = new HashMap<>();
+        newKeyboxes.put("RSA", List.of(teeKeybox));
+        Map<String, List<CertHack.KeyBox>> newKeyboxFiles = new HashMap<>();
+        newKeyboxFiles.put("tee.xml", List.of(teeKeybox));
+
+        Class<?> stateClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$State");
+        java.lang.reflect.Constructor<?> ctor = stateClass.getDeclaredConstructor(Map.class, Map.class);
+        ctor.setAccessible(true);
+        Object newState = ctor.newInstance(newKeyboxes, newKeyboxFiles);
+
+        java.lang.reflect.Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object previousState = stateField.get(null);
+        stateField.set(null, newState);
+
+        try {
+            // Genuine StrongBox leaf (attestation=2, keymint=2)
+            X509Certificate sbLeaf = generateAttestationCert(kp, 2, 2);
+            Certificate[] inputChain = new Certificate[]{sbLeaf};
+            Certificate[] resultChain = CertHack.hackCertificateChain(inputChain, 0);
+
+            // Asymmetric fallback: StrongBox leaf successfully rewrites using TEE keybox
+            assertNotEquals("StrongBox leaf must fall back to TEE keybox and rewrite", inputChain, resultChain);
+            assertEquals(2, resultChain.length);
+            assertEquals(teeCert, resultChain[1]);
+        } finally {
+            stateField.set(null, previousState);
+        }
+    }
+
+    private X509Certificate generateAttestationCert(KeyPair kp, int attLevel, int kmLevel) throws Exception {
+        X500Name issuer = new X500Name("CN=Test Issuer");
+        BigInteger serial = BigInteger.ONE;
+        Date notBefore = new Date();
+        Date notAfter = new Date(System.currentTimeMillis() + 100000);
+
+        X509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                issuer, serial, notBefore, notAfter, issuer, kp.getPublic());
+
+        ASN1EncodableVector keyDesc = new ASN1EncodableVector();
+        keyDesc.add(new ASN1Integer(100));
+        keyDesc.add(new ASN1Enumerated(attLevel));
+        keyDesc.add(new ASN1Integer(100));
+        keyDesc.add(new ASN1Enumerated(kmLevel));
+        keyDesc.add(new DEROctetString(new byte[0]));
+        keyDesc.add(new DEROctetString(new byte[0]));
+        keyDesc.add(new DERSequence());
+
+        ASN1EncodableVector teeEnforced = new ASN1EncodableVector();
+        ASN1EncodableVector rootOfTrust = new ASN1EncodableVector();
+        byte[] bootKey = new byte[32];
+        bootKey[0] = 1;
+        byte[] bootHash = new byte[32];
+        bootHash[0] = 2;
+        rootOfTrust.add(new DEROctetString(bootKey));
+        rootOfTrust.add(ASN1Boolean.TRUE);
+        rootOfTrust.add(new ASN1Enumerated(0));
+        rootOfTrust.add(new DEROctetString(bootHash));
+        teeEnforced.add(new DERTaggedObject(true, 704, new DERSequence(rootOfTrust)));
+        keyDesc.add(new DERSequence(teeEnforced));
+
+        ASN1ObjectIdentifier oid = new ASN1ObjectIdentifier("1.3.6.1.4.1.11129.2.1.17");
+        builder.addExtension(oid, false, new DERSequence(keyDesc));
+
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate());
+        return new JcaX509CertificateConverter().getCertificate(builder.build(signer));
+    }
+
+    private X509Certificate generateIssuerCert(KeyPair kp, String subjectDn) throws Exception {
+        X500Name name = new X500Name(subjectDn);
+        BigInteger serial = BigInteger.valueOf(2);
+        Date notBefore = new Date();
+        Date notAfter = new Date(System.currentTimeMillis() + 100000);
+        X509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                name, serial, notBefore, notAfter, name, kp.getPublic());
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate());
+        return new JcaX509CertificateConverter().getCertificate(builder.build(signer));
     }
 }

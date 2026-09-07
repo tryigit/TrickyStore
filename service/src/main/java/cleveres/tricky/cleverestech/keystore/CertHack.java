@@ -155,8 +155,9 @@ public final class CertHack {
         final Map<KeyBox, PreparedKeyBox> preparedKeyboxes;
         final Map<CacheKey, CachedCertificateChain> certificateCache;
         final boolean hasStrongBox;
-        final Map<String, Boolean> strongBoxByIdentifier;
+        final Map<String, String> securityLevelByIdentifier;
         final Set<KeyBox> strongBoxKeyboxes;
+        final Set<KeyBox> teeKeyboxes;
         Object certificateCacheEpoch;
 
         State(Map<String, List<KeyBox>> keyboxes, Map<String, List<KeyBox>> keyboxFiles) {
@@ -176,33 +177,44 @@ public final class CertHack {
             this.preparedKeyboxes = Collections.unmodifiableMap(prepared);
 
             Set<KeyBox> sbKeyboxes = Collections.newSetFromMap(new IdentityHashMap<>());
-            Map<String, Boolean> sbById = new HashMap<>();
+            Set<KeyBox> tKeyboxes = Collections.newSetFromMap(new IdentityHashMap<>());
+            Map<String, String> secLevelById = new HashMap<>();
             boolean anyStrongBox = false;
 
             for (Map.Entry<String, List<KeyBox>> entry : this.keyboxFiles.entrySet()) {
                 boolean fileHasStrongBox = false;
+                boolean fileHasTee = false;
                 for (KeyBox box : entry.getValue()) {
-                    if (classifyStrongBoxKeybox(box)) {
+                    KeyboxSecurityLevel level = classifyKeyboxSecurityLevel(box);
+                    if (level == KeyboxSecurityLevel.STRONGBOX) {
                         sbKeyboxes.add(box);
                         fileHasStrongBox = true;
                         anyStrongBox = true;
+                    } else if (level == KeyboxSecurityLevel.TEE) {
+                        tKeyboxes.add(box);
+                        fileHasTee = true;
                     }
                 }
-                sbById.put(entry.getKey(), fileHasStrongBox);
+                String fileLevel = fileHasStrongBox ? "StrongBox" : (fileHasTee ? "TEE" : "Unknown");
+                secLevelById.put(entry.getKey(), fileLevel);
             }
 
             for (List<KeyBox> list : this.keyboxes.values()) {
                 for (KeyBox box : list) {
-                    if (classifyStrongBoxKeybox(box)) {
+                    KeyboxSecurityLevel level = classifyKeyboxSecurityLevel(box);
+                    if (level == KeyboxSecurityLevel.STRONGBOX) {
                         sbKeyboxes.add(box);
                         anyStrongBox = true;
+                    } else if (level == KeyboxSecurityLevel.TEE) {
+                        tKeyboxes.add(box);
                     }
                 }
             }
 
             this.hasStrongBox = anyStrongBox;
-            this.strongBoxByIdentifier = Map.copyOf(sbById);
+            this.securityLevelByIdentifier = Map.copyOf(secLevelById);
             this.strongBoxKeyboxes = Collections.unmodifiableSet(sbKeyboxes);
+            this.teeKeyboxes = Collections.unmodifiableSet(tKeyboxes);
 
             this.certificateCache = Collections.synchronizedMap(
                     new LinkedHashMap<CacheKey, CachedCertificateChain>(32, 0.75f, true) {
@@ -258,25 +270,89 @@ public final class CertHack {
         return !state.keyboxes.isEmpty();
     }
 
-    private static boolean classifyStrongBoxKeybox(KeyBox keybox) {
-        if (keybox == null) return false;
-        if (keybox.filename() != null && keybox.filename().toLowerCase(Locale.ROOT).contains("strongbox")) {
-            return true;
+    public enum KeyboxSecurityLevel {
+        TEE,
+        STRONGBOX,
+        UNKNOWN
+    }
+
+    public static KeyboxSecurityLevel classifyKeyboxSecurityLevel(KeyBox keybox) {
+        if (keybox == null) return KeyboxSecurityLevel.UNKNOWN;
+        if (keybox.securityLevel() != null) {
+            if ("StrongBox".equalsIgnoreCase(keybox.securityLevel())) {
+                return KeyboxSecurityLevel.STRONGBOX;
+            }
+            if ("TEE".equalsIgnoreCase(keybox.securityLevel())) {
+                return KeyboxSecurityLevel.TEE;
+            }
         }
-        if (keybox.certificates() == null) return false;
-        for (Certificate cert : keybox.certificates()) {
-            if (cert instanceof X509Certificate x509) {
-                var subject = x509.getSubjectX500Principal();
-                if (subject != null && subject.getName().toLowerCase(Locale.ROOT).contains("strongbox")) {
-                    return true;
-                }
-                var issuer = x509.getIssuerX500Principal();
-                if (issuer != null && issuer.getName().toLowerCase(Locale.ROOT).contains("strongbox")) {
-                    return true;
+        if (keybox.certificates() != null) {
+            for (Certificate cert : keybox.certificates()) {
+                if (cert instanceof X509Certificate x509) {
+                    byte[] ext = x509.getExtensionValue("1.3.6.1.4.1.11129.2.1.17");
+                    if (ext != null) {
+                        try {
+                            CertificateBackend.Inspection insp = CertificateBackend.inspect(x509.getEncoded());
+                            if (insp != null) {
+                                int att = insp.getAttestationSecurityLevel();
+                                int km = insp.getKeymintSecurityLevel();
+                                if (att == CertificateBackend.SECURITY_LEVEL_STRONGBOX
+                                        || km == CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
+                                    return KeyboxSecurityLevel.STRONGBOX;
+                                }
+                                if (att == CertificateBackend.SECURITY_LEVEL_TEE
+                                        || km == CertificateBackend.SECURITY_LEVEL_TEE) {
+                                    return KeyboxSecurityLevel.TEE;
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+
+                    var subject = x509.getSubjectX500Principal();
+                    String subjectName = subject != null ? subject.getName().toLowerCase(Locale.ROOT) : "";
+                    var issuer = x509.getIssuerX500Principal();
+                    String issuerName = issuer != null ? issuer.getName().toLowerCase(Locale.ROOT) : "";
+
+                    if (subjectName.contains("strongbox") || issuerName.contains("strongbox")) {
+                        return KeyboxSecurityLevel.STRONGBOX;
+                    }
                 }
             }
         }
-        return false;
+        if (keybox.filename() != null) {
+            String lower = keybox.filename().toLowerCase(Locale.ROOT);
+            if (lower.contains("strongbox")) {
+                return KeyboxSecurityLevel.STRONGBOX;
+            }
+            if (lower.contains("tee")) {
+                return KeyboxSecurityLevel.TEE;
+            }
+        }
+        if (keybox.certificates() != null) {
+            for (Certificate cert : keybox.certificates()) {
+                if (cert instanceof X509Certificate x509) {
+                    var subject = x509.getSubjectX500Principal();
+                    String subjectName = subject != null ? subject.getName().toLowerCase(Locale.ROOT) : "";
+                    var issuer = x509.getIssuerX500Principal();
+                    String issuerName = issuer != null ? issuer.getName().toLowerCase(Locale.ROOT) : "";
+
+                    if (isTeeDn(subjectName) || isTeeDn(issuerName)) {
+                        return KeyboxSecurityLevel.TEE;
+                    }
+                }
+            }
+        }
+        return KeyboxSecurityLevel.UNKNOWN;
+    }
+
+    private static boolean isTeeDn(String dn) {
+        if (dn == null || dn.isEmpty()) return false;
+        return dn.contains("android keymint ca")
+                || dn.contains("google hardware attestation ca")
+                || dn.contains("android attestation ca")
+                || dn.contains("google root ca")
+                || dn.contains("android keystore keymint ca");
     }
 
     public static boolean isStrongBoxKeybox(KeyBox keybox) {
@@ -288,17 +364,29 @@ public final class CertHack {
         if (currentState.preparedKeyboxes.containsKey(keybox)) {
             return false;
         }
-        return classifyStrongBoxKeybox(keybox);
+        return classifyKeyboxSecurityLevel(keybox) == KeyboxSecurityLevel.STRONGBOX;
+    }
+
+    public static boolean isTeeKeybox(KeyBox keybox) {
+        if (keybox == null) return false;
+        State currentState = state;
+        if (currentState.teeKeyboxes.contains(keybox)) {
+            return true;
+        }
+        if (currentState.preparedKeyboxes.containsKey(keybox)) {
+            return !currentState.strongBoxKeyboxes.contains(keybox);
+        }
+        return classifyKeyboxSecurityLevel(keybox) == KeyboxSecurityLevel.TEE;
     }
 
     public static String getKeyboxSecurityLevel(String identifier) {
-        if (identifier == null) return "TEE";
+        if (identifier == null) return "Unknown";
         State currentState = state;
-        Boolean hasSb = currentState.strongBoxByIdentifier.get(identifier);
-        if (hasSb == null && identifier.contains(":")) {
-            hasSb = currentState.strongBoxByIdentifier.get(identifier.substring(identifier.indexOf(':') + 1));
+        String level = currentState.securityLevelByIdentifier.get(identifier);
+        if (level == null && identifier.contains(":")) {
+            level = currentState.securityLevelByIdentifier.get(identifier.substring(identifier.indexOf(':') + 1));
         }
-        return Boolean.TRUE.equals(hasSb) ? "StrongBox" : "TEE";
+        return level != null ? level : "Unknown";
     }
 
     public static boolean hasStrongBoxKeybox() {
@@ -310,11 +398,8 @@ public final class CertHack {
         var appConfig = Config.INSTANCE.getAppConfig(uid);
         if (appConfig != null && appConfig.getKeyboxFilename() != null) {
             String filename = appConfig.getKeyboxFilename();
-            Boolean hasSb = currentState.strongBoxByIdentifier.get(filename);
-            if (hasSb == null && filename.contains(":")) {
-                hasSb = currentState.strongBoxByIdentifier.get(filename.substring(filename.indexOf(':') + 1));
-            }
-            return Boolean.TRUE.equals(hasSb);
+            String level = getKeyboxSecurityLevel(filename);
+            return "StrongBox".equals(level);
         }
         return currentState.hasStrongBox;
     }
@@ -610,13 +695,21 @@ public final class CertHack {
                 }
                 candidates = all;
             }
-            if (candidates == null) candidates = Collections.emptyList();
             List<KeyBox> matchingLevel = filterKeyboxesBySecurityLevel(candidates, isStrongbox);
             if (!matchingLevel.isEmpty()) {
                 candidates = matchingLevel;
+            } else if (isStrongbox) {
+                // Asymmetric fallback: StrongBox attestation can fall back to standard TEE keyboxes
+                candidates = filterKeyboxesBySecurityLevel(candidates, false);
+            } else {
+                // TEE attestation must NEVER fall back to StrongBox keyboxes
+                candidates = Collections.emptyList();
             }
             List<KeyBox> list = selectKeyboxPool(candidates, preferredSignerAlgorithm);
-            if (list.isEmpty()) throw new UnsupportedOperationException("No compatible keybox is available");
+            if (list.isEmpty()) {
+                Logger.w("No compatible keybox is available for security level (isStrongbox=" + isStrongbox + ")");
+                return caList;
+            }
 
             KeyBox keybox = list.get(cacheKey.indexForPool(list.size()));
             PreparedKeyBox prepared = currentState.preparedKeyboxes.get(keybox);
@@ -790,14 +883,24 @@ public final class CertHack {
         if (candidates == null || candidates.isEmpty()) return Collections.emptyList();
         List<KeyBox> matches = new ArrayList<>();
         for (KeyBox candidate : candidates) {
-            if (isStrongBoxKeybox(candidate) == strongBox) {
-                matches.add(candidate);
+            if (strongBox) {
+                if (isStrongBoxKeybox(candidate)) {
+                    matches.add(candidate);
+                }
+            } else {
+                if (!isStrongBoxKeybox(candidate)) {
+                    matches.add(candidate);
+                }
             }
         }
         return matches;
     }
 
-    public record KeyBox(KeyPair keyPair, List<Certificate> certificates, String filename) {
+    public record KeyBox(KeyPair keyPair, List<Certificate> certificates, String filename, String securityLevel) {
+        public KeyBox(KeyPair keyPair, List<Certificate> certificates, String filename) {
+            this(keyPair, certificates, filename, null);
+        }
+
         public KeyBox {
             Objects.requireNonNull(keyPair, "keyPair");
             certificates = List.copyOf(Objects.requireNonNull(certificates, "certificates"));
