@@ -196,7 +196,7 @@ class GenerateKeyTimingFastPathTest {
     }
 
     @Test
-    fun `generateKey applies cached pre-encoded chain directly before full DER re-encoding`() {
+    fun `generateKey reuses completed raw cache before DER reencoding fallback`() {
         val root = locateRoot()
         val source =
             File(
@@ -204,14 +204,18 @@ class GenerateKeyTimingFastPathTest {
                 "service/src/main/java/cleveres/tricky/cleverestech/SecurityLevelInterceptor.kt",
             ).readText()
         val postTransact = source.indexOf("override fun onPostTransact")
-        val hackChain = source.indexOf("CertHack.hackCertificateChain", postTransact)
-        val applyCache = source.indexOf("CertHack.applyCachedCertificateChain(metadata)", hackChain)
-        val fallbackEncode = source.indexOf("Utils.putCertificateChain(metadata, rewritten)", applyCache)
+        val rawParse = source.indexOf("val parsed = Utils.parseKeyMetadataParcel(reply)", postTransact)
+        val hackChain = source.indexOf("CertHack.hackCertificateChain", rawParse)
+        val rawCache = source.indexOf("CertHack.applyCachedCertificateChain(reply, parsed)", hackChain)
+        val fallbackLeaf = source.indexOf("val newLeaf = rewritten[0].encoded", rawCache)
+        val fallbackChain = source.indexOf("Utils.encodeIssuerChain(rewritten)", fallbackLeaf)
 
         assertTrue(postTransact >= 0)
-        assertTrue(hackChain > postTransact)
-        assertTrue(applyCache > hackChain)
-        assertTrue(fallbackEncode > applyCache)
+        assertTrue(rawParse > postTransact)
+        assertTrue(hackChain > rawParse)
+        assertTrue(rawCache > hackChain)
+        assertTrue(fallbackLeaf > rawCache)
+        assertTrue(fallbackChain > fallbackLeaf)
     }
 
     @Test
