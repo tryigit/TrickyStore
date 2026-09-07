@@ -29,12 +29,42 @@ fn detector_does_not_promote_tee_to_strongbox() {
 }
 
 #[test]
-fn detector_preserves_software_security_level() {
+fn detector_rejects_software_security_level() {
     let original = key_description(SOFTWARE, SOFTWARE);
+    let result = rewrite_extension(&RewriteRequest {
+        extension_der: &original,
+        patch_levels: PatchLevels::default(),
+        id_overrides: &[],
+        module_hash: None,
+        verified_boot_key: &BOOT_KEY,
+        verified_boot_hash: &BOOT_HASH,
+    });
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn detector_preserves_mixed_tee_attestation_with_strongbox_keymint() {
+    let original = key_description(TRUSTED_ENVIRONMENT, STRONGBOX);
     let rewritten = rewrite(&original);
 
-    assert_eq!(security_level(&rewritten, 1), SOFTWARE);
-    assert_eq!(security_level(&rewritten, 3), SOFTWARE);
+    assert_eq!(security_level(&rewritten, 1), TRUSTED_ENVIRONMENT);
+    assert_eq!(security_level(&rewritten, 3), STRONGBOX);
+}
+
+#[test]
+fn detector_rejects_reversed_strongbox_attestation_with_tee_keymint() {
+    let original = key_description(STRONGBOX, TRUSTED_ENVIRONMENT);
+    let result = rewrite_extension(&RewriteRequest {
+        extension_der: &original,
+        patch_levels: PatchLevels::default(),
+        id_overrides: &[],
+        module_hash: None,
+        verified_boot_key: &BOOT_KEY,
+        verified_boot_hash: &BOOT_HASH,
+    });
+
+    assert!(result.is_err());
 }
 
 fn rewrite(extension: &[u8]) -> Vec<u8> {

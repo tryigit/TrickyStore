@@ -49,7 +49,10 @@ object ManagedCertificateBackendOracle {
             val listSeven = ASN1Sequence.getInstance(fields[7])
             val sixSummary = summarize(listSix)
             val sevenSummary = summarize(listSeven)
-            val tee = if (sixSummary.hasRootOfTrust && !sevenSummary.hasRootOfTrust) listSix else listSeven
+            require(sixSummary.hasRootOfTrust != sevenSummary.hasRootOfTrust) {
+                "Exactly one authorization list must contain RootOfTrust"
+            }
+            val tee = if (sixSummary.hasRootOfTrust) listSix else listSeven
             val teeSummary = if (tee === listSix) sixSummary else sevenSummary
             val softwareSummary = if (tee === listSix) sevenSummary else sixSummary
 
@@ -60,7 +63,7 @@ object ManagedCertificateBackendOracle {
                 if (index >= 0) presentMask = presentMask or (1 shl index)
             }
 
-            val root = findTag(tee, 704)?.let { ASN1Sequence.getInstance(it.baseObject) }
+            val root = findTag(tee, 704)?.let { validateRootOfTrust(it) }
             CertificateBackend.Inspection(
                 systemPatch = combinePatch(teeSummary.systemPatch, softwareSummary.systemPatch),
                 vendorPatch = combinePatch(teeSummary.vendorPatch, softwareSummary.vendorPatch),
@@ -85,13 +88,24 @@ object ManagedCertificateBackendOracle {
             val sequence = ASN1Sequence.getInstance(extension.extnValue.octets)
             val fields = sequence.toArray()
             require(fields.size > 7)
-            require(decodeSecurityLevel(fields[1]) == CertificateBackend.SECURITY_LEVEL_TEE)
-            require(decodeSecurityLevel(fields[3]) == CertificateBackend.SECURITY_LEVEL_TEE)
+            val attLevel = decodeSecurityLevel(fields[1])
+            val kmLevel = decodeSecurityLevel(fields[3])
+            val validHardware =
+                (attLevel == CertificateBackend.SECURITY_LEVEL_TEE &&
+                    kmLevel == CertificateBackend.SECURITY_LEVEL_TEE) ||
+                    (attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX &&
+                        kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX) ||
+                    (attLevel == CertificateBackend.SECURITY_LEVEL_TEE &&
+                        kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX)
+            require(validHardware) { "Invalid hardware provenance: att=$attLevel, km=$kmLevel" }
             val listSix = ASN1Sequence.getInstance(fields[6])
             val listSeven = ASN1Sequence.getInstance(fields[7])
             val sixSummary = summarize(listSix)
             val sevenSummary = summarize(listSeven)
-            val teeIndex = if (sixSummary.hasRootOfTrust && !sevenSummary.hasRootOfTrust) 6 else 7
+            require(sixSummary.hasRootOfTrust != sevenSummary.hasRootOfTrust) {
+                "Exactly one authorization list must contain RootOfTrust"
+            }
+            val teeIndex = if (sixSummary.hasRootOfTrust) 6 else 7
             val softwareIndex = if (teeIndex == 6) 7 else 6
             val teeOriginal = if (teeIndex == 6) listSix else listSeven
             val softwareOriginal = if (teeIndex == 6) listSeven else listSix
@@ -256,7 +270,13 @@ object ManagedCertificateBackendOracle {
             val tagged = value as? ASN1TaggedObject ?: error("Invalid authorization-list element")
             summary =
                 when (tagged.tagNo) {
-                    704 -> summary.copy(hasRootOfTrust = true)
+                    704 -> {
+                        require(!summary.hasRootOfTrust) {
+                            "Duplicate RootOfTrust authorization"
+                        }
+                        validateRootOfTrust(tagged)
+                        summary.copy(hasRootOfTrust = true)
+                    }
                     706 -> summary.copy(systemPatch = mergePatch(summary.systemPatch, patchValue(tagged)))
                     718 -> summary.copy(vendorPatch = mergePatch(summary.vendorPatch, patchValue(tagged)))
                     719 -> summary.copy(bootPatch = mergePatch(summary.bootPatch, patchValue(tagged)))
@@ -264,6 +284,17 @@ object ManagedCertificateBackendOracle {
                 }
         }
         return summary
+    }
+
+    private fun validateRootOfTrust(tagged: ASN1TaggedObject): ASN1Sequence {
+        val root = ASN1Sequence.getInstance(tagged, true)
+        require(root.size() == 4) { "RootOfTrust sequence must contain exactly 4 fields" }
+        ASN1OctetString.getInstance(root.getObjectAt(0))
+        ASN1Boolean.getInstance(root.getObjectAt(1))
+        val bootState = ASN1Enumerated.getInstance(root.getObjectAt(2)).value.intValueExact()
+        require(bootState in 0..3) { "RootOfTrust verifiedBootState must be in range 0..3" }
+        ASN1OctetString.getInstance(root.getObjectAt(3))
+        return root
     }
 
     private fun patchValue(tagged: ASN1TaggedObject): Int =

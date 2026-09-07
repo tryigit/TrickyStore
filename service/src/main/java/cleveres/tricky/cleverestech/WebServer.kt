@@ -714,13 +714,16 @@ class WebServer(
     private fun keyboxInventoryJson(): String {
         val array = JSONArray()
         StoredKeyboxInventory.list(configDir).forEach { source ->
+            val targetId = source.id.ifEmpty { source.filename }
             array.put(
                 JSONObject()
                     .put("id", source.id)
                     .put("scope", source.scope.apiValue)
                     .put("filename", source.filename)
                     .put("type", if (source.isCbox) "cbox" else "xml")
-                    .put("certificate_serial", CertHack.getDeviceCertificateSerial(source.filename) ?: ""),
+                    .put("certificate_serial", CertHack.getDeviceCertificateSerial(targetId) ?: "")
+                    .put("security_level", CertHack.getKeyboxSecurityLevel(targetId))
+                    .put("is_rkp", CertHack.isRkpKeybox(targetId)),
             )
         }
         return array.toString()
@@ -3004,10 +3007,12 @@ class WebServer(
             results.forEach { r ->
                 val obj = JSONObject()
                 obj.put("filename", r.filename)
-            obj.put("storage_id", r.storageId)
-            obj.put("certificate_serial", r.certificateSerial ?: "")
+                obj.put("storage_id", r.storageId)
+                obj.put("security_level", r.securityLevel.ifEmpty { "Unknown" })
+                obj.put("is_rkp", r.isRkp)
                 obj.put("status", r.status.name)
                 obj.put("details", r.details)
+                obj.put("certificate_serial", r.certificateSerial ?: "")
                 array.put(obj)
             }
             return array.toString()

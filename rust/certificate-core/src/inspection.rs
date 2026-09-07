@@ -33,6 +33,8 @@ struct SecurityLevels {
     keymint: SecurityLevel,
 }
 
+type BootDigests = (Option<[u8; 32]>, Option<[u8; 32]>);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CertificateInspection {
     pub captured_patch_levels: CapturedPatchLevels,
@@ -81,9 +83,18 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
         .map_err(|_| Error::AttestationRewrite)?;
     let list_six = tagged_fields(&fields[SOFTWARE_INDEX])?;
     let list_seven = tagged_fields(&fields[TEE_INDEX])?;
-    let six_has_root = list_six.iter().any(|field| field.0 == ROOT_OF_TRUST_TAG);
-    let seven_has_root = list_seven.iter().any(|field| field.0 == ROOT_OF_TRUST_TAG);
-    let tee = if six_has_root && !seven_has_root {
+    let six_root_count = list_six
+        .iter()
+        .filter(|field| field.0 == ROOT_OF_TRUST_TAG)
+        .count();
+    let seven_root_count = list_seven
+        .iter()
+        .filter(|field| field.0 == ROOT_OF_TRUST_TAG)
+        .count();
+    if six_root_count + seven_root_count != 1 {
+        return Err(Error::AttestationRewrite);
+    }
+    let tee = if six_root_count == 1 {
         &list_six
     } else {
         &list_seven
@@ -95,13 +106,11 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
             present_id_mask |= 1u16 << index;
         }
     }
-    let root = tee
+    let (_, root_encoded) = tee
         .iter()
         .find(|(tag, _)| *tag == ROOT_OF_TRUST_TAG)
-        .and_then(|(_, encoded)| parse_root_of_trust(encoded));
-    let (original_boot_key, original_boot_hash) = root
-        .map(|(key, hash)| (Some(key), Some(hash)))
-        .unwrap_or((None, None));
+        .ok_or(Error::AttestationRewrite)?;
+    let (original_boot_key, original_boot_hash) = parse_root_of_trust(root_encoded)?;
 
     Ok(CertificateInspection {
         captured_patch_levels,
@@ -155,19 +164,35 @@ fn tagged_fields(encoded: &[u8]) -> Result<Vec<(u32, Vec<u8>)>, Error> {
         .collect()
 }
 
-fn parse_root_of_trust(encoded: &[u8]) -> Option<([u8; 32], [u8; 32])> {
-    let outer = AnyRef::from_der(encoded).ok()?;
-    let sequence = AnyRef::from_der(outer.value()).ok()?;
+fn parse_root_of_trust(encoded: &[u8]) -> Result<BootDigests, Error> {
+    let outer = AnyRef::from_der(encoded).map_err(|_| Error::AttestationRewrite)?;
+    let sequence = AnyRef::from_der(outer.value()).map_err(|_| Error::AttestationRewrite)?;
     if sequence.tag() != Tag::Sequence {
-        return None;
+        return Err(Error::AttestationRewrite);
     }
-    let fields = split(sequence.value(), 4).ok()?;
+    let fields = split(sequence.value(), 4)?;
     if fields.len() != 4 {
-        return None;
+        return Err(Error::AttestationRewrite);
     }
-    let key = decode_digest(&fields[0])?;
-    let hash = decode_digest(&fields[3])?;
-    Some((key, hash))
+    let key_ref = AnyRef::from_der(&fields[0]).map_err(|_| Error::AttestationRewrite)?;
+    if key_ref.tag() != Tag::OctetString {
+        return Err(Error::AttestationRewrite);
+    }
+    <bool as AttestationDecode>::from_der(&fields[1]).map_err(|_| Error::AttestationRewrite)?;
+    let state_ref = AnyRef::from_der(&fields[2]).map_err(|_| Error::AttestationRewrite)?;
+    if state_ref.tag() != Tag::Enumerated
+        || state_ref.value().len() != 1
+        || !matches!(state_ref.value()[0], 0..=3)
+    {
+        return Err(Error::AttestationRewrite);
+    }
+    let hash_ref = AnyRef::from_der(&fields[3]).map_err(|_| Error::AttestationRewrite)?;
+    if hash_ref.tag() != Tag::OctetString {
+        return Err(Error::AttestationRewrite);
+    }
+    let key = decode_digest(&fields[0]);
+    let hash = decode_digest(&fields[3]);
+    Ok((key, hash))
 }
 
 fn decode_digest(encoded: &[u8]) -> Option<[u8; 32]> {

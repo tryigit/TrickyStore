@@ -38,6 +38,10 @@ Keybox doğrulama ve uygulama özelinde attestation kimliği işlemleri.
 
 https://github.com/tryigit/CleveresTricky/pull/79
 
+- **#1199, 2026-09-07**
+  Kapsam duyarlı StrongBox ve TEE keybox indeksleme, arayan tarafından seçilen AttestKey imza bütünlüğü, readback önbellek tutarlılığı ve WebUI donanım etiketleri.
+  https://github.com/tryigit/CleveresTricky/pull/1199
+
 ## Profil, uygulama kapsamı ve runtime
 
 **#376**
@@ -110,3 +114,4 @@ https://github.com/tryigit/CleveresTricky/pull/1132
 | 2026-08-09 | #871 | Dual-SIM ve app-facing identity |
 | 2026-08-09 | #876 | Rust/native runtime architecture |
 | 2026-08-30 | #1132 | StrongBox ve TEE redirection |
+| 2026-09-07 | #1199 | StrongBox ve TEE keybox indeksleme & AttestKey imza bütünlüğü |

@@ -55,6 +55,9 @@ object CertificateBackend {
     @VisibleForTesting
     internal var rewriteOverride: ((RewriteRequest) -> ByteArray?)? = null
 
+    @VisibleForTesting
+    internal var rewriteTransportOverride: ((Int, (OutputStream) -> Unit) -> ByteArray?)? = null
+
     @JvmStatic
     fun inspect(leafDer: ByteArray): Inspection? {
         if (leafDer.isEmpty() || leafDer.size > MAX_CERTIFICATE_DER_BYTES) return null
@@ -121,31 +124,28 @@ object CertificateBackend {
         if (payloadLength > MAX_REWRITE_REQUEST_BYTES) return null
 
         rewriteOverride?.let { override ->
-            return override(
-                RewriteRequest(
-                    genuineLeafDer = genuineLeafDer,
-                    keyId = keyId,
-                    signingAlgorithm = signingAlgorithm,
-                    systemDisposition = systemDisposition,
-                    systemValue = systemValue,
-                    vendorDisposition = vendorDisposition,
-                    vendorValue = vendorValue,
-                    bootDisposition = bootDisposition,
-                    bootValue = bootValue,
-                    idOverrides = idOverrides,
-                    moduleHash = moduleHash,
-                    verifiedBootKey = verifiedBootKey,
-                    verifiedBootHash = verifiedBootHash,
-                ),
-            )
+            val result =
+                override(
+                    RewriteRequest(
+                        genuineLeafDer = genuineLeafDer,
+                        keyId = keyId,
+                        signingAlgorithm = signingAlgorithm,
+                        systemDisposition = systemDisposition,
+                        systemValue = systemValue,
+                        vendorDisposition = vendorDisposition,
+                        vendorValue = vendorValue,
+                        bootDisposition = bootDisposition,
+                        bootValue = bootValue,
+                        idOverrides = idOverrides,
+                        moduleHash = moduleHash,
+                        verifiedBootKey = verifiedBootKey,
+                        verifiedBootHash = verifiedBootHash,
+                    ),
+                )
+            return if (result != null && (result.isEmpty() || result.size > MAX_REWRITTEN_LEAF_BYTES)) null else result
         }
 
-        return NativeBackend.transact(
-            OP_CERTIFICATE_REWRITE,
-            payloadLength,
-            MAX_CERTIFICATE_DER_BYTES,
-            propagateTransportFailure = true,
-        ) { output ->
+        val writePayload: (OutputStream) -> Unit = { output ->
             output.write(REWRITE_WIRE_VERSION)
             output.write(signingAlgorithm)
             writePatch(output, systemDisposition, systemValue)
@@ -165,12 +165,24 @@ object CertificateBackend {
             if (moduleHash != null) output.write(moduleHash)
             output.write(genuineLeafDer)
         }
+        rewriteTransportOverride?.let {
+            val result = it(payloadLength, writePayload)
+            return if (result != null && (result.isEmpty() || result.size > MAX_REWRITTEN_LEAF_BYTES)) null else result
+        }
+        return NativeBackend.transact(
+            OP_CERTIFICATE_REWRITE,
+            payloadLength,
+            MAX_REWRITTEN_LEAF_BYTES,
+            propagateTransportFailure = true,
+            writePayload = writePayload,
+        )
     }
 
     @VisibleForTesting
     internal fun resetForTesting() {
         inspectionOverride = null
         rewriteOverride = null
+        rewriteTransportOverride = null
     }
 
     internal fun decodeInspection(response: ByteArray): Inspection {
@@ -343,6 +355,7 @@ object CertificateBackend {
     private const val PRESENT_ID_RESERVED_MASK = 0xfe00
     private const val KEY_ID_BYTES = 16
     private const val MAX_CERTIFICATE_DER_BYTES = 256 * 1024
+    private const val MAX_REWRITTEN_LEAF_BYTES = 64 * 1024
     private const val MAX_ATTESTATION_ID_BYTES = 4 * 1024
     private const val MAX_MODULE_HASH_BYTES = 1024
     private const val MAX_ID_OVERRIDES = 9

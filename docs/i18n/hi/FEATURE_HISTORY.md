@@ -38,6 +38,10 @@ Keybox verification और application-specific attestation identity handling।
 
 https://github.com/tryigit/CleveresTricky/pull/79
 
+- **#1199, 2026-09-07**
+  स्कोप-जागरूक StrongBox और TEE keybox इंडेक्सिंग, कॉलर-चयनित AttestKey हस्ताक्षर संरक्षण, रीडबैक कैश स्थिरता, और WebUI हार्डवेयर बैज।
+  https://github.com/tryigit/CleveresTricky/pull/1199
+
 ## Profiles, application scope और runtime
 
 **#376**
@@ -110,3 +114,4 @@ https://github.com/tryigit/CleveresTricky/pull/1132
 | 2026-08-09 | #871 | Dual-SIM और app-facing identity |
 | 2026-08-09 | #876 | Rust/native runtime architecture |
 | 2026-08-30 | #1132 | StrongBox और TEE redirection |
+| 2026-09-07 | #1199 | StrongBox और TEE keybox इंडेक्सिंग और AttestKey संरक्षण |

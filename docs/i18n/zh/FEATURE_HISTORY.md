@@ -38,6 +38,10 @@ Keybox 验证和应用级 Attestation 身份处理。
 
 https://github.com/tryigit/CleveresTricky/pull/79
 
+- **#1199, 2026-09-07**
+  作用域感知的 StrongBox 与 TEE keybox 索引、原生保留调用方 AttestKey 签名、Readback 缓存一致性与 WebUI 硬件徽章。
+  https://github.com/tryigit/CleveresTricky/pull/1199
+
 ## Profile、应用范围与 Runtime
 
 **#376**
@@ -110,3 +114,4 @@ https://github.com/tryigit/CleveresTricky/pull/1132
 | 2026-08-09 | #871 | Dual-SIM 与 app-facing identity |
 | 2026-08-09 | #876 | Rust/native runtime architecture |
 | 2026-08-30 | #1132 | StrongBox 与 TEE redirection |
+| 2026-09-07 | #1199 | StrongBox 与 TEE keybox 索引及 AttestKey 签名保留 |

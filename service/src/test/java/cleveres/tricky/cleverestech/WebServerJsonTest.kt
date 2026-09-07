@@ -31,4 +31,46 @@ class WebServerJsonTest {
         // If secure, the filename should be exactly the payload
         assertEquals(payload, obj.getString("filename"))
     }
+
+    @Test
+    fun testCertificateSerialSerialized() {
+        val results =
+            listOf(
+                KeyboxVerifier.Result(
+                    file = File("box.xml"),
+                    filename = "box.xml",
+                    status = KeyboxVerifier.Status.VALID,
+                    details = "Active",
+                    certificateSerial = "1A2B3C4D",
+                    securityLevel = "StrongBox",
+                ),
+            )
+        val json = WebServer.createKeyboxVerificationJson(results)
+        val array = JSONArray(json)
+        val obj = array.getJSONObject(0)
+        assertEquals("1A2B3C4D", obj.getString("certificate_serial"))
+        assertEquals("StrongBox", obj.getString("security_level"))
+        assertEquals(false, obj.getBoolean("is_rkp"))
+    }
+
+    @Test
+    fun testRkpSerialized() {
+        val results =
+            listOf(
+                KeyboxVerifier.Result(
+                    file = File("rkp_box.xml"),
+                    filename = "rkp_box.xml",
+                    status = KeyboxVerifier.Status.VALID,
+                    details = "Active",
+                    certificateSerial = "5E6F7A8B",
+                    securityLevel = "TEE",
+                    isRkp = true,
+                ),
+            )
+        val json = WebServer.createKeyboxVerificationJson(results)
+        val array = JSONArray(json)
+        val obj = array.getJSONObject(0)
+        assertEquals(true, obj.getBoolean("is_rkp"))
+        assertEquals("TEE", obj.getString("security_level"))
+    }
 }

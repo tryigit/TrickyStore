@@ -154,15 +154,14 @@ class GenerateKeyTimingFastPathTest {
                 "service/src/main/java/cleveres/tricky/cleverestech/keystore/CertHack.java",
             ).readText()
         val rewrite = source.indexOf("byte[] rewrittenDer = CertificateBackend.rewrite")
-        val issuerEncoding = source.indexOf("byte[] issuerChainEncoded = Utils.encodeIssuerChain(result)", rewrite)
         val completed =
-            source.indexOf("new CachedCertificateChain(result, rewrittenDer, issuerChainEncoded)", issuerEncoding)
+            source.indexOf("new CachedCertificateChain(result, rewrittenDer, prepared.encodedIssuerChain", rewrite)
         val cachePut = source.indexOf("cache.put(cacheKey, completed)", completed)
 
         assertTrue(rewrite >= 0)
-        assertTrue(issuerEncoding > rewrite)
-        assertTrue(completed > issuerEncoding)
+        assertTrue(completed > rewrite)
         assertTrue(cachePut > completed)
+        assertTrue(source.contains("final byte[] encodedIssuerChain;"))
     }
 
     @Test
@@ -187,6 +186,25 @@ class GenerateKeyTimingFastPathTest {
         assertFalse(sources.contains("Thread.sleep"))
         assertFalse(sources.contains("parkNanos"))
         assertFalse(sources.contains("busyWait"))
+    }
+
+    @Test
+    fun `generateKey applies cached pre-encoded chain directly before full DER re-encoding`() {
+        val root = locateRoot()
+        val source =
+            File(
+                root,
+                "service/src/main/java/cleveres/tricky/cleverestech/SecurityLevelInterceptor.kt",
+            ).readText()
+        val postTransact = source.indexOf("override fun onPostTransact")
+        val hackChain = source.indexOf("CertHack.hackCertificateChain", postTransact)
+        val applyCache = source.indexOf("CertHack.applyCachedCertificateChain(metadata)", hackChain)
+        val fallbackEncode = source.indexOf("Utils.putCertificateChain(metadata, rewritten)", applyCache)
+
+        assertTrue(postTransact >= 0)
+        assertTrue(hackChain > postTransact)
+        assertTrue(applyCache > hackChain)
+        assertTrue(fallbackEncode > applyCache)
     }
 
     private fun locateRoot(): File {

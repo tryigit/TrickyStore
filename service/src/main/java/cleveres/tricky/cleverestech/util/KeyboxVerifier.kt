@@ -34,6 +34,8 @@ object KeyboxVerifier {
         val certificateSerial: String? = null,
         val snapshotSha256: String? = null,
         internal val retryableBackendFailure: Boolean = false,
+        val securityLevel: String = "Unknown",
+        val isRkp: Boolean = false,
     )
 
     enum class Status {
@@ -527,14 +529,37 @@ object KeyboxVerifier {
         filename: String,
         storageId: String,
         crlFetcher: () -> RevocationSource?,
-    ): Result =
-        try {
+    ): Result {
+        var trackedSecurityLevel = "Unknown"
+        var trackedIsRkp = false
+        return try {
             if (!isSafeKeyboxFile(file)) {
-                return Result(file, file.name, Status.ERROR, "Unsafe or oversized keybox file")
+                return Result(file, file.name, Status.ERROR, "Unsafe or oversized keybox file", storageId = storageId)
             }
-            val parsed = KeyboxLoader.parseFileSnapshot(scope, filename)
+            val parsed = KeyboxLoader.parseFileSnapshot(scope, filename, storageId)
             val snapshotSha256 = parsed.snapshotSha256?.takeIf(FULL_SHA256_PATTERN::matches)
             val keyboxes = parsed.keyboxes
+            var resolvedSecurityLevel = "Unknown"
+            var hasTee = false
+            for (box in keyboxes) {
+                when (CertHack.classifyKeyboxSecurityLevel(box)) {
+                    CertHack.KeyboxSecurityLevel.STRONGBOX -> {
+                        resolvedSecurityLevel = "StrongBox"
+                        break
+                    }
+                    CertHack.KeyboxSecurityLevel.TEE -> {
+                        hasTee = true
+                    }
+                    CertHack.KeyboxSecurityLevel.UNKNOWN -> {}
+                }
+            }
+            if (resolvedSecurityLevel == "Unknown" && hasTee) {
+                resolvedSecurityLevel = "TEE"
+            }
+            trackedSecurityLevel = resolvedSecurityLevel
+            val securityLevel = trackedSecurityLevel
+            val isRkp = keyboxes.any(CertHack::isRkpKeybox)
+            trackedIsRkp = isRkp
             if (keyboxes.isEmpty()) {
                 return Result(
                     file,
@@ -543,6 +568,8 @@ object KeyboxVerifier {
                     "No valid keybox found or parse error",
                     storageId,
                     snapshotSha256 = snapshotSha256,
+                    securityLevel = securityLevel,
+                    isRkp = isRkp,
                 )
             }
             // parseFileSnapshot can discover a Rust backend restart and rebuild backend-owned CRL
@@ -556,6 +583,8 @@ object KeyboxVerifier {
                     "Failed to initialize CRL index",
                     storageId,
                     snapshotSha256 = snapshotSha256,
+                    securityLevel = securityLevel,
+                    isRkp = isRkp,
                 )
             val deviceSerial = keyboxes.asSequence().mapNotNull(CertHack::getDeviceCertificateSerial).firstOrNull()
 
@@ -582,6 +611,8 @@ object KeyboxVerifier {
                             storageId,
                             certificateSerial = deviceSerial,
                             snapshotSha256 = snapshotSha256,
+                            securityLevel = securityLevel,
+                            isRkp = isRkp,
                         )
                     }
                     Status.INVALID -> {
@@ -593,6 +624,8 @@ object KeyboxVerifier {
                             storageId,
                             certificateSerial = deviceSerial,
                             snapshotSha256 = snapshotSha256,
+                            securityLevel = securityLevel,
+                            isRkp = isRkp,
                         )
                     }
                     Status.ERROR -> {
@@ -605,6 +638,8 @@ object KeyboxVerifier {
                             certificateSerial = deviceSerial,
                             snapshotSha256 = snapshotSha256,
                             retryableBackendFailure = true,
+                            securityLevel = securityLevel,
+                            isRkp = isRkp,
                         )
                     }
                     Status.VALID -> Unit
@@ -618,6 +653,8 @@ object KeyboxVerifier {
                 storageId,
                 certificateSerial = deviceSerial,
                 snapshotSha256 = snapshotSha256,
+                securityLevel = securityLevel,
+                isRkp = isRkp,
             )
         } catch (_: RustBackendUnavailableException) {
             Result(
@@ -627,10 +664,21 @@ object KeyboxVerifier {
                 "Rust backend unavailable",
                 storageId,
                 retryableBackendFailure = true,
+                securityLevel = trackedSecurityLevel,
+                isRkp = trackedIsRkp,
             )
         } catch (error: Exception) {
-            Result(file, file.name, Status.ERROR, "Error: ${error.javaClass.simpleName}", storageId)
+            Result(
+                file,
+                file.name,
+                Status.ERROR,
+                "Error: ${error.javaClass.simpleName}",
+                storageId,
+                securityLevel = trackedSecurityLevel,
+                isRkp = trackedIsRkp,
+            )
         }
+    }
 
     private fun isSafeKeyboxFile(file: File): Boolean =
         Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS) &&

@@ -1,8 +1,16 @@
 # Changelog
 
-## V2.7.3
+## V2.7.4
 
-- **Module Security:** Implemented comprehensive runtime module integrity verification and tamper detection to safeguard critical binaries and components against unauthorized modifications.
-- **Keybox & Boot Stability:** Enhanced offline keybox verification resilience during device startup, ensuring valid keyboxes activate immediately upon boot without delay.
-- **Configuration & Recovery:** Improved default settings restoration to cleanly reset target scopes and configuration templates back to their initial state.
-- **General Improvements:** Various minor optimizations, bug fixes, and reliability enhancements across the native runtime and service layer.
+- **Key Attestation & Security:**
+  - Preserved caller-selected AttestKey certificate chains natively without breaking parent-child cryptographic signatures.
+  - Seamless StrongBox support: automatically utilizes genuine StrongBox keyboxes when available and routes standard TEE keys cleanly without duplicate errors or app crashes.
+  - Optimized O(1) keybox classification: precomputed security level mapping ensures instant key selection without runtime overhead.
+- **WebUI & User Experience:**
+  - Added clear, mobile-friendly **StrongBox** and **TEE** badges next to keyboxes in the Keybox Hub, making it easy to identify keybox capabilities at a glance.
+  - Localized remote server status messages for all supported interface languages.
+- **Module Installation & Compatibility:**
+  - Automatically detects and removes conflicting or outdated third-party attestation modules during installation to prevent conflicts and ensure a clean setup.
+- **Performance & Reliability:**
+  - Faster keystore response times with zero delay when applications check certificates.
+  - Consistent readback cache synchronization between key generation and entry queries.

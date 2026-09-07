@@ -38,6 +38,10 @@ Verifikasi Keybox dan penanganan identitas attestation khusus aplikasi.
 
 https://github.com/tryigit/CleveresTricky/pull/79
 
+- **#1199, 2026-09-07**
+  Pengindeksan keybox StrongBox dan TEE yang sadar cakupan, pelestarian tanda tangan AttestKey pemanggil, konsistensi cache readback, dan lencana perangkat keras WebUI.
+  https://github.com/tryigit/CleveresTricky/pull/1199
+
 ## Profil, cakupan aplikasi, dan runtime
 
 **#376**
@@ -110,3 +114,4 @@ https://github.com/tryigit/CleveresTricky/pull/1132
 | 2026-08-09 | #871 | Dual-SIM dan app-facing identity |
 | 2026-08-09 | #876 | Rust/native runtime architecture |
 | 2026-08-30 | #1132 | StrongBox dan TEE redirection |
+| 2026-09-07 | #1199 | Pengindeksan keybox StrongBox dan TEE & pelestarian AttestKey |

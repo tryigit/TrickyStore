@@ -3329,8 +3329,26 @@
             const body = document.createElement('div');
             body.style.cssText = 'flex:1 1 auto;min-width:0;line-height:1.4;';
             const name = document.createElement('div');
-            name.style.cssText = 'overflow-wrap:anywhere;word-break:break-word;font-weight:500;';
-            name.textContent = String(item.filename || '');
+            name.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;overflow-wrap:anywhere;word-break:break-word;font-weight:500;';
+            const nameText = document.createElement('span');
+            nameText.textContent = String(item.filename || '');
+            const isStrongBox = item.security_level === 'StrongBox';
+            const isTee = item.security_level === 'TEE';
+            const isUnknown = item.security_level === 'Unknown';
+            if (isStrongBox || isTee || isUnknown) {
+                const badge = document.createElement('span');
+                badge.className = 'ct-badge ' + (isStrongBox ? 'ct-badge-strongbox' : (isTee ? 'ct-badge-tee' : 'ct-badge-unknown'));
+                badge.textContent = isStrongBox ? 'StrongBox' : (isTee ? 'TEE' : 'Unknown');
+                name.append(nameText, badge);
+            } else {
+                name.append(nameText);
+            }
+            if (item.is_rkp) {
+                const rkpBadge = document.createElement('span');
+                rkpBadge.className = 'ct-badge ct-badge-rkp';
+                rkpBadge.textContent = 'RKP';
+                name.append(rkpBadge);
+            }
             const meta = document.createElement('div');
             meta.style.cssText = 'font-size:.78em;color:#888;margin-top:3px;overflow-wrap:anywhere;word-break:break-word;';
             const scope = item.scope === 'root' ? t('root') : t('managed');
@@ -3378,7 +3396,9 @@
                     id: String(item?.id ?? '').slice(0, 128),
                     filename: String(item?.filename ?? '').slice(0, 256),
                     scope: item?.scope === 'root' || item?.scope === 'keyboxes' || item?.scope === 'managed' ? item.scope : '',
-                    certificate_serial: String(item?.certificate_serial ?? '').slice(0, 256)
+                    certificate_serial: String(item?.certificate_serial ?? '').slice(0, 256),
+                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'TEE' ? 'TEE' : 'Unknown'),
+                    is_rkp: Boolean(item?.is_rkp)
                 })).filter(item => item.id && item.filename && item.scope)
                 : [];
             const ids = new Set(inventory.map(item => item.id));
@@ -3602,8 +3622,26 @@
             const row = document.createElement('div');
             row.style.cssText = 'padding:8px 0;overflow-wrap:anywhere' + (index !== array.length - 1 ? ';border-bottom:1px solid var(--border)' : '');
             const title = document.createElement('div');
-            title.style.fontWeight = '600';
-            title.textContent = String(item.filename || '') + ' - ' + String(item.status || '');
+            title.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-weight:600;';
+            const titleText = document.createElement('span');
+            titleText.textContent = String(item.filename || '') + ' - ' + String(item.status || '');
+            const isStrongBox = item.security_level === 'StrongBox';
+            const isTee = item.security_level === 'TEE';
+            const isUnknown = item.security_level === 'Unknown';
+            if (isStrongBox || isTee || isUnknown) {
+                const badge = document.createElement('span');
+                badge.className = 'ct-badge ' + (isStrongBox ? 'ct-badge-strongbox' : (isTee ? 'ct-badge-tee' : 'ct-badge-unknown'));
+                badge.textContent = isStrongBox ? 'StrongBox' : (isTee ? 'TEE' : 'Unknown');
+                title.append(titleText, badge);
+            } else {
+                title.append(titleText);
+            }
+            if (item.is_rkp) {
+                const rkpBadge = document.createElement('span');
+                rkpBadge.className = 'ct-badge ct-badge-rkp';
+                rkpBadge.textContent = 'RKP';
+                title.append(rkpBadge);
+            }
             const meta = document.createElement('div');
             meta.style.cssText = 'font-size:.8em;color:#888;margin-top:2px';
             meta.textContent = item.certificate_serial ? t('cert') + ': ' + item.certificate_serial : t('certMissing');
@@ -3633,6 +3671,8 @@
                     filename: String(item?.filename ?? '').slice(0, 256),
                     status: String(item?.status ?? 'UNKNOWN').slice(0, 128),
                     certificate_serial: String(item?.certificate_serial ?? '').slice(0, 256),
+                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'TEE' ? 'TEE' : 'Unknown'),
+                    is_rkp: Boolean(item?.is_rkp),
                     details: String(item?.details ?? '').slice(0, 2048)
                 })).filter(item => item.filename)
                 : [];

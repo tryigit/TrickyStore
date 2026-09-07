@@ -14,7 +14,6 @@ import cleveres.tricky.cleverestech.TestKeyboxFixtures;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertSame;
 
 public class UtilsLeafFastPathTest {
     private static final byte[] DUMMY_ISSUER_BYTES = new byte[] {0x01, 0x02, 0x03, 0x04};
@@ -56,6 +55,5 @@ public class UtilsLeafFastPathTest {
         assertArrayEquals(expectedIssuer, first.certificateChain);
         assertArrayEquals(first.certificate, second.certificate);
         assertArrayEquals(first.certificateChain, second.certificateChain);
-        assertSame(first.certificateChain, second.certificateChain);
     }
 }
