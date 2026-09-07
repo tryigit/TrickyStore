@@ -311,6 +311,9 @@ pub fn inspect_captured_patch_levels(extension_der: &[u8]) -> Result<CapturedPat
     let list_seven = parse_authorization_list(&fields[AUTHORIZATION_LIST_TEE_INDEX])?;
     let summary_six = summarize_authorization_list(&list_six)?;
     let summary_seven = summarize_authorization_list(&list_seven)?;
+    if summary_six.has_root_of_trust == summary_seven.has_root_of_trust {
+        return Err(Error::InvalidStructure);
+    }
     Ok(CapturedPatchLevels {
         system: combine_patch(summary_six.system_patch, summary_seven.system_patch)?,
         vendor: combine_patch(summary_six.vendor_patch, summary_seven.vendor_patch)?,
@@ -392,6 +395,7 @@ fn summarize_authorization_list(fields: &[TaggedTlv]) -> Result<AuthorizationSum
                 if summary.has_root_of_trust {
                     return Err(Error::InvalidStructure);
                 }
+                validate_root_of_trust(&field.encoded)?;
                 summary.has_root_of_trust = true;
             }
             SYSTEM_PATCH_TAG => {
@@ -501,6 +505,35 @@ fn explicit_octet_string(tag: u32, value: &[u8]) -> Result<Vec<u8>, Error> {
         .to_der()
         .map_err(|_| Error::Der)?;
     explicit_tag(tag, &inner)
+}
+
+fn validate_root_of_trust(encoded: &[u8]) -> Result<(), Error> {
+    let explicit = parse_any(encoded)?;
+    let sequence = parse_any(explicit.value())?;
+    if sequence.tag() != Tag::Sequence {
+        return Err(Error::InvalidStructure);
+    }
+    let fields = split_tlvs(sequence.value(), 4).map_err(|_| Error::InvalidStructure)?;
+    if fields.len() != 4 {
+        return Err(Error::InvalidStructure);
+    }
+    let key = parse_any(&fields[0])?;
+    if key.tag() != Tag::OctetString {
+        return Err(Error::InvalidStructure);
+    }
+    bool::from_der(&fields[1]).map_err(|_| Error::InvalidStructure)?;
+    let state = parse_any(&fields[2])?;
+    if state.tag() != Tag::Enumerated
+        || state.value().len() != 1
+        || !matches!(state.value()[0], 0..=3)
+    {
+        return Err(Error::InvalidStructure);
+    }
+    let hash = parse_any(&fields[3])?;
+    if hash.tag() != Tag::OctetString {
+        return Err(Error::InvalidStructure);
+    }
+    Ok(())
 }
 
 fn explicit_root_of_trust(boot_key: &[u8; 32], boot_hash: &[u8; 32]) -> Result<Vec<u8>, Error> {
@@ -902,6 +935,90 @@ mod tests {
             ..request
         };
         assert_eq!(rewrite_extension(&request), Err(Error::InvalidStructure));
+    }
+
+    #[test]
+    fn malformed_root_of_trust_fails_closed() {
+        let key = Any::new(Tag::OctetString, [1u8; 32].to_vec())
+            .unwrap()
+            .to_der()
+            .unwrap();
+        let verified = true.to_der().unwrap();
+        let state = Any::new(Tag::Enumerated, vec![0])
+            .unwrap()
+            .to_der()
+            .unwrap();
+        let hash = Any::new(Tag::OctetString, [2u8; 32].to_vec())
+            .unwrap()
+            .to_der()
+            .unwrap();
+
+        // 1. RootOfTrust with 3 fields instead of 4
+        let three_fields =
+            encode_sequence([key.as_slice(), verified.as_slice(), state.as_slice()]).unwrap();
+        let bad_root = explicit_tag_raw(ROOT_OF_TRUST_TAG, &three_fields);
+        let ext = key_description(400, 400, auth_list([]), auth_list([bad_root]));
+        let request = RewriteRequest {
+            extension_der: &ext,
+            patch_levels: PatchLevels::default(),
+            id_overrides: &[],
+            module_hash: None,
+            verified_boot_key: &BOOT_KEY,
+            verified_boot_hash: &BOOT_HASH,
+        };
+        assert_eq!(rewrite_extension(&request), Err(Error::InvalidStructure));
+        assert_eq!(
+            inspect_captured_patch_levels(&ext),
+            Err(Error::InvalidStructure)
+        );
+
+        // 2. RootOfTrust with non-boolean field 1
+        let not_bool = Any::new(Tag::OctetString, vec![1])
+            .unwrap()
+            .to_der()
+            .unwrap();
+        let bad_fields = encode_sequence([
+            key.as_slice(),
+            not_bool.as_slice(),
+            state.as_slice(),
+            hash.as_slice(),
+        ])
+        .unwrap();
+        let bad_root = explicit_tag_raw(ROOT_OF_TRUST_TAG, &bad_fields);
+        let ext = key_description(400, 400, auth_list([]), auth_list([bad_root]));
+        let request = RewriteRequest {
+            extension_der: &ext,
+            ..request
+        };
+        assert_eq!(rewrite_extension(&request), Err(Error::InvalidStructure));
+        assert_eq!(
+            inspect_captured_patch_levels(&ext),
+            Err(Error::InvalidStructure)
+        );
+
+        // 3. RootOfTrust with invalid state enumeration (e.g. 4)
+        let invalid_state = Any::new(Tag::Enumerated, vec![4])
+            .unwrap()
+            .to_der()
+            .unwrap();
+        let bad_state = encode_sequence([
+            key.as_slice(),
+            verified.as_slice(),
+            invalid_state.as_slice(),
+            hash.as_slice(),
+        ])
+        .unwrap();
+        let bad_root = explicit_tag_raw(ROOT_OF_TRUST_TAG, &bad_state);
+        let ext = key_description(400, 400, auth_list([]), auth_list([bad_root]));
+        let request = RewriteRequest {
+            extension_der: &ext,
+            ..request
+        };
+        assert_eq!(rewrite_extension(&request), Err(Error::InvalidStructure));
+        assert_eq!(
+            inspect_captured_patch_levels(&ext),
+            Err(Error::InvalidStructure)
+        );
     }
 
     fn key_description(

@@ -3390,7 +3390,7 @@
                     filename: String(item?.filename ?? '').slice(0, 256),
                     scope: item?.scope === 'root' || item?.scope === 'keyboxes' || item?.scope === 'managed' ? item.scope : '',
                     certificate_serial: String(item?.certificate_serial ?? '').slice(0, 256),
-                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'Unknown' ? 'Unknown' : 'TEE')
+                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'TEE' ? 'TEE' : 'Unknown')
                 })).filter(item => item.id && item.filename && item.scope)
                 : [];
             const ids = new Set(inventory.map(item => item.id));
@@ -3656,7 +3656,7 @@
                     filename: String(item?.filename ?? '').slice(0, 256),
                     status: String(item?.status ?? 'UNKNOWN').slice(0, 128),
                     certificate_serial: String(item?.certificate_serial ?? '').slice(0, 256),
-                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'Unknown' ? 'Unknown' : 'TEE'),
+                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'TEE' ? 'TEE' : 'Unknown'),
                     details: String(item?.details ?? '').slice(0, 2048)
                 })).filter(item => item.filename)
                 : [];

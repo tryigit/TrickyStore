@@ -133,6 +133,69 @@ class CertificateBackendProvenanceTest {
     }
 
     @Test
+    fun `provenance inspect and rewrite reject malformed or missing root of trust`() {
+        val kp = generateKeyPair()
+        val issuerCert = generateIssuerCert(kp, "CN=Test CA")
+        val box = ManagedOpaqueKeyOracle.wrap(kp, listOf(issuerCert), "keybox.xml")
+        val keyId = requireNotNull(box.keyPair().private.encoded)
+
+        fun attemptRewrite(leafDer: ByteArray): ByteArray? {
+            return CertificateBackend.rewrite(
+                genuineLeafDer = leafDer,
+                keyId = keyId,
+                signingAlgorithm = CertificateBackend.SIGNING_RSA_PKCS1_SHA256,
+                systemDisposition = CertificateBackend.PATCH_KEEP,
+                systemValue = 0,
+                vendorDisposition = CertificateBackend.PATCH_KEEP,
+                vendorValue = 0,
+                bootDisposition = CertificateBackend.PATCH_KEEP,
+                bootValue = 0,
+                idOverrides = emptyMap(),
+                moduleHash = null,
+                verifiedBootKey = ByteArray(32) { 1 },
+                verifiedBootHash = ByteArray(32) { 2 },
+            )
+        }
+
+        // 1. Missing RootOfTrust: both lists empty
+        val noRootLeaf = generateCustomAttestationCert(kp) { _, _ -> }
+        assertNull(CertificateBackend.inspect(noRootLeaf.encoded))
+        assertNull(attemptRewrite(noRootLeaf.encoded))
+
+        // 2. Duplicate RootOfTrust across lists
+        val dupRootLeaf = generateCustomAttestationCert(kp) { sw, tee ->
+            val root = validRootOfTrust()
+            sw.add(DERTaggedObject(true, 704, root))
+            tee.add(DERTaggedObject(true, 704, root))
+        }
+        assertNull(CertificateBackend.inspect(dupRootLeaf.encoded))
+        assertNull(attemptRewrite(dupRootLeaf.encoded))
+
+        // 3. Malformed RootOfTrust: 3 fields instead of 4
+        val threeFieldLeaf = generateCustomAttestationCert(kp) { _, tee ->
+            val root = ASN1EncodableVector()
+            root.add(DEROctetString(ByteArray(32) { 1 }))
+            root.add(ASN1Boolean.TRUE)
+            root.add(ASN1Enumerated(0))
+            tee.add(DERTaggedObject(true, 704, DERSequence(root)))
+        }
+        assertNull(CertificateBackend.inspect(threeFieldLeaf.encoded))
+        assertNull(attemptRewrite(threeFieldLeaf.encoded))
+
+        // 4. Malformed RootOfTrust: invalid bootState (out of 0..3)
+        val badStateLeaf = generateCustomAttestationCert(kp) { _, tee ->
+            val root = ASN1EncodableVector()
+            root.add(DEROctetString(ByteArray(32) { 1 }))
+            root.add(ASN1Boolean.TRUE)
+            root.add(ASN1Enumerated(4))
+            root.add(DEROctetString(ByteArray(32) { 2 }))
+            tee.add(DERTaggedObject(true, 704, DERSequence(root)))
+        }
+        assertNull(CertificateBackend.inspect(badStateLeaf.encoded))
+        assertNull(attemptRewrite(badStateLeaf.encoded))
+    }
+
+    @Test
     fun `StrongBox provenance is classified before issuer selection but is rewritten normally`() {
         val source =
             File(
@@ -269,6 +332,54 @@ class CertificateBackendProvenanceTest {
             name,
             kp.public,
         )
+        val signer: ContentSigner = JcaContentSignerBuilder("SHA256withRSA").build(kp.private)
+        return JcaX509CertificateConverter().getCertificate(builder.build(signer))
+    }
+
+    private fun validRootOfTrust(): DERSequence {
+        val rootOfTrust = ASN1EncodableVector()
+        rootOfTrust.add(DEROctetString(ByteArray(32) { 1 }))
+        rootOfTrust.add(ASN1Boolean.TRUE)
+        rootOfTrust.add(ASN1Enumerated(0))
+        rootOfTrust.add(DEROctetString(ByteArray(32) { 2 }))
+        return DERSequence(rootOfTrust)
+    }
+
+    private fun generateCustomAttestationCert(
+        kp: KeyPair,
+        configureLists: (ASN1EncodableVector, ASN1EncodableVector) -> Unit,
+    ): X509Certificate {
+        val issuer = X500Name("CN=Test Issuer")
+        val serial = BigInteger.ONE
+        val notBefore = Date()
+        val notAfter = Date(System.currentTimeMillis() + 100000)
+
+        val builder = JcaX509v3CertificateBuilder(
+            issuer,
+            serial,
+            notBefore,
+            notAfter,
+            issuer,
+            kp.public,
+        )
+
+        val keyDesc = ASN1EncodableVector()
+        keyDesc.add(ASN1Integer(100))
+        keyDesc.add(ASN1Enumerated(CertificateBackend.SECURITY_LEVEL_TEE))
+        keyDesc.add(ASN1Integer(100))
+        keyDesc.add(ASN1Enumerated(CertificateBackend.SECURITY_LEVEL_TEE))
+        keyDesc.add(DEROctetString(ByteArray(0)))
+        keyDesc.add(DEROctetString(ByteArray(0)))
+
+        val swList = ASN1EncodableVector()
+        val teeList = ASN1EncodableVector()
+        configureLists(swList, teeList)
+        keyDesc.add(DERSequence(swList))
+        keyDesc.add(DERSequence(teeList))
+
+        val oid = ASN1ObjectIdentifier("1.3.6.1.4.1.11129.2.1.17")
+        builder.addExtension(oid, false, DERSequence(keyDesc))
+
         val signer: ContentSigner = JcaContentSignerBuilder("SHA256withRSA").build(kp.private)
         return JcaX509CertificateConverter().getCertificate(builder.build(signer))
     }

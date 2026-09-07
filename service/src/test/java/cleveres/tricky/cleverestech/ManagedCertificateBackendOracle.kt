@@ -274,6 +274,7 @@ object ManagedCertificateBackendOracle {
                         require(!summary.hasRootOfTrust) {
                             "Duplicate RootOfTrust authorization"
                         }
+                        validateRootOfTrust(tagged)
                         summary.copy(hasRootOfTrust = true)
                     }
                     706 -> summary.copy(systemPatch = mergePatch(summary.systemPatch, patchValue(tagged)))
@@ -283,6 +284,16 @@ object ManagedCertificateBackendOracle {
                 }
         }
         return summary
+    }
+
+    private fun validateRootOfTrust(tagged: ASN1TaggedObject) {
+        val root = ASN1Sequence.getInstance(tagged.baseObject)
+        require(root.size() == 4) { "RootOfTrust sequence must contain exactly 4 fields" }
+        ASN1OctetString.getInstance(root.getObjectAt(0))
+        ASN1Boolean.getInstance(root.getObjectAt(1))
+        val bootState = ASN1Enumerated.getInstance(root.getObjectAt(2)).value.intValueExact()
+        require(bootState in 0..3) { "RootOfTrust verifiedBootState must be in range 0..3" }
+        ASN1OctetString.getInstance(root.getObjectAt(3))
     }
 
     private fun patchValue(tagged: ASN1TaggedObject): Int =

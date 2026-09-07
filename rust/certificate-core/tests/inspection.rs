@@ -65,6 +65,93 @@ mod fixture {
             .expect("genuine DER")
     }
 
+    pub(super) fn leaf_with_ext(extension_der: Vec<u8>) -> Vec<u8> {
+        let document = parse_keybox_xml_bytes(VALID_EC).expect("fixture XML");
+        let key = document.keys.first().expect("fixture key");
+        let issuer_pem = key
+            .certificates_pem
+            .first()
+            .expect("fixture issuer certificate");
+        let normalized_issuer = normalized_pem(issuer_pem);
+        let issuer =
+            Certificate::from_pem(normalized_issuer.as_bytes()).expect("fixture issuer DER");
+        synthetic_leaf_with_ext(&issuer, extension_der)
+            .to_der()
+            .expect("leaf DER")
+    }
+
+    pub(super) fn missing_root_leaf_der() -> Vec<u8> {
+        let software = auth_list([]);
+        let tee = auth_list([]);
+        let ext = encode_sequence([
+            attestation_i32(400).as_slice(),
+            any_enumerated(1).as_slice(),
+            attestation_i32(400).as_slice(),
+            any_enumerated(1).as_slice(),
+            any_octets(&[]).as_slice(),
+            any_octets(&[]).as_slice(),
+            software.as_slice(),
+            tee.as_slice(),
+        ]);
+        leaf_with_ext(ext)
+    }
+
+    pub(super) fn duplicate_root_across_lists_leaf_der() -> Vec<u8> {
+        let root = explicit_tag_raw(704, &root_of_trust([0x21; 32], [0x31; 32]));
+        let software = auth_list([root.clone()]);
+        let tee = auth_list([root]);
+        let ext = encode_sequence([
+            attestation_i32(400).as_slice(),
+            any_enumerated(1).as_slice(),
+            attestation_i32(400).as_slice(),
+            any_enumerated(1).as_slice(),
+            any_octets(&[]).as_slice(),
+            any_octets(&[]).as_slice(),
+            software.as_slice(),
+            tee.as_slice(),
+        ]);
+        leaf_with_ext(ext)
+    }
+
+    pub(super) fn duplicate_root_in_same_list_leaf_der() -> Vec<u8> {
+        let root = explicit_tag_raw(704, &root_of_trust([0x21; 32], [0x31; 32]));
+        let software = auth_list([]);
+        let tee = auth_list([root.clone(), root]);
+        let ext = encode_sequence([
+            attestation_i32(400).as_slice(),
+            any_enumerated(1).as_slice(),
+            attestation_i32(400).as_slice(),
+            any_enumerated(1).as_slice(),
+            any_octets(&[]).as_slice(),
+            any_octets(&[]).as_slice(),
+            software.as_slice(),
+            tee.as_slice(),
+        ]);
+        leaf_with_ext(ext)
+    }
+
+    pub(super) fn malformed_root_leaf_der() -> Vec<u8> {
+        let key = any_octets(&[0x21; 32]);
+        let verified = attestation_der::Encode::to_der(&true).expect("bool DER");
+        let state = any_enumerated(0);
+        let bad_root_value =
+            encode_sequence([key.as_slice(), verified.as_slice(), state.as_slice()]);
+        let bad_root = explicit_tag_raw(704, &bad_root_value);
+        let software = auth_list([]);
+        let tee = auth_list([bad_root]);
+        let ext = encode_sequence([
+            attestation_i32(400).as_slice(),
+            any_enumerated(1).as_slice(),
+            attestation_i32(400).as_slice(),
+            any_enumerated(1).as_slice(),
+            any_octets(&[]).as_slice(),
+            any_octets(&[]).as_slice(),
+            software.as_slice(),
+            tee.as_slice(),
+        ]);
+        leaf_with_ext(ext)
+    }
+
     fn synthetic_leaf_with_ext(issuer: &Certificate, extension_der: Vec<u8>) -> Certificate {
         let issuer_tbs = issuer.tbs_certificate();
         let version = explicit_x509_tag(0, &2i32.to_der().expect("v3 DER"));
@@ -157,5 +244,37 @@ fn certificate_without_attestation_extension_fails_closed() {
     assert_eq!(
         inspect_certificate(&fixture::ordinary_certificate_der()).unwrap_err(),
         Error::MissingAttestationExtension
+    );
+}
+
+#[test]
+fn inspection_rejects_missing_root_of_trust() {
+    assert_eq!(
+        inspect_certificate(&fixture::missing_root_leaf_der()).unwrap_err(),
+        Error::AttestationRewrite
+    );
+}
+
+#[test]
+fn inspection_rejects_duplicate_root_of_trust_across_lists() {
+    assert_eq!(
+        inspect_certificate(&fixture::duplicate_root_across_lists_leaf_der()).unwrap_err(),
+        Error::AttestationRewrite
+    );
+}
+
+#[test]
+fn inspection_rejects_duplicate_root_of_trust_in_same_list() {
+    assert_eq!(
+        inspect_certificate(&fixture::duplicate_root_in_same_list_leaf_der()).unwrap_err(),
+        Error::AttestationRewrite
+    );
+}
+
+#[test]
+fn inspection_rejects_malformed_root_of_trust_structure() {
+    assert_eq!(
+        inspect_certificate(&fixture::malformed_root_leaf_der()).unwrap_err(),
+        Error::AttestationRewrite
     );
 }
