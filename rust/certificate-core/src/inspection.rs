@@ -5,11 +5,14 @@ use crate::{
 };
 use attestation_der::asn1::AnyRef;
 use attestation_der::{Decode as AttestationDecode, Tag, TagNumber, Tagged};
-use cleverestricky_attestation_core::{inspect_captured_patch_levels, CapturedPatchLevels};
+use cleverestricky_attestation_core::CapturedPatchLevels;
 
 const SOFTWARE_INDEX: usize = 6;
 const TEE_INDEX: usize = 7;
 const ROOT_OF_TRUST_TAG: u32 = 704;
+const SYSTEM_PATCH_TAG: u32 = 706;
+const VENDOR_PATCH_TAG: u32 = 718;
+const BOOT_PATCH_TAG: u32 = 719;
 const ID_TAGS: [u32; 9] = [710, 711, 712, 713, 714, 715, 716, 717, 723];
 const MAX_FIELDS: usize = 16;
 const MAX_TAGS: usize = 256;
@@ -33,6 +36,16 @@ impl SecurityLevel {
 struct SecurityLevels {
     attestation: SecurityLevel,
     keymint: SecurityLevel,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AuthorizationScan<'a> {
+    root_count: usize,
+    root_of_trust: Option<&'a [u8]>,
+    present_id_mask: u16,
+    system_patch: Option<i32>,
+    vendor_patch: Option<i32>,
+    boot_patch: Option<i32>,
 }
 
 type BootDigests = (Option<[u8; 32]>, Option<[u8; 32]>);
@@ -142,8 +155,6 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
         }
     }
     let extension_der = attestation.ok_or(Error::MissingAttestationExtension)?;
-    let captured_patch_levels =
-        inspect_captured_patch_levels(extension_der).map_err(|_| Error::AttestationRewrite)?;
     let outer = AnyRef::from_der(extension_der).map_err(|_| Error::AttestationRewrite)?;
     if outer.tag() != Tag::Sequence {
         return Err(Error::AttestationRewrite);
@@ -172,15 +183,26 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
     };
     let keymint_version = <i32 as attestation_der::Decode>::from_der(fields[2])
         .map_err(|_| Error::AttestationRewrite)?;
-    let (six_root_count, six_root, six_mask) = scan_auth_list(fields[SOFTWARE_INDEX])?;
-    let (seven_root_count, seven_root, seven_mask) = scan_auth_list(fields[TEE_INDEX])?;
-    if six_root_count + seven_root_count != 1 {
+    let six = scan_auth_list(fields[SOFTWARE_INDEX])?;
+    let seven = scan_auth_list(fields[TEE_INDEX])?;
+    if six.root_count + seven.root_count != 1 {
         return Err(Error::AttestationRewrite);
     }
-    let (root_encoded, present_id_mask) = if six_root_count == 1 {
-        (six_root.unwrap(), six_mask)
+    let captured_patch_levels = CapturedPatchLevels {
+        system: combine_patch(six.system_patch, seven.system_patch)?,
+        vendor: combine_patch(six.vendor_patch, seven.vendor_patch)?,
+        boot: combine_patch(six.boot_patch, seven.boot_patch)?,
+    };
+    let (root_encoded, present_id_mask) = if six.root_count == 1 {
+        (
+            six.root_of_trust.ok_or(Error::AttestationRewrite)?,
+            six.present_id_mask,
+        )
     } else {
-        (seven_root.unwrap(), seven_mask)
+        (
+            seven.root_of_trust.ok_or(Error::AttestationRewrite)?,
+            seven.present_id_mask,
+        )
     };
     let (original_boot_key, original_boot_hash) = parse_root_of_trust(root_encoded)?;
 
@@ -208,15 +230,13 @@ fn decode_security_level(encoded: &[u8]) -> Result<SecurityLevel, Error> {
     }
 }
 
-fn scan_auth_list(encoded: &[u8]) -> Result<(usize, Option<&[u8]>, u16), Error> {
+fn scan_auth_list(encoded: &[u8]) -> Result<AuthorizationScan<'_>, Error> {
     let sequence = AnyRef::from_der(encoded).map_err(|_| Error::AttestationRewrite)?;
     if sequence.tag() != Tag::Sequence {
         return Err(Error::AttestationRewrite);
     }
-    let mut count = 0;
-    let mut root_of_trust = None;
-    let mut present_id_mask = 0u16;
-    let mut tag_count = 0;
+    let mut scan = AuthorizationScan::default();
+    let mut tag_count = 0usize;
     for item in TlvIterator::new(sequence.value()) {
         let slice = item.map_err(|_| Error::AttestationRewrite)?;
         tag_count += 1;
@@ -231,15 +251,57 @@ fn scan_auth_list(encoded: &[u8]) -> Result<(usize, Option<&[u8]>, u16), Error> 
             } => number.value(),
             _ => return Err(Error::AttestationRewrite),
         };
-        if tag == ROOT_OF_TRUST_TAG {
-            count += 1;
-            root_of_trust = Some(slice);
+        match tag {
+            ROOT_OF_TRUST_TAG => {
+                scan.root_count += 1;
+                scan.root_of_trust = Some(slice);
+            }
+            SYSTEM_PATCH_TAG => {
+                scan.system_patch = merge_patch(scan.system_patch, decode_explicit_i32(slice)?)?;
+            }
+            VENDOR_PATCH_TAG => {
+                scan.vendor_patch = merge_patch(scan.vendor_patch, decode_explicit_i32(slice)?)?;
+            }
+            BOOT_PATCH_TAG => {
+                scan.boot_patch = merge_patch(scan.boot_patch, decode_explicit_i32(slice)?)?;
+            }
+            _ => {}
         }
         if let Some(index) = ID_TAGS.iter().position(|candidate| candidate == &tag) {
-            present_id_mask |= 1u16 << index;
+            scan.present_id_mask |= 1u16 << index;
         }
     }
-    Ok((count, root_of_trust, present_id_mask))
+    Ok(scan)
+}
+
+fn decode_explicit_i32(encoded: &[u8]) -> Result<i32, Error> {
+    let outer = AnyRef::from_der(encoded).map_err(|_| Error::AttestationRewrite)?;
+    if !matches!(
+        outer.tag(),
+        Tag::ContextSpecific {
+            constructed: true,
+            ..
+        }
+    ) {
+        return Err(Error::AttestationRewrite);
+    }
+    <i32 as AttestationDecode>::from_der(outer.value()).map_err(|_| Error::AttestationRewrite)
+}
+
+fn merge_patch(current: Option<i32>, parsed: i32) -> Result<Option<i32>, Error> {
+    match current {
+        Some(value) if value != parsed => Err(Error::AttestationRewrite),
+        Some(value) => Ok(Some(value)),
+        None => Ok(Some(parsed)),
+    }
+}
+
+fn combine_patch(left: Option<i32>, right: Option<i32>) -> Result<Option<i32>, Error> {
+    match (left, right) {
+        (Some(a), Some(b)) if a != b => Err(Error::AttestationRewrite),
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
 }
 
 fn parse_root_of_trust(encoded: &[u8]) -> Result<BootDigests, Error> {
