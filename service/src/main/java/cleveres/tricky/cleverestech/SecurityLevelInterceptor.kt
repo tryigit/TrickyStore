@@ -66,20 +66,13 @@ class SecurityLevelInterceptor : BinderInterceptor() {
 
         return try {
             reply.readException()
-            val metadata = reply.readTypedObject(KeyMetadata.CREATOR) ?: return Skip
-            if (!Utils.isCertificateChainRewriteCandidate(metadata) && !Utils.hasRewritableLeafCertificate(metadata)) {
-                return Skip
-            }
+            
+            // Fast parcel check: parse just the byte offsets without allocating the full KeyMetadata
+            val parsed = Utils.parseKeyMetadataParcel(reply) ?: return Skip
 
-            // Parse only the leaf first. A normal asymmetric key without an Android attestation
-            // challenge still has a self-signed X.509 leaf, but it must never cross the Rust
-            // certificate backend boundary. Preserving this zero-backend fast path avoids
-            // a measurable non-attested-only UDS/parser cost.
-            val originalLeaf = Utils.getLeafCertificate(metadata)
-            if (
-                originalLeaf == null ||
-                !Utils.hasAndroidAttestationExtension(originalLeaf)
-            ) {
+            // Wrap in LazyX509Certificate to check for Android attestation extension without full parsing
+            val originalLeaf = cleveres.tricky.cleverestech.keystore.LazyX509Certificate(parsed.leafEncoded)
+            if (!originalLeaf.hasAttestationExtension()) {
                 return Skip
             }
 
@@ -97,13 +90,11 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 return Skip
             }
 
-            if (!CertHack.applyCachedCertificateChain(metadata)) {
-                Utils.putCertificateChain(metadata, rewritten)
-            }
-            reply.setDataSize(0)
-            reply.setDataPosition(0)
-            reply.writeNoException()
-            reply.writeTypedObject(metadata, 0)
+            val newLeaf = rewritten[0].encoded
+            val newChain = Utils.encodeIssuerChain(rewritten)
+            
+            Utils.rewriteKeyMetadataParcel(reply, parsed, newLeaf, newChain)
+            
             OverrideReply(0, reply)
         } catch (_: Throwable) {
             Skip

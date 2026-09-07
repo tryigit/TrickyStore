@@ -137,6 +137,113 @@ public final class Utils {
         }
     }
 
+    public static class ParcelParseResult {
+        public byte[] leafEncoded;
+        public int certOffset;
+        public int chainOffset;
+        public int afterChainOffset;
+        public int metadataStart;
+        public int metadataSize;
+        public int oldCertPaddedLen;
+        public int oldChainPaddedLen;
+    }
+
+    public static ParcelParseResult parseKeyMetadataParcel(Parcel reply) {
+        if (reply == null) return null;
+        int posBefore = reply.dataPosition();
+        try {
+            // Usually, reply.readException() was already called by the caller, so the position is at KeyMetadata.
+            // But let's check if there is a presence flag.
+            if (reply.readInt() == 0) return null; // KeyMetadata presence
+            ParcelParseResult result = new ParcelParseResult();
+            result.metadataStart = reply.dataPosition();
+            result.metadataSize = reply.readInt();
+            int metadataEnd = result.metadataStart + result.metadataSize;
+
+            if (reply.dataPosition() >= metadataEnd) return null;
+            if (reply.readInt() != 0) { // key presence
+                if (!skipStableParcelableBody(reply)) return null;
+            }
+
+            if (reply.dataPosition() >= metadataEnd) return null;
+            reply.readInt(); // keySecurityLevel
+
+            if (reply.dataPosition() >= metadataEnd) return null;
+            int authLen = reply.readInt(); // authorizations array length
+            if (authLen > 0) {
+                for (int i = 0; i < authLen; i++) {
+                    if (reply.dataPosition() >= metadataEnd) return null;
+                    if (reply.readInt() != 0) {
+                        if (!skipStableParcelableBody(reply)) return null;
+                    }
+                }
+            } else if (authLen < -1) {
+                return null;
+            }
+
+            if (reply.dataPosition() >= metadataEnd) return null;
+            result.certOffset = reply.dataPosition();
+            result.leafEncoded = reply.createByteArray();
+            result.oldCertPaddedLen = reply.dataPosition() - result.certOffset;
+
+            if (reply.dataPosition() >= metadataEnd) return null;
+            result.chainOffset = reply.dataPosition();
+            int chainLen = reply.readInt();
+            if (chainLen >= 0) {
+                reply.setDataPosition(reply.dataPosition() + ((chainLen + 3) & ~3));
+            }
+            result.oldChainPaddedLen = reply.dataPosition() - result.chainOffset;
+            result.afterChainOffset = reply.dataPosition();
+
+            return result;
+        } catch (RuntimeException e) {
+            return null;
+        } finally {
+            reply.setDataPosition(posBefore);
+        }
+    }
+
+    private static final ThreadLocal<Parcel> SCRATCH_PARCEL = ThreadLocal.withInitial(Parcel::obtain);
+
+    public static void rewriteKeyMetadataParcel(Parcel reply, ParcelParseResult parsed, byte[] newLeaf, byte[] newChain) {
+        Parcel scratch = SCRATCH_PARCEL.get();
+        if (scratch == null) return;
+        scratch.setDataSize(0);
+        scratch.setDataPosition(0);
+
+        // Copy up to certificate offset
+        scratch.appendFrom(reply, 0, parsed.certOffset);
+
+        // Write new certificate
+        scratch.writeByteArray(newLeaf);
+        int newCertPaddedLen = scratch.dataPosition() - parsed.certOffset;
+
+        // Write new chain
+        int chainStart = scratch.dataPosition();
+        scratch.writeByteArray(newChain);
+        int newChainPaddedLen = scratch.dataPosition() - chainStart;
+
+        // Copy the rest of the parcel
+        int remaining = reply.dataSize() - parsed.afterChainOffset;
+        if (remaining > 0) {
+            scratch.appendFrom(reply, parsed.afterChainOffset, remaining);
+        }
+
+        // Update KeyMetadata size
+        int sizeDiff = newCertPaddedLen + newChainPaddedLen - parsed.oldCertPaddedLen - parsed.oldChainPaddedLen;
+        if (sizeDiff != 0) {
+            int newMetadataSize = parsed.metadataSize + sizeDiff;
+            scratch.setDataPosition(parsed.metadataStart);
+            scratch.writeInt(newMetadataSize);
+        }
+
+        // Replace reply contents
+        reply.setDataSize(0);
+        reply.setDataPosition(0);
+        reply.appendFrom(scratch, 0, scratch.dataSize());
+        reply.setDataPosition(0);
+    }
+
     /**
      * Returns whether the already-parsed leaf carries Android's attestation extension.
      *
@@ -220,7 +327,7 @@ public final class Utils {
         return chain;
     }
 
-    static byte[] encodeIssuerChain(Certificate[] chain) throws CertificateException {
+    public static byte[] encodeIssuerChain(Certificate[] chain) throws CertificateException {
         if (chain.length <= 1) return new byte[0];
 
         FastByteArrayOutputStream output = new FastByteArrayOutputStream(2048);

@@ -1,8 +1,8 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
 #![forbid(unsafe_code)]
 
-use attestation_der::asn1::{Any, BitString, OctetString};
-use attestation_der::{Decode as X509Decode, Encode as X509Encode, Tag, TagNumber};
+use attestation_der::asn1::{Any, AnyRef, BitString};
+use attestation_der::{Decode as X509Decode, Encode as X509Encode, Tag, TagNumber, Tagged};
 use cleverestricky_attestation_core::{
     rewrite_extension, AttestationIdOverride, CapturedPatchLevels, PatchLevels, RewriteRequest,
 };
@@ -18,7 +18,6 @@ use rsa_sha2::Sha256 as RsaSha256;
 use rsa_signature::{SignatureEncoding as _, Signer as _, Verifier as _};
 use signature::{Signer as _, Verifier as _};
 use std::fmt;
-use x509_cert::ext::Extensions;
 use x509_cert::spki::ObjectIdentifier;
 use x509_cert::Certificate;
 
@@ -226,6 +225,9 @@ pub fn rewrite_certificate(
     })
 }
 
+const ANDROID_ATTESTATION_OID_BYTES: &[u8] =
+    &[0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02, 0x01, 0x11];
+
 pub fn rewrite_certificate_prepared(
     request: &PreparedCertificateRewriteRequest<'_>,
 ) -> Result<CertificateRewriteResult, Error> {
@@ -235,22 +237,88 @@ pub fn rewrite_certificate_prepared(
         return Err(Error::Bounds);
     }
 
-    let leaf =
-        Certificate::from_der(request.genuine_leaf_der).map_err(|_| Error::InvalidCertificate)?;
-    let mut extensions = leaf
-        .tbs_certificate()
-        .extensions()
-        .cloned()
-        .ok_or(Error::MissingAttestationExtension)?;
-    let mut matching_index = None;
-    for (index, extension) in extensions.iter().enumerate() {
-        if extension.extn_id == ANDROID_ATTESTATION_OID && matching_index.replace(index).is_some() {
-            return Err(Error::DuplicateAttestationExtension);
+    let cert_seq = parse_any(request.genuine_leaf_der)?;
+    if cert_seq.tag() != Tag::Sequence {
+        return Err(Error::InvalidCertificate);
+    }
+    let cert_fields = split_tlvs(cert_seq.value())?;
+    if cert_fields.len() < 3 {
+        return Err(Error::InvalidCertificate);
+    }
+
+    let tbs_seq = parse_any(cert_fields[0])?;
+    if tbs_seq.tag() != Tag::Sequence {
+        return Err(Error::InvalidCertificate);
+    }
+    let tbs_fields = split_tlvs(tbs_seq.value())?;
+    if tbs_fields.len() < 7 {
+        return Err(Error::InvalidCertificate);
+    }
+
+    let first_tag = parse_any(tbs_fields[0])?.tag();
+    let has_version = matches!(
+        first_tag,
+        Tag::ContextSpecific {
+            number: TagNumber(0),
+            ..
+        }
+    );
+
+    let (version, serial, validity, subject, spki) = if has_version {
+        (
+            Some(tbs_fields[0]),
+            tbs_fields[1],
+            tbs_fields[4],
+            tbs_fields[5],
+            tbs_fields[6],
+        )
+    } else {
+        (
+            None,
+            tbs_fields[0],
+            tbs_fields[3],
+            tbs_fields[4],
+            tbs_fields[5],
+        )
+    };
+
+    let extensions_explicit = parse_any(tbs_fields.last().unwrap())?;
+    if !matches!(
+        extensions_explicit.tag(),
+        Tag::ContextSpecific {
+            constructed: true,
+            number: TagNumber(3)
+        }
+    ) {
+        return Err(Error::MissingAttestationExtension);
+    }
+
+    let extensions_seq = parse_any(extensions_explicit.value())?;
+    let extensions = split_tlvs(extensions_seq.value())?;
+
+    let mut attestation_index = None;
+    for (index, ext_der) in extensions.iter().enumerate() {
+        let ext_seq = parse_any(ext_der)?;
+        let ext_fields = split_tlvs(ext_seq.value())?;
+        if ext_fields.is_empty() {
+            return Err(Error::InvalidCertificate);
+        }
+        let extn_id = parse_any(ext_fields[0])?;
+        if extn_id.value() == ANDROID_ATTESTATION_OID_BYTES {
+            if attestation_index.replace(index).is_some() {
+                return Err(Error::DuplicateAttestationExtension);
+            }
         }
     }
-    let index = matching_index.ok_or(Error::MissingAttestationExtension)?;
+
+    let index = attestation_index.ok_or(Error::MissingAttestationExtension)?;
+
+    let ext_seq = parse_any(extensions[index])?;
+    let ext_fields = split_tlvs(ext_seq.value())?;
+    let extn_value_any = parse_any(ext_fields.last().unwrap())?;
+
     let rewritten = rewrite_extension(&RewriteRequest {
-        extension_der: extensions[index].extn_value.as_bytes(),
+        extension_der: extn_value_any.value(),
         patch_levels: request.patch_levels,
         id_overrides: request.id_overrides,
         module_hash: request.module_hash,
@@ -258,17 +326,42 @@ pub fn rewrite_certificate_prepared(
         verified_boot_hash: request.verified_boot_hash,
     })
     .map_err(|_| Error::AttestationRewrite)?;
-    extensions[index].critical = false;
-    extensions[index].extn_value =
-        OctetString::new(rewritten.extension_der).map_err(|_| Error::Encoding)?;
+
+    let new_extn_value_der = Any::new(Tag::OctetString, rewritten.extension_der)
+        .map_err(|_| Error::Encoding)?
+        .to_der()
+        .map_err(|_| Error::Encoding)?;
+
+    let new_ext = encode_sequence(&[ext_fields[0], &new_extn_value_der])?;
+
+    let mut final_extensions = Vec::with_capacity(extensions.len());
+    for (i, ext_der) in extensions.iter().enumerate() {
+        if i == index {
+            final_extensions.push(new_ext.as_slice());
+        } else {
+            final_extensions.push(ext_der);
+        }
+    }
+
+    let new_extensions_seq = encode_sequence(&final_extensions)?;
+    let new_extensions_explicit = encode_explicit(3, &new_extensions_seq)?;
 
     let algorithm_der = signature_algorithm_der(request.issuer.algorithm());
-    let tbs_der = rebuild_tbs_certificate(
-        &leaf,
-        &request.issuer.issuer_name_der,
-        &extensions,
-        algorithm_der,
-    )?;
+
+    let mut tbs_out = Vec::with_capacity(8);
+    if let Some(v) = version {
+        tbs_out.push(v);
+    }
+    tbs_out.push(serial);
+    tbs_out.push(algorithm_der);
+    tbs_out.push(&request.issuer.issuer_name_der);
+    tbs_out.push(validity);
+    tbs_out.push(subject);
+    tbs_out.push(spki);
+    tbs_out.push(&new_extensions_explicit);
+
+    let tbs_der = encode_sequence(&tbs_out)?;
+
     let leaf_der = request.issuer.sign_certificate(&tbs_der, algorithm_der)?;
     if leaf_der.len() > MAX_CERTIFICATE_DER_BYTES {
         return Err(Error::Bounds);
@@ -299,57 +392,23 @@ fn signature_algorithm_der(algorithm: SigningAlgorithm) -> &'static [u8] {
     }
 }
 
-const VERSION_V3_DER: &[u8] = &[0xa0, 0x03, 0x02, 0x01, 0x02];
-
-fn rebuild_tbs_certificate(
-    leaf: &Certificate,
-    issuer_name_der: &[u8],
-    extensions: &Extensions,
-    algorithm_der: &[u8],
-) -> Result<Vec<u8>, Error> {
-    let leaf_tbs = leaf.tbs_certificate();
-
-    // Match the managed X509v3CertificateBuilder oracle: rebuild from genuine serial, validity,
-    // subject, SPKI and extensions; issuer comes from the selected keybox. The managed builder did
-    // not preserve issuer/subject unique IDs, so they are intentionally omitted here as well.
-    let serial = leaf_tbs
-        .serial_number()
-        .to_der()
-        .map_err(|_| Error::Encoding)?;
-    let validity = leaf_tbs.validity().to_der().map_err(|_| Error::Encoding)?;
-    let subject = leaf_tbs.subject().to_der().map_err(|_| Error::Encoding)?;
-    let spki = leaf_tbs
-        .subject_public_key_info()
-        .to_der()
-        .map_err(|_| Error::Encoding)?;
-    let extensions = encode_extensions(extensions)?;
-    let extensions = encode_explicit(3, &extensions)?;
-
-    encode_sequence(&[
-        VERSION_V3_DER,
-        &serial,
-        algorithm_der,
-        issuer_name_der,
-        &validity,
-        &subject,
-        &spki,
-        &extensions,
-    ])
+fn parse_any(encoded: &[u8]) -> Result<AnyRef<'_>, Error> {
+    X509Decode::from_der(encoded).map_err(|_| Error::InvalidCertificate)
 }
 
-fn encode_extensions(extensions: &Extensions) -> Result<Vec<u8>, Error> {
-    let mut total_len = 0usize;
-    let mut encoded_fields = Vec::with_capacity(extensions.len());
-    for extension in extensions {
-        let field = extension.to_der().map_err(|_| Error::Encoding)?;
-        total_len = total_len.checked_add(field.len()).ok_or(Error::Encoding)?;
-        encoded_fields.push(field);
+fn split_tlvs(mut encoded: &[u8]) -> Result<Vec<&[u8]>, Error> {
+    let mut output = Vec::new();
+    while !encoded.is_empty() {
+        let (_, rest): (AnyRef<'_>, &[u8]) =
+            X509Decode::from_der_partial(encoded).map_err(|_| Error::InvalidCertificate)?;
+        let consumed = encoded
+            .len()
+            .checked_sub(rest.len())
+            .ok_or(Error::InvalidCertificate)?;
+        output.push(&encoded[..consumed]);
+        encoded = rest;
     }
-    if total_len > MAX_CERTIFICATE_DER_BYTES {
-        return Err(Error::Bounds);
-    }
-    let refs: Vec<&[u8]> = encoded_fields.iter().map(Vec::as_slice).collect();
-    encode_sequence(&refs)
+    Ok(output)
 }
 
 fn encode_explicit(tag: u32, inner: &[u8]) -> Result<Vec<u8>, Error> {
