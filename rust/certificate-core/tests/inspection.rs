@@ -152,6 +152,34 @@ mod fixture {
         leaf_with_ext(ext)
     }
 
+    pub(super) fn implicit_root_leaf_der() -> Vec<u8> {
+        let key = any_octets(&[0x21; 32]);
+        let verified = attestation_der::Encode::to_der(&true).expect("bool DER");
+        let state = any_enumerated(0);
+        let hash = any_octets(&[0x31; 32]);
+        let raw_fields = [
+            key.as_slice(),
+            verified.as_slice(),
+            state.as_slice(),
+            hash.as_slice(),
+        ]
+        .concat();
+        let implicit_root = explicit_tag_raw(704, &raw_fields);
+        let software = auth_list([]);
+        let tee = auth_list([implicit_root]);
+        let ext = encode_sequence([
+            attestation_i32(400).as_slice(),
+            any_enumerated(1).as_slice(),
+            attestation_i32(400).as_slice(),
+            any_enumerated(1).as_slice(),
+            any_octets(&[]).as_slice(),
+            any_octets(&[]).as_slice(),
+            software.as_slice(),
+            tee.as_slice(),
+        ]);
+        leaf_with_ext(ext)
+    }
+
     fn synthetic_leaf_with_ext(issuer: &Certificate, extension_der: Vec<u8>) -> Certificate {
         let issuer_tbs = issuer.tbs_certificate();
         let version = explicit_x509_tag(0, &2i32.to_der().expect("v3 DER"));
@@ -275,6 +303,14 @@ fn inspection_rejects_duplicate_root_of_trust_in_same_list() {
 fn inspection_rejects_malformed_root_of_trust_structure() {
     assert_eq!(
         inspect_certificate(&fixture::malformed_root_leaf_der()).unwrap_err(),
+        Error::AttestationRewrite
+    );
+}
+
+#[test]
+fn inspection_rejects_implicitly_tagged_root_of_trust() {
+    assert_eq!(
+        inspect_certificate(&fixture::implicit_root_leaf_der()).unwrap_err(),
         Error::AttestationRewrite
     );
 }

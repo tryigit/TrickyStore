@@ -63,7 +63,7 @@ object ManagedCertificateBackendOracle {
                 if (index >= 0) presentMask = presentMask or (1 shl index)
             }
 
-            val root = findTag(tee, 704)?.let { ASN1Sequence.getInstance(it.baseObject) }
+            val root = findTag(tee, 704)?.let { validateRootOfTrust(it) }
             CertificateBackend.Inspection(
                 systemPatch = combinePatch(teeSummary.systemPatch, softwareSummary.systemPatch),
                 vendorPatch = combinePatch(teeSummary.vendorPatch, softwareSummary.vendorPatch),
@@ -286,14 +286,15 @@ object ManagedCertificateBackendOracle {
         return summary
     }
 
-    private fun validateRootOfTrust(tagged: ASN1TaggedObject) {
-        val root = ASN1Sequence.getInstance(tagged.baseObject)
+    private fun validateRootOfTrust(tagged: ASN1TaggedObject): ASN1Sequence {
+        val root = ASN1Sequence.getInstance(tagged, true)
         require(root.size() == 4) { "RootOfTrust sequence must contain exactly 4 fields" }
         ASN1OctetString.getInstance(root.getObjectAt(0))
         ASN1Boolean.getInstance(root.getObjectAt(1))
         val bootState = ASN1Enumerated.getInstance(root.getObjectAt(2)).value.intValueExact()
         require(bootState in 0..3) { "RootOfTrust verifiedBootState must be in range 0..3" }
         ASN1OctetString.getInstance(root.getObjectAt(3))
+        return root
     }
 
     private fun patchValue(tagged: ASN1TaggedObject): Int =

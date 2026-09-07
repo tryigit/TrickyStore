@@ -193,6 +193,14 @@ class CertificateBackendProvenanceTest {
         }
         assertNull(CertificateBackend.inspect(badStateLeaf.encoded))
         assertNull(attemptRewrite(badStateLeaf.encoded))
+
+        // 5. Implicitly tagged RootOfTrust: must fail closed (return null)
+        val implicitRootLeaf = generateCustomAttestationCert(kp) { _, tee ->
+            val root = validRootOfTrust()
+            tee.add(DERTaggedObject(false, 704, root))
+        }
+        assertNull(CertificateBackend.inspect(implicitRootLeaf.encoded))
+        assertNull(attemptRewrite(implicitRootLeaf.encoded))
     }
 
     @Test
