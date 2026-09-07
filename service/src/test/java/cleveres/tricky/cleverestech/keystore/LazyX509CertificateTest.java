@@ -129,6 +129,10 @@ public class LazyX509CertificateTest {
         LazyX509Certificate lazy = new LazyX509Certificate(buffer, false);
         assertArrayEquals(buffer, lazy.getEncoded());
         assertFalse(lazy.isDelegateInstantiatedForTesting());
+
+        buffer[4] = 0x02;
+        assertEquals("Mutating underlying buffer must reflect in getEncoded() to prove zero-copy array sharing",
+                0x02, lazy.getEncoded()[4]);
     }
 
     @Test
