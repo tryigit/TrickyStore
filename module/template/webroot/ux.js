@@ -3331,6 +3331,7 @@
             const name = document.createElement('div');
             name.style.cssText = 'display:flex;align-items:center;gap:6px;flex-wrap:wrap;overflow-wrap:anywhere;word-break:break-word;font-weight:500;';
             const nameText = document.createElement('span');
+            nameText.textContent = String(item.filename || '');
             const isStrongBox = item.security_level === 'StrongBox';
             const isTee = item.security_level === 'TEE';
             if (isStrongBox || isTee) {

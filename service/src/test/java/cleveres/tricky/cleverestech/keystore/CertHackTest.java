@@ -223,6 +223,10 @@ public class CertHackTest {
 
         CertHack.KeyBox unclassifiedBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "keybox.xml");
         assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(unclassifiedBox));
+        assertFalse(CertHack.isTeeKeybox(unclassifiedBox));
+        assertFalse(CertHack.isStrongBoxKeybox(unclassifiedBox));
+        assertTrue(CertHack.filterKeyboxesBySecurityLevel(List.of(unclassifiedBox), false).isEmpty());
+        assertTrue(CertHack.filterKeyboxesBySecurityLevel(List.of(unclassifiedBox), true).isEmpty());
     }
 
     @Test
@@ -368,6 +372,47 @@ public class CertHackTest {
             assertNotEquals("StrongBox leaf must fall back to TEE keybox and rewrite", inputChain, resultChain);
             assertEquals(2, resultChain.length);
             assertEquals(teeCert, resultChain[1]);
+        } finally {
+            stateField.set(null, previousState);
+        }
+    }
+
+    @Test
+    public void testHackCertificateChainWithOnlyUnknownKeyboxDoesNotRewrite() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", "BC");
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+        X509Certificate plainCert = generateIssuerCert(kp, "CN=Generic Unbranded CA, O=Custom, C=US");
+        CertHack.KeyBox unknownKeybox = ManagedOpaqueKeyOracle.wrap(
+                kp, List.of(plainCert), "unknown.xml");
+
+        Map<String, List<CertHack.KeyBox>> newKeyboxes = new HashMap<>();
+        newKeyboxes.put("RSA", List.of(unknownKeybox));
+        Map<String, List<CertHack.KeyBox>> newKeyboxFiles = new HashMap<>();
+        newKeyboxFiles.put("unknown.xml", List.of(unknownKeybox));
+
+        Class<?> stateClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$State");
+        java.lang.reflect.Constructor<?> ctor = stateClass.getDeclaredConstructor(Map.class, Map.class);
+        ctor.setAccessible(true);
+        Object newState = ctor.newInstance(newKeyboxes, newKeyboxFiles);
+
+        java.lang.reflect.Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object previousState = stateField.get(null);
+        stateField.set(null, newState);
+
+        try {
+            // 1. Genuine TEE leaf must NOT rewrite when only UNKNOWN keybox is available
+            X509Certificate teeLeaf = generateAttestationCert(kp, 1, 1);
+            Certificate[] teeChain = new Certificate[]{teeLeaf};
+            Certificate[] teeResult = CertHack.hackCertificateChain(teeChain, 0);
+            assertSame("TEE leaf must not rewrite when only UNKNOWN keybox is available", teeChain, teeResult);
+
+            // 2. Genuine StrongBox leaf must NOT rewrite when only UNKNOWN keybox is available
+            X509Certificate sbLeaf = generateAttestationCert(kp, 2, 2);
+            Certificate[] sbChain = new Certificate[]{sbLeaf};
+            Certificate[] sbResult = CertHack.hackCertificateChain(sbChain, 0);
+            assertSame("StrongBox leaf must not rewrite when only UNKNOWN keybox is available", sbChain, sbResult);
         } finally {
             stateField.set(null, previousState);
         }

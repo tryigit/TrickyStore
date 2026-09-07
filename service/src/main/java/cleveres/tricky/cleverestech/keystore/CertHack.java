@@ -374,7 +374,7 @@ public final class CertHack {
             return true;
         }
         if (currentState.preparedKeyboxes.containsKey(keybox)) {
-            return !currentState.strongBoxKeyboxes.contains(keybox);
+            return false;
         }
         return classifyKeyboxSecurityLevel(keybox) == KeyboxSecurityLevel.TEE;
     }
@@ -888,7 +888,7 @@ public final class CertHack {
                     matches.add(candidate);
                 }
             } else {
-                if (!isStrongBoxKeybox(candidate)) {
+                if (isTeeKeybox(candidate)) {
                     matches.add(candidate);
                 }
             }
