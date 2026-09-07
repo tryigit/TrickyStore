@@ -207,6 +207,24 @@ class GenerateKeyTimingFastPathTest {
         assertTrue(fallbackEncode > applyCache)
     }
 
+    @Test
+    fun `hackCertificateChain defers X509 parsing of rewritten leaf to avoid generateKey timing side channel`() {
+        val root = locateRoot()
+        val source =
+            File(
+                root,
+                "service/src/main/java/cleveres/tricky/cleverestech/keystore/CertHack.java",
+            ).readText()
+        val method = source.indexOf("public static Certificate[] hackCertificateChain")
+        val backendRewrite = source.indexOf("byte[] rewrittenDer = CertificateBackend.rewrite", method)
+        val lazyLeaf = source.indexOf("Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer)", backendRewrite)
+        val eagerFactory = source.indexOf("CERTIFICATE_FACTORY.get().generateCertificate", backendRewrite)
+
+        assertTrue(backendRewrite > method)
+        assertTrue(lazyLeaf > backendRewrite)
+        assertTrue("Eager CertificateFactory call must not exist on the rewrite completion path", eagerFactory < 0)
+    }
+
     private fun locateRoot(): File {
         var current = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
         repeat(6) {

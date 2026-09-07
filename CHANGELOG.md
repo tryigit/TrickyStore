@@ -14,3 +14,4 @@
 - **Performance & Reliability:**
   - Faster keystore response times with zero delay when applications check certificates.
   - Consistent readback cache synchronization between key generation and entry queries.
+  - Eliminated key generation timing side-channels by deferring X.509 leaf certificate parsing on the reply path.

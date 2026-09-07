@@ -964,8 +964,7 @@ public final class CertHack {
                 }
                 return caList;
             }
-            Certificate rewrittenLeaf = CERTIFICATE_FACTORY.get().generateCertificate(
-                    new ByteArrayInputStream(rewrittenDer));
+            Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer);
             Certificate[] result = new Certificate[prepared.issuerChain.length + 1];
             result[0] = rewrittenLeaf;
             System.arraycopy(prepared.issuerChain, 0, result, 1, prepared.issuerChain.length);
