@@ -38,11 +38,9 @@ Keybox doğrulama ve uygulama özelinde attestation kimliği işlemleri.
 
 https://github.com/tryigit/CleveresTricky/pull/79
 
-**#1199, 2026-09-06**
-
-Yetenek tabanlı StrongBox yönlendirmesi, App AttestKey donanım imza koruması, güvenlik seviyesi aday filtreleme ve WebUI donanım etiketleri.
-
-https://github.com/tryigit/CleveresTricky/pull/1199
+- **#1199, 2026-09-07**
+  Kapsam duyarlı StrongBox ve TEE keybox indeksleme, arayan tarafından seçilen AttestKey imza bütünlüğü, readback önbellek tutarlılığı ve WebUI donanım etiketleri.
+  https://github.com/tryigit/CleveresTricky/pull/1199
 
 ## Profil, uygulama kapsamı ve runtime
 

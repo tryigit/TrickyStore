@@ -28,8 +28,8 @@ This page records the public development history of major CleveresTricky feature
   Keybox verification and application-specific attestation identity handling.
   https://github.com/tryigit/CleveresTricky/pull/79
 
-- **#1199, 2026-09-06**
-  Capability-aware StrongBox fallback routing, caller-selected App AttestKey signature preservation, security-level candidate filtering, and WebUI hardware badges.
+- **#1199, 2026-09-07**
+  Scope-aware StrongBox and TEE keybox indexing, native caller-selected AttestKey signature preservation, readback cache consistency, and WebUI hardware badges.
   https://github.com/tryigit/CleveresTricky/pull/1199
 
 ## Profiles, application scope and runtime controls
