@@ -66,7 +66,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
 
         return try {
             reply.readException()
-            
+
             // Fast parcel check: parse just the byte offsets without allocating the full KeyMetadata
             val parsed = Utils.parseKeyMetadataParcel(reply)
             if (parsed != null) {
@@ -87,7 +87,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
 
                 val newLeaf = rewritten[0].encoded
                 val newChain = Utils.encodeIssuerChain(rewritten)
-                Utils.rewriteKeyMetadataParcel(reply, parsed, newLeaf, newChain)
+                if (!Utils.rewriteKeyMetadataParcel(reply, parsed, newLeaf, newChain)) {
+                    return Skip
+                }
                 return OverrideReply(code = 0, reply = reply)
             }
 

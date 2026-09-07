@@ -1,5 +1,6 @@
 package cleveres.tricky.cleverestech.keystore;
 
+import android.os.Parcel;
 import android.security.keystore.KeyProperties;
 import android.system.keystore2.KeyMetadata;
 
@@ -781,6 +782,42 @@ public final class CertHack {
 
         cached.applyTo(metadata);
         return true;
+    }
+
+    public enum CachedParcelAction {
+        MISS,
+        PASSTHROUGH,
+        REWRITTEN
+    }
+
+    /**
+     * Applies a cache hit directly to the stable-AIDL reply bytes. This is the measured
+     * getKeyEntry path, so it must not instantiate KeyEntryResponse, KeyMetadata, their
+     * authorization graph, or a second reply Parcel.
+     */
+    public static CachedParcelAction applyCachedCertificateChain(
+            Parcel reply,
+            Utils.ParcelParseResult parsed
+    ) {
+        if (reply == null || parsed == null ||
+                (!parsed.hasFullCertificateChain() && !parsed.hasLeafOnlyCertificate())) {
+            return CachedParcelAction.MISS;
+        }
+
+        State currentState = state;
+        CachedCertificateChain cached =
+                currentState.certificateCache.get(new CacheKey(parsed.leafEncoded));
+        if (cached == null || (parsed.hasLeafOnlyCertificate() && !cached.leafOnlySafe)) {
+            return CachedParcelAction.MISS;
+        }
+        if (cached.passthrough) return CachedParcelAction.PASSTHROUGH;
+
+        return Utils.rewriteKeyMetadataParcel(
+                reply,
+                parsed,
+                cached.leafEncoded,
+                cached.issuerChainEncoded
+        ) ? CachedParcelAction.REWRITTEN : CachedParcelAction.MISS;
     }
 
     public static Certificate[] getCachedCertificateChain(Certificate[] caList) {

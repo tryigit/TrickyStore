@@ -27,12 +27,17 @@ public class Parcel {
         return 100;
     }
 
+    public int dataCapacity() {
+        return 100;
+    }
+
     // Write methods
     public void pushBinder(IBinder binder) { queue.add(binder); }
     public void pushInt(int val) { queue.add(val); }
     public void pushLong(long val) { queue.add(val); }
     public void writeInt(int val) { queue.add(val); }
     public void writeLong(long val) { queue.add(val); }
+    public void writeByteArray(byte[] val) { queue.add(val); }
     public void writeStrongBinder(IBinder val) { queue.add(val); }
 
     // Read methods

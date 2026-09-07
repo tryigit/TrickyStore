@@ -72,7 +72,7 @@ class GenerateKeyTimingFastPathTest {
     }
 
     @Test
-    fun `measured getKeyEntry serves encoded TEE cache before X509 chain parsing`() {
+    fun `measured getKeyEntry rewrites cached chain before typed response allocation`() {
         val root = locateRoot()
         val source =
             File(
@@ -80,24 +80,28 @@ class GenerateKeyTimingFastPathTest {
                 "service/src/main/java/cleveres/tricky/cleverestech/KeystoreInterceptor.kt",
             ).readText()
         val postTransact = source.indexOf("override fun onPostTransact")
-        val responseRead = source.indexOf("val response = reply.readTypedObject", postTransact)
-        val metadataRead = source.indexOf("val metadata = response?.metadata", responseRead)
+        val rawParse = source.indexOf("val parsed = Utils.parseKeyEntryResponseParcel(reply)", postTransact)
         val levelGate =
             source.indexOf(
-                "metadata.keySecurityLevel != SecurityLevel.TRUSTED_ENVIRONMENT",
-                metadataRead,
+                "parsed.keySecurityLevel != SecurityLevel.TRUSTED_ENVIRONMENT",
+                rawParse,
             )
         val encodedCache =
-            source.indexOf("CertHack.applyCachedCertificateChain(metadata)", levelGate)
-        val chainRead =
-            source.indexOf("val originalChain = Utils.getCertificateChain(response)", encodedCache)
+            source.indexOf("CertHack.applyCachedCertificateChain(reply, parsed)", levelGate)
+        val inPlaceReply = source.indexOf("return OverrideReply(code = 0, reply = reply)", encodedCache)
+        val responseRead = source.indexOf("val response = reply.readTypedObject", inPlaceReply)
+        val chainRead = source.indexOf("val originalChain = Utils.getCertificateChain(response)", responseRead)
+        val measuredPath = source.substring(rawParse, responseRead)
 
         assertTrue(postTransact >= 0)
-        assertTrue(responseRead > postTransact)
-        assertTrue(metadataRead > responseRead)
-        assertTrue(levelGate > metadataRead)
+        assertTrue(rawParse > postTransact)
+        assertTrue(levelGate > rawParse)
         assertTrue(encodedCache > levelGate)
-        assertTrue(chainRead > encodedCache)
+        assertTrue(inPlaceReply > encodedCache)
+        assertTrue(responseRead > inPlaceReply)
+        assertTrue(chainRead > responseRead)
+        assertFalse(measuredPath.contains("Parcel.obtain"))
+        assertFalse(measuredPath.contains("readTypedObject"))
     }
 
     @Test
