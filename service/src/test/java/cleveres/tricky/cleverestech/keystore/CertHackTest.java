@@ -393,6 +393,115 @@ public class CertHackTest {
         }
     }
 
+    @Test
+    public void testClassifyKeyboxSecurityLevelStrictProvenance() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", "BC");
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+
+        // 1. (TEE, TEE) -> TEE
+        X509Certificate teeCert = generateAttestationCert(kp, 1, 1);
+        CertHack.KeyBox teeBox = ManagedOpaqueKeyOracle.wrap(kp, List.of(teeCert), "custom.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.TEE, CertHack.classifyKeyboxSecurityLevel(teeBox));
+
+        // 2. (StrongBox, StrongBox) -> STRONGBOX
+        X509Certificate sbCert = generateAttestationCert(kp, 2, 2);
+        CertHack.KeyBox sbBox = ManagedOpaqueKeyOracle.wrap(kp, List.of(sbCert), "custom.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.STRONGBOX, CertHack.classifyKeyboxSecurityLevel(sbBox));
+
+        // 3. (TEE, StrongBox) -> STRONGBOX
+        X509Certificate mixedCert = generateAttestationCert(kp, 1, 2);
+        CertHack.KeyBox mixedBox = ManagedOpaqueKeyOracle.wrap(kp, List.of(mixedCert), "custom.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.STRONGBOX, CertHack.classifyKeyboxSecurityLevel(mixedBox));
+
+        // 4. (StrongBox, TEE) -> UNKNOWN (fail closed, even if filename mentions tee or strongbox)
+        X509Certificate reversedCert = generateAttestationCert(kp, 2, 1);
+        CertHack.KeyBox reversedBox = ManagedOpaqueKeyOracle.wrap(kp, List.of(reversedCert), "tee_strongbox.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(reversedBox));
+
+        // 5. (Software, Software) -> UNKNOWN (fail closed, even if filename mentions tee)
+        X509Certificate swCert = generateAttestationCert(kp, 0, 0);
+        CertHack.KeyBox swBox = ManagedOpaqueKeyOracle.wrap(kp, List.of(swCert), "tee_keybox.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(swBox));
+    }
+
+    @Test
+    public void testSourceCountDeduplicatesCanonicalFilenamesAcrossAliases() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", "BC");
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+        X509Certificate cert = generateIssuerCert(kp, "CN=Canonical Test");
+        CertHack.KeyBox box1 = ManagedOpaqueKeyOracle.wrap(kp, List.of(cert), "shared_file.xml");
+
+        Map<String, List<CertHack.KeyBox>> keyboxes = Map.of("RSA", List.of(box1));
+        // Simulate two alias keys pointing to the same file
+        Map<String, List<CertHack.KeyBox>> keyboxFiles = Map.of(
+                "shared_file.xml", List.of(box1),
+                "alias_name", List.of(box1)
+        );
+
+        Class<?> stateClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$State");
+        java.lang.reflect.Constructor<?> ctor = stateClass.getDeclaredConstructor(Map.class, Map.class);
+        ctor.setAccessible(true);
+        Object newState = ctor.newInstance(keyboxes, keyboxFiles);
+
+        java.lang.reflect.Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object previousState = stateField.get(null);
+        stateField.set(null, newState);
+
+        try {
+            assertEquals(1, CertHack.getKeyboxSourceCount());
+        } finally {
+            stateField.set(null, previousState);
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testCertificateCacheBridgesBothSizeAndRetainedByteBudgets() throws Exception {
+        Class<?> cacheClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$State$CertificateCache");
+        java.lang.reflect.Constructor<?> cacheCtor = cacheClass.getDeclaredConstructor();
+        cacheCtor.setAccessible(true);
+        Object cacheObj = cacheCtor.newInstance();
+
+        Class<?> keyClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$CacheKey");
+        java.lang.reflect.Constructor<?> keyCtor = keyClass.getDeclaredConstructor(byte[].class);
+        keyCtor.setAccessible(true);
+
+        Class<?> chainClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$CachedCertificateChain");
+        java.lang.reflect.Constructor<?> chainCtor = chainClass.getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class);
+        chainCtor.setAccessible(true);
+
+        java.util.Map<Object, Object> cache = (java.util.Map<Object, Object>) cacheObj;
+        java.lang.reflect.Method retainedBytesMethod = cacheClass.getDeclaredMethod("retainedBytes");
+        retainedBytesMethod.setAccessible(true);
+
+        // 1. Entry count bound (MAX_CERTIFICATE_CACHE_ENTRIES = 64)
+        for (int i = 0; i < 70; i++) {
+            byte[] id = new byte[]{(byte) i};
+            Object k = keyCtor.newInstance((Object) id);
+            Object v = chainCtor.newInstance(new Certificate[0], id, id);
+            cache.put(k, v);
+        }
+        assertTrue(cache.size() <= 64);
+
+        // 2. Retained byte budget bound (MAX_CERTIFICATE_CACHE_RETAINED_BYTES = 4 MiB)
+        cache.clear();
+        assertEquals(0, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
+        byte[] bigLeaf = new byte[512 * 1024];
+        byte[] bigIssuer = new byte[512 * 1024];
+        for (int i = 0; i < 6; i++) {
+            byte[] id = new byte[]{(byte) (i + 100)};
+            Object k = keyCtor.newInstance((Object) id);
+            Object v = chainCtor.newInstance(new Certificate[0], bigLeaf, bigIssuer);
+            cache.put(k, v);
+        }
+        int retained = ((Number) retainedBytesMethod.invoke(cacheObj)).intValue();
+        assertTrue("Retained bytes " + retained + " must be <= 4 MiB", retained <= 4 * 1024 * 1024);
+        assertTrue("Cache size must have been trimmed to fit budget", cache.size() <= 4);
+    }
+
     private X509Certificate generateAttestationCert(KeyPair kp, int attLevel, int kmLevel) throws Exception {
         X500Name issuer = new X500Name("CN=Test Issuer");
         BigInteger serial = BigInteger.ONE;

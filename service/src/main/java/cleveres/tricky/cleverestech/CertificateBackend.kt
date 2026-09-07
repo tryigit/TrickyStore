@@ -124,23 +124,25 @@ object CertificateBackend {
         if (payloadLength > MAX_REWRITE_REQUEST_BYTES) return null
 
         rewriteOverride?.let { override ->
-            return override(
-                RewriteRequest(
-                    genuineLeafDer = genuineLeafDer,
-                    keyId = keyId,
-                    signingAlgorithm = signingAlgorithm,
-                    systemDisposition = systemDisposition,
-                    systemValue = systemValue,
-                    vendorDisposition = vendorDisposition,
-                    vendorValue = vendorValue,
-                    bootDisposition = bootDisposition,
-                    bootValue = bootValue,
-                    idOverrides = idOverrides,
-                    moduleHash = moduleHash,
-                    verifiedBootKey = verifiedBootKey,
-                    verifiedBootHash = verifiedBootHash,
-                ),
-            )
+            val result =
+                override(
+                    RewriteRequest(
+                        genuineLeafDer = genuineLeafDer,
+                        keyId = keyId,
+                        signingAlgorithm = signingAlgorithm,
+                        systemDisposition = systemDisposition,
+                        systemValue = systemValue,
+                        vendorDisposition = vendorDisposition,
+                        vendorValue = vendorValue,
+                        bootDisposition = bootDisposition,
+                        bootValue = bootValue,
+                        idOverrides = idOverrides,
+                        moduleHash = moduleHash,
+                        verifiedBootKey = verifiedBootKey,
+                        verifiedBootHash = verifiedBootHash,
+                    ),
+                )
+            return if (result != null && (result.isEmpty() || result.size > MAX_REWRITTEN_LEAF_BYTES)) null else result
         }
 
         val writePayload: (OutputStream) -> Unit = { output ->
@@ -163,11 +165,14 @@ object CertificateBackend {
             if (moduleHash != null) output.write(moduleHash)
             output.write(genuineLeafDer)
         }
-        rewriteTransportOverride?.let { return it(payloadLength, writePayload) }
+        rewriteTransportOverride?.let {
+            val result = it(payloadLength, writePayload)
+            return if (result != null && (result.isEmpty() || result.size > MAX_REWRITTEN_LEAF_BYTES)) null else result
+        }
         return NativeBackend.transact(
             OP_CERTIFICATE_REWRITE,
             payloadLength,
-            MAX_CERTIFICATE_DER_BYTES,
+            MAX_REWRITTEN_LEAF_BYTES,
             propagateTransportFailure = true,
             writePayload = writePayload,
         )
@@ -350,6 +355,7 @@ object CertificateBackend {
     private const val PRESENT_ID_RESERVED_MASK = 0xfe00
     private const val KEY_ID_BYTES = 16
     private const val MAX_CERTIFICATE_DER_BYTES = 256 * 1024
+    private const val MAX_REWRITTEN_LEAF_BYTES = 64 * 1024
     private const val MAX_ATTESTATION_ID_BYTES = 4 * 1024
     private const val MAX_MODULE_HASH_BYTES = 1024
     private const val MAX_ID_OVERRIDES = 9

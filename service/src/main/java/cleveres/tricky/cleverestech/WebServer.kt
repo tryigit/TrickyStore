@@ -3007,14 +3007,16 @@ class WebServer(
                 obj.put("filename", r.filename)
                 obj.put("storage_id", r.storageId)
                 val secLevel =
-                    if (r.securityLevel.isNotEmpty()) {
+                    if (r.securityLevel.isNotEmpty() && r.securityLevel != "Unknown") {
                         r.securityLevel
                     } else {
-                        CertHack.getKeyboxSecurityLevel(r.storageId.ifEmpty { r.filename })
+                        val fallback = CertHack.getKeyboxSecurityLevel(r.storageId.ifEmpty { r.filename })
+                        if (fallback.isNotEmpty() && fallback != "Unknown") fallback else r.securityLevel
                     }
                 obj.put("security_level", secLevel)
                 obj.put("status", r.status.name)
                 obj.put("details", r.details)
+                obj.put("certificate_serial", r.certificateSerial ?: "")
                 array.put(obj)
             }
             return array.toString()

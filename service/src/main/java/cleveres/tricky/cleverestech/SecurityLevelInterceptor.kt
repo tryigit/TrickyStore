@@ -74,18 +74,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             return Skip
         }
 
-        val replacement = Parcel.obtain()
         return try {
             reply.readException()
-            val metadata = reply.readTypedObject(KeyMetadata.CREATOR)
-            if (metadata == null) {
-                replacement.recycle()
-                return Skip
-            }
+            val metadata = reply.readTypedObject(KeyMetadata.CREATOR) ?: return Skip
             val isFullChain = Utils.isCertificateChainRewriteCandidate(metadata)
             val isLeafOnly = Utils.hasRewritableLeafCertificate(metadata)
             if (!isFullChain && !isLeafOnly) {
-                replacement.recycle()
                 return Skip
             }
 
@@ -98,7 +92,6 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 originalLeaf == null ||
                 !Utils.hasAndroidAttestationExtension(originalLeaf)
             ) {
-                replacement.recycle()
                 return Skip
             }
 
@@ -113,16 +106,20 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 true,
             )
             if (rewritten === originalLeafOnly) {
-                replacement.recycle()
                 return Skip
             }
 
             Utils.putCertificateChain(metadata, rewritten)
-            replacement.writeNoException()
-            replacement.writeTypedObject(metadata, 0)
-            OverrideReply(0, replacement)
+            val replacement = Parcel.obtain()
+            try {
+                replacement.writeNoException()
+                replacement.writeTypedObject(metadata, 0)
+                OverrideReply(0, replacement)
+            } catch (t: Throwable) {
+                replacement.recycle()
+                throw t
+            }
         } catch (error: Throwable) {
-            replacement.recycle()
             if (error.javaClass.simpleName != "ServiceSpecificException") {
                 Logger.e("Could not rewrite a generated attestation chain: ${error.javaClass.simpleName}")
             }
