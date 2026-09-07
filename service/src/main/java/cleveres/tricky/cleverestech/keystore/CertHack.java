@@ -596,9 +596,6 @@ public final class CertHack {
     public static String getDeviceCertificateSerial(String identifier) {
         if (identifier == null) return null;
         List<KeyBox> boxes = state.keyboxFiles.get(identifier);
-        if (boxes == null && identifier.contains(":")) {
-            boxes = state.keyboxFiles.get(identifier.substring(identifier.indexOf(':') + 1));
-        }
         if (boxes == null) return null;
         for (KeyBox box : boxes) {
             String serial = getDeviceCertificateSerial(box);

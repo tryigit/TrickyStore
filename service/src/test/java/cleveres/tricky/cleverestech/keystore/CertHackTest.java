@@ -264,6 +264,8 @@ public class CertHackTest {
             assertEquals("StrongBox", CertHack.getKeyboxSecurityLevel("root:keybox.xml"));
             assertEquals("TEE", CertHack.getKeyboxSecurityLevel("keyboxes:keybox.xml"));
             assertEquals("StrongBox", CertHack.getKeyboxSecurityLevel("keybox.xml"));
+            assertEquals("Unknown", CertHack.getKeyboxSecurityLevel("custom:keybox.xml"));
+            assertNull(CertHack.getDeviceCertificateSerial("custom:keybox.xml"));
             assertTrue(CertHack.isStrongBoxKeybox(rootKeybox));
             assertFalse(CertHack.isStrongBoxKeybox(managedKeybox));
         } finally {

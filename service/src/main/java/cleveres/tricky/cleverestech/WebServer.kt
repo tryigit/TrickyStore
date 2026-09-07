@@ -714,14 +714,15 @@ class WebServer(
     private fun keyboxInventoryJson(): String {
         val array = JSONArray()
         StoredKeyboxInventory.list(configDir).forEach { source ->
+            val targetId = source.id.ifEmpty { source.filename }
             array.put(
                 JSONObject()
                     .put("id", source.id)
                     .put("scope", source.scope.apiValue)
                     .put("filename", source.filename)
                     .put("type", if (source.isCbox) "cbox" else "xml")
-                    .put("certificate_serial", CertHack.getDeviceCertificateSerial(source.id) ?: CertHack.getDeviceCertificateSerial(source.filename) ?: "")
-                    .put("security_level", CertHack.getKeyboxSecurityLevel(source.id)),
+                    .put("certificate_serial", CertHack.getDeviceCertificateSerial(targetId) ?: "")
+                    .put("security_level", CertHack.getKeyboxSecurityLevel(targetId)),
             )
         }
         return array.toString()
