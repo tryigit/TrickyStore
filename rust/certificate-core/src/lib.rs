@@ -272,6 +272,7 @@ pub fn rewrite_certificate_prepared(
         || parse_any(validity)?.tag() != Tag::Sequence
         || parse_any(subject)?.tag() != Tag::Sequence
         || parse_any(spki)?.tag() != Tag::Sequence
+        || original_tbs_algorithm != outer_algorithm_der
     {
         return Err(Error::InvalidCertificate);
     }
