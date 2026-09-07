@@ -15,6 +15,8 @@ import java.nio.file.SecureDirectoryStream
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.UUID
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 
 /** Descriptor-bound filesystem operations used by backup restore transactions. */
 internal interface RestoreFileOperations {
@@ -74,6 +76,7 @@ internal object RestoreFiles {
 
 internal class JvmSecureRestoreFileOperations(
     private val nowNanos: () -> Long = System::nanoTime,
+    private val enableExpiryJanitor: Boolean = true,
 ) : RestoreFileOperations {
     private data class Original(
         val relativePath: String,
@@ -116,6 +119,8 @@ internal class JvmSecureRestoreFileOperations(
 
     private val lock = Any()
     private val transactions = HashMap<String, Transaction>()
+    private val expiryWake = Semaphore(0)
+    private var expiryJanitorRunning = false
 
     override fun begin(
         configDir: File,
@@ -167,6 +172,7 @@ internal class JvmSecureRestoreFileOperations(
                     maxSnapshotBytes = maxSnapshotBytes,
                     touchedNanos = nowNanos(),
                 )
+            signalExpiryJanitorLocked()
         }
     }
 
@@ -335,11 +341,11 @@ internal class JvmSecureRestoreFileOperations(
             throw SecurityException("Restore transaction root changed")
         }
         transaction.touchedNanos = nowNanos()
+        signalExpiryJanitorLocked()
         return transaction
     }
 
-    private fun pruneExpiredTransactions() {
-        val now = nowNanos()
+    private fun pruneExpiredTransactions(now: Long = nowNanos()) {
         val expired =
             transactions.entries
                 .asSequence()
@@ -356,7 +362,72 @@ internal class JvmSecureRestoreFileOperations(
 
     private fun removeTransaction(token: String) {
         transactions.remove(token)?.closeAndWipe()
+        signalExpiryJanitorLocked()
     }
+
+    private fun signalExpiryJanitorLocked() {
+        if (!enableExpiryJanitor) return
+        if (expiryJanitorRunning) {
+            expiryWake.release()
+            return
+        }
+        if (transactions.isEmpty()) return
+        expiryJanitorRunning = true
+        val janitor =
+            Thread(
+                null,
+                ::runExpiryJanitor,
+                "ct-jvm-restore-gc",
+                EXPIRY_JANITOR_STACK_BYTES,
+            )
+        janitor.isDaemon = true
+        try {
+            janitor.start()
+        } catch (error: Throwable) {
+            expiryJanitorRunning = false
+            throw IOException("Could not start secure restore expiry janitor", error)
+        }
+    }
+
+    private fun runExpiryJanitor() {
+        try {
+            while (true) {
+                expiryWake.drainPermits()
+                val delayNanos =
+                    synchronized(lock) {
+                        val now = nowNanos()
+                        pruneExpiredTransactions(now)
+                        nextExpiryDelayNanosLocked(now)
+                    } ?: return
+                if (delayNanos > 0L) {
+                    try {
+                        expiryWake.tryAcquire(delayNanos, TimeUnit.NANOSECONDS)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return
+                    }
+                }
+            }
+        } finally {
+            synchronized(lock) {
+                expiryJanitorRunning = false
+                if (transactions.isNotEmpty()) signalExpiryJanitorLocked()
+            }
+        }
+    }
+
+    private fun nextExpiryDelayNanosLocked(now: Long): Long? =
+        transactions.values.minOfOrNull { transaction ->
+            val age = now - transaction.touchedNanos
+            when {
+                age <= 0L -> RESTORE_TRANSACTION_TTL_NANOS
+                age >= RESTORE_TRANSACTION_TTL_NANOS -> 0L
+                else -> RESTORE_TRANSACTION_TTL_NANOS - age
+            }
+        }
+
+    internal fun pendingExpiryDelayNanosForTesting(): Long? =
+        synchronized(lock) { nextExpiryDelayNanosLocked(nowNanos()) }
 
     private fun requireSnapshotted(
         transaction: Transaction,
@@ -646,6 +717,7 @@ internal class JvmSecureRestoreFileOperations(
         const val MAX_ACTIVE_RESTORE_TRANSACTIONS = 4
         const val MAX_RESTORE_TARGETS = 512
         const val RESTORE_TRANSACTION_TTL_NANOS = 15L * 60L * 1_000_000_000L
+        const val EXPIRY_JANITOR_STACK_BYTES = 256L * 1024L
         val PRIVATE_FILE_PERMISSIONS = PosixFilePermissions.fromString("rw-------")
     }
 }
