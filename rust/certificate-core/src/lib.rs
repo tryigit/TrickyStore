@@ -304,10 +304,10 @@ pub fn rewrite_certificate_prepared(
             return Err(Error::InvalidCertificate);
         }
         let extn_id = parse_any(ext_fields[0])?;
-        if extn_id.value() == ANDROID_ATTESTATION_OID_BYTES {
-            if attestation_index.replace(index).is_some() {
-                return Err(Error::DuplicateAttestationExtension);
-            }
+        if extn_id.value() == ANDROID_ATTESTATION_OID_BYTES
+            && attestation_index.replace(index).is_some()
+        {
+            return Err(Error::DuplicateAttestationExtension);
         }
     }
 
