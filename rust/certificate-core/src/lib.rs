@@ -242,7 +242,12 @@ pub fn rewrite_certificate_prepared(
         return Err(Error::InvalidCertificate);
     }
     let cert_fields = split_tlvs(cert_seq.value())?;
-    if cert_fields.len() < 3 {
+    if cert_fields.len() != 3 {
+        return Err(Error::InvalidCertificate);
+    }
+    if parse_any(cert_fields[1])?.tag() != Tag::Sequence
+        || parse_any(cert_fields[2])?.tag() != Tag::BitString
+    {
         return Err(Error::InvalidCertificate);
     }
 
@@ -251,7 +256,7 @@ pub fn rewrite_certificate_prepared(
         return Err(Error::InvalidCertificate);
     }
     let tbs_fields = split_tlvs(tbs_seq.value())?;
-    if tbs_fields.len() < 7 {
+    if tbs_fields.len() < 8 {
         return Err(Error::InvalidCertificate);
     }
 
@@ -259,18 +264,19 @@ pub fn rewrite_certificate_prepared(
     let has_version = matches!(
         first_tag,
         Tag::ContextSpecific {
+            constructed: true,
             number: TagNumber(0),
-            ..
         }
     );
 
-    let (version, serial, validity, subject, spki) = if has_version {
+    let (version, serial, validity, subject, spki, optional_start) = if has_version {
         (
             Some(tbs_fields[0]),
             tbs_fields[1],
             tbs_fields[4],
             tbs_fields[5],
             tbs_fields[6],
+            7,
         )
     } else {
         (
@@ -279,10 +285,12 @@ pub fn rewrite_certificate_prepared(
             tbs_fields[3],
             tbs_fields[4],
             tbs_fields[5],
+            6,
         )
     };
 
-    let extensions_explicit = parse_any(tbs_fields.last().unwrap())?;
+    let extensions_explicit_der = *tbs_fields.last().ok_or(Error::InvalidCertificate)?;
+    let extensions_explicit = parse_any(extensions_explicit_der)?;
     if !matches!(
         extensions_explicit.tag(),
         Tag::ContextSpecific {
@@ -291,6 +299,45 @@ pub fn rewrite_certificate_prepared(
         }
     ) {
         return Err(Error::MissingAttestationExtension);
+    }
+
+    // RFC 5280 sections 4.1 and 4.1.2.1: extensions are legal only on v3 certificates.
+    validate_v3_version(version.ok_or(Error::InvalidCertificate)?)?;
+
+    if parse_any(serial)?.tag() != Tag::Integer
+        || parse_any(if has_version { tbs_fields[2] } else { tbs_fields[1] })?.tag()
+            != Tag::Sequence
+        || parse_any(if has_version { tbs_fields[3] } else { tbs_fields[2] })?.tag()
+            != Tag::Sequence
+        || parse_any(validity)?.tag() != Tag::Sequence
+        || parse_any(subject)?.tag() != Tag::Sequence
+        || parse_any(spki)?.tag() != Tag::Sequence
+    {
+        return Err(Error::InvalidCertificate);
+    }
+
+    let optional_end = tbs_fields.len() - 1;
+    if optional_start > optional_end {
+        return Err(Error::InvalidCertificate);
+    }
+    let mut issuer_unique_id = None;
+    let mut subject_unique_id = None;
+    for field in &tbs_fields[optional_start..optional_end] {
+        match parse_any(field)?.tag() {
+            Tag::ContextSpecific {
+                constructed: false,
+                number: TagNumber(1),
+            } if issuer_unique_id.is_none() && subject_unique_id.is_none() => {
+                issuer_unique_id = Some(*field);
+            }
+            Tag::ContextSpecific {
+                constructed: false,
+                number: TagNumber(2),
+            } if subject_unique_id.is_none() => {
+                subject_unique_id = Some(*field);
+            }
+            _ => return Err(Error::InvalidCertificate),
+        }
     }
 
     let extensions_seq = parse_any(extensions_explicit.value())?;
@@ -354,7 +401,7 @@ pub fn rewrite_certificate_prepared(
 
     let algorithm_der = signature_algorithm_der(request.issuer.algorithm());
 
-    let mut tbs_out = Vec::with_capacity(8);
+    let mut tbs_out = Vec::with_capacity(10);
     if let Some(v) = version {
         tbs_out.push(v);
     }
@@ -364,6 +411,12 @@ pub fn rewrite_certificate_prepared(
     tbs_out.push(validity);
     tbs_out.push(subject);
     tbs_out.push(spki);
+    if let Some(uid) = issuer_unique_id {
+        tbs_out.push(uid);
+    }
+    if let Some(uid) = subject_unique_id {
+        tbs_out.push(uid);
+    }
     tbs_out.push(&new_extensions_explicit);
 
     let tbs_der = encode_sequence(&tbs_out)?;
@@ -400,6 +453,24 @@ fn signature_algorithm_der(algorithm: SigningAlgorithm) -> &'static [u8] {
 
 pub(crate) fn parse_any(encoded: &[u8]) -> Result<AnyRef<'_>, Error> {
     X509Decode::from_der(encoded).map_err(|_| Error::InvalidCertificate)
+}
+
+pub(crate) fn validate_v3_version(version_der: &[u8]) -> Result<(), Error> {
+    let version_explicit = parse_any(version_der)?;
+    if !matches!(
+        version_explicit.tag(),
+        Tag::ContextSpecific {
+            constructed: true,
+            number: TagNumber(0),
+        }
+    ) {
+        return Err(Error::InvalidCertificate);
+    }
+    let version = parse_any(version_explicit.value())?;
+    if version.tag() != Tag::Integer || version.value() != [2] {
+        return Err(Error::InvalidCertificate);
+    }
+    Ok(())
 }
 
 pub(crate) struct ParsedExtension<'a> {
