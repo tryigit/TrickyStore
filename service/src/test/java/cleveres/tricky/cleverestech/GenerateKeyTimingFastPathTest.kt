@@ -150,7 +150,7 @@ class GenerateKeyTimingFastPathTest {
     }
 
     @Test
-    fun `completed rewrite cache retains encoded leaf and issuer bytes`() {
+    fun `completed rewrite cache retains leaf and lazily encoded issuer bytes`() {
         val root = locateRoot()
         val source =
             File(
@@ -158,14 +158,17 @@ class GenerateKeyTimingFastPathTest {
                 "service/src/main/java/cleveres/tricky/cleverestech/keystore/CertHack.java",
             ).readText()
         val rewrite = source.indexOf("byte[] rewrittenDer = CertificateBackend.rewrite")
-        val completed =
-            source.indexOf("new CachedCertificateChain(result, rewrittenDer, prepared.encodedIssuerChain", rewrite)
+        val lazyIssuer =
+            source.indexOf("byte[] encodedIssuerChain = currentState.encodedIssuerChain(prepared)", rewrite)
+        val completed = source.indexOf("new CachedCertificateChain(", lazyIssuer)
         val cachePut = source.indexOf("cache.put(cacheKey, completed)", completed)
 
         assertTrue(rewrite >= 0)
-        assertTrue(completed > rewrite)
+        assertTrue(lazyIssuer > rewrite)
+        assertTrue(completed > lazyIssuer)
         assertTrue(cachePut > completed)
-        assertTrue(source.contains("final byte[] encodedIssuerChain;"))
+        assertTrue(source.contains("final byte[] issuerChainEncoded;"))
+        assertFalse(source.contains("final byte[] encodedIssuerChain;"))
     }
 
     @Test
