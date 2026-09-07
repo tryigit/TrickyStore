@@ -303,9 +303,6 @@ fn atomic_write_target_from<R: Read>(
     body_len: usize,
     scratch: &mut [u8],
 ) -> io::Result<()> {
-    if path.contains('\0') {
-        return Err(invalid("config file path is malformed"));
-    }
     let confirm = |source: &mut R| {
         let mut marker = [0u8; 1];
         source.read_exact(&mut marker)?;
@@ -522,6 +519,33 @@ fn refresh_restore_transaction(transaction: &mut RestoreTransaction) {
     transaction.touched = Instant::now();
 }
 
+struct RestoreMutationLease<'a> {
+    token: &'a str,
+    active: bool,
+}
+
+impl<'a> RestoreMutationLease<'a> {
+    fn new(token: &'a str) -> Self {
+        Self { token, active: true }
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        let result = finish_streaming_restore_mutation(self.token);
+        if result.is_ok() {
+            self.active = false;
+        }
+        result
+    }
+}
+
+impl Drop for RestoreMutationLease<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = finish_streaming_restore_mutation(self.token);
+        }
+    }
+}
+
 fn transaction_for_snapshotted_target<'a>(
     transactions: &'a mut HashMap<String, RestoreTransaction>,
     token: &str,
@@ -610,6 +634,7 @@ fn restore_write_from<R: Read>(
         prune_stale_restore_transactions(root, &mut transactions);
         begin_streaming_restore_mutation(&mut transactions, token, path)?
     };
+    let mut mutation_lease = RestoreMutationLease::new(token);
 
     let write_result = atomic_write_transaction_target_from(
         root,
@@ -619,7 +644,7 @@ fn restore_write_from<R: Read>(
         body_len,
         scratch,
     );
-    let finish_result = finish_streaming_restore_mutation(token);
+    let finish_result = mutation_lease.finish();
     match (write_result, finish_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error),
