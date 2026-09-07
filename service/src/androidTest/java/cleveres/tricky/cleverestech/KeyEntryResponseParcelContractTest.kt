@@ -2,9 +2,7 @@ package cleveres.tricky.cleverestech
 
 import android.hardware.security.keymint.SecurityLevel
 import android.os.Parcel
-import android.system.keystore2.KeyDescriptor
 import android.system.keystore2.KeyEntryResponse
-import android.system.keystore2.KeyMetadata
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import cleveres.tricky.cleverestech.keystore.CertHack
 import cleveres.tricky.cleverestech.keystore.Utils
@@ -87,34 +85,41 @@ class KeyEntryResponseParcelContractTest {
         leaf: ByteArray,
         chain: ByteArray?,
         modificationTime: Long,
-    ): Parcel {
-        val descriptor =
-            KeyDescriptor().apply {
-                domain = 0
-                nspace = 42L
-                alias = "timing-key"
-                blob = null
-            }
-        val metadata =
-            KeyMetadata().apply {
-                key = descriptor
-                keySecurityLevel = SecurityLevel.TRUSTED_ENVIRONMENT
-                authorizations = emptyArray()
-                certificate = leaf
-                certificateChain = chain
-                modificationTimeMs = modificationTime
-            }
-        val response =
-            KeyEntryResponse().apply {
-                iSecurityLevel = null
-                this.metadata = metadata
-            }
-        return Parcel.obtain().apply {
+    ): Parcel =
+        Parcel.obtain().apply {
             writeNoException()
-            writeTypedObject(response, 0)
+            writeInt(1) // writeTypedObject(KeyEntryResponse) presence marker
+            writeStableParcelableBody {
+                writeStrongBinder(null) // IKeystoreSecurityLevel
+                writeInt(1) // writeTypedObject(KeyMetadata) presence marker
+                writeStableParcelableBody {
+                    writeInt(1) // writeTypedObject(KeyDescriptor) presence marker
+                    writeStableParcelableBody {
+                        writeInt(0) // domain
+                        writeLong(42L) // nspace
+                        writeString("timing-key")
+                        writeByteArray(null)
+                    }
+                    writeInt(SecurityLevel.TRUSTED_ENVIRONMENT)
+                    writeInt(0) // empty Authorization[]
+                    writeByteArray(leaf)
+                    writeByteArray(chain)
+                    writeLong(modificationTime)
+                }
+            }
             setDataPosition(0)
             readException()
         }
+
+    /** Writes a stable-AIDL parcelable body without depending on hidden framework constructors. */
+    private fun Parcel.writeStableParcelableBody(body: Parcel.() -> Unit) {
+        val start = dataPosition()
+        writeInt(0)
+        body()
+        val end = dataPosition()
+        setDataPosition(start)
+        writeInt(end - start)
+        setDataPosition(end)
     }
 
     @Suppress("UNCHECKED_CAST")
