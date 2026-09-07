@@ -594,7 +594,7 @@ fn encode_sequence<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Result<Vec<
         }
     }
 
-    let mut encoded = Vec::with_capacity(total_len + 4);
+    let mut encoded = Vec::with_capacity(total_len + 5);
     encoded.push(0x30);
     if total_len < 128 {
         encoded.push(total_len as u8);
@@ -604,6 +604,11 @@ fn encode_sequence<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Result<Vec<
     } else if total_len <= 0xffff {
         encoded.push(0x82);
         encoded.push((total_len >> 8) as u8);
+        encoded.push((total_len & 0xff) as u8);
+    } else if total_len <= MAX_ATTESTATION_EXTENSION_BYTES {
+        encoded.push(0x83);
+        encoded.push((total_len >> 16) as u8);
+        encoded.push(((total_len >> 8) & 0xff) as u8);
         encoded.push((total_len & 0xff) as u8);
     } else {
         return Err(Error::Bounds);

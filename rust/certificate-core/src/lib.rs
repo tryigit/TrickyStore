@@ -381,6 +381,11 @@ fn encode_explicit(tag: u32, inner: &[u8]) -> Result<Vec<u8>, Error> {
         encoded.push(0x82);
         encoded.push((total_len >> 8) as u8);
         encoded.push((total_len & 0xff) as u8);
+    } else if total_len <= MAX_CERTIFICATE_DER_BYTES {
+        encoded.push(0x83);
+        encoded.push((total_len >> 16) as u8);
+        encoded.push(((total_len >> 8) & 0xff) as u8);
+        encoded.push((total_len & 0xff) as u8);
     } else {
         return Err(Error::Encoding);
     }
@@ -396,7 +401,7 @@ fn encode_sequence(fields: &[&[u8]]) -> Result<Vec<u8>, Error> {
     if total_len > MAX_CERTIFICATE_DER_BYTES {
         return Err(Error::Bounds);
     }
-    let mut encoded = Vec::with_capacity(total_len + 4);
+    let mut encoded = Vec::with_capacity(total_len + 5);
     encoded.push(0x30);
     if total_len < 128 {
         encoded.push(total_len as u8);
@@ -406,6 +411,11 @@ fn encode_sequence(fields: &[&[u8]]) -> Result<Vec<u8>, Error> {
     } else if total_len <= 0xffff {
         encoded.push(0x82);
         encoded.push((total_len >> 8) as u8);
+        encoded.push((total_len & 0xff) as u8);
+    } else if total_len <= MAX_CERTIFICATE_DER_BYTES {
+        encoded.push(0x83);
+        encoded.push((total_len >> 16) as u8);
+        encoded.push(((total_len >> 8) & 0xff) as u8);
         encoded.push((total_len & 0xff) as u8);
     } else {
         return Err(Error::Encoding);
