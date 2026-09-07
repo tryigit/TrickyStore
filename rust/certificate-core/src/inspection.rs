@@ -1,7 +1,7 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
 use crate::{
-    parse_any, parse_extension, Error, TlvIterator, ANDROID_ATTESTATION_OID_BYTES,
-    MAX_CERTIFICATE_DER_BYTES,
+    parse_any, parse_extension, validate_v3_version, Error, TlvIterator,
+    ANDROID_ATTESTATION_OID_BYTES, MAX_CERTIFICATE_DER_BYTES,
 };
 use attestation_der::asn1::AnyRef;
 use attestation_der::{Decode as AttestationDecode, Tag, Tagged};
@@ -58,9 +58,12 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
     }
     let mut cert_iter = TlvIterator::new(cert_seq.value());
     let tbs_der = cert_iter.next().ok_or(Error::InvalidCertificate)??;
-    let _algo_der = cert_iter.next().ok_or(Error::InvalidCertificate)??;
-    let _sig_der = cert_iter.next().ok_or(Error::InvalidCertificate)??;
-    if cert_iter.next().is_some() {
+    let algo_der = cert_iter.next().ok_or(Error::InvalidCertificate)??;
+    let sig_der = cert_iter.next().ok_or(Error::InvalidCertificate)??;
+    if cert_iter.next().is_some()
+        || parse_any(algo_der)?.tag() != Tag::Sequence
+        || parse_any(sig_der)?.tag() != Tag::BitString
+    {
         return Err(Error::InvalidCertificate);
     }
 
@@ -70,13 +73,17 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
     }
     let mut tbs_iter = TlvIterator::new(tbs_seq.value());
     let mut field_count = 0usize;
+    let mut first_field = None;
     let mut last_field = None;
     for field in tbs_iter.by_ref() {
         let f = field?;
+        if first_field.is_none() {
+            first_field = Some(f);
+        }
         field_count += 1;
         last_field = Some(f);
     }
-    if field_count < 7 {
+    if field_count < 8 {
         return Err(Error::InvalidCertificate);
     }
 
@@ -90,6 +97,7 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
     ) {
         return Err(Error::MissingAttestationExtension);
     }
+    validate_v3_version(first_field.ok_or(Error::InvalidCertificate)?)?;
 
     let extensions_seq = parse_any(extensions_explicit.value())?;
     if extensions_seq.tag() != Tag::Sequence {
