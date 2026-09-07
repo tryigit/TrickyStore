@@ -303,6 +303,9 @@ fn atomic_write_target_from<R: Read>(
     body_len: usize,
     scratch: &mut [u8],
 ) -> io::Result<()> {
+    if path.contains('\0') {
+        return Err(invalid("config file path is malformed"));
+    }
     let confirm = |source: &mut R| {
         let mut marker = [0u8; 1];
         source.read_exact(&mut marker)?;
@@ -515,6 +518,10 @@ fn parse_restore_pair(value: &str) -> io::Result<(&str, &str)> {
     Ok((token, argument))
 }
 
+fn refresh_restore_transaction(transaction: &mut RestoreTransaction) {
+    transaction.touched = Instant::now();
+}
+
 fn transaction_for_snapshotted_target<'a>(
     transactions: &'a mut HashMap<String, RestoreTransaction>,
     token: &str,
@@ -532,7 +539,7 @@ fn transaction_for_snapshotted_target<'a>(
     {
         return Err(invalid("restore mutation target was not snapshotted"));
     }
-    transaction.touched = Instant::now();
+    refresh_restore_transaction(transaction);
     Ok(transaction)
 }
 
@@ -571,7 +578,7 @@ fn finish_streaming_restore_mutation(token: &str) -> io::Result<()> {
         ));
     }
     transaction.mutation_in_progress = false;
-    transaction.touched = Instant::now();
+    refresh_restore_transaction(transaction);
     drop(transactions);
     restore_janitor::notify();
     Ok(())
@@ -633,7 +640,9 @@ fn restore_delete(root: &TrustedDir, request: &str) -> io::Result<()> {
         .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
     prune_stale_restore_transactions(root, &mut transactions);
     let transaction = transaction_for_snapshotted_target(&mut transactions, token, path)?;
-    restore_transaction_target(root, transaction, path, None)
+    let result = restore_transaction_target(root, transaction, path, None);
+    refresh_restore_transaction(transaction);
+    result
 }
 
 fn encode_hex(value: &[u8]) -> String {
@@ -778,12 +787,14 @@ fn restore_snapshot(root: &TrustedDir, request: &str) -> io::Result<()> {
     let global_remaining = MAX_GLOBAL_RESTORE_SNAPSHOT_BYTES
         .checked_sub(global_used)
         .ok_or_else(|| invalid("global restore snapshot accounting overflow"))?;
-    let bytes = read_transaction_restore_target(
+    let read_result = read_transaction_restore_target(
         root,
         transaction,
         path,
         own_remaining.min(global_remaining),
-    )?;
+    );
+    refresh_restore_transaction(transaction);
+    let bytes = read_result?;
     let added = bytes.as_ref().map_or(0, Vec::len);
     transaction.snapshot_bytes = transaction
         .snapshot_bytes
@@ -793,7 +804,6 @@ fn restore_snapshot(root: &TrustedDir, request: &str) -> io::Result<()> {
         path: path.to_string(),
         bytes,
     });
-    transaction.touched = Instant::now();
     Ok(())
 }
 
@@ -807,7 +817,7 @@ fn restore_rollback(root: &TrustedDir, token: &str) -> io::Result<()> {
         .get_mut(token)
         .ok_or_else(|| invalid("restore transaction is not active"))?;
     ensure_transaction_idle(transaction)?;
-    transaction.touched = Instant::now();
+    refresh_restore_transaction(transaction);
     let mut first_error = None;
     let mut failure_count = 0usize;
     for original in transaction.originals.iter().rev() {
@@ -820,6 +830,7 @@ fn restore_rollback(root: &TrustedDir, token: &str) -> io::Result<()> {
             }
         }
     }
+    refresh_restore_transaction(transaction);
     if let Some(error) = first_error {
         return Err(io::Error::new(
             error.kind(),
@@ -851,11 +862,19 @@ fn restore_export(root: &TrustedDir, token: &str) -> io::Result<()> {
     let mut transactions = restore_transactions()
         .lock()
         .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-    let transaction = transactions
-        .get(token)
-        .ok_or_else(|| invalid("restore transaction is not active"))?;
-    ensure_transaction_idle(transaction)?;
-    export_transaction_to_root(root, token, transaction)?;
+    let export_result = {
+        let transaction = transactions
+            .get(token)
+            .ok_or_else(|| invalid("restore transaction is not active"))?;
+        ensure_transaction_idle(transaction)?;
+        export_transaction_to_root(root, token, transaction)
+    };
+    if let Err(error) = export_result {
+        if let Some(transaction) = transactions.get_mut(token) {
+            refresh_restore_transaction(transaction);
+        }
+        return Err(error);
+    }
     transactions.remove(token);
     Ok(())
 }
