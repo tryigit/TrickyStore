@@ -37,9 +37,6 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             CertHack.canHack() &&
             Config.needHack(callingUid)
         ) {
-            // Both default attestation and caller-selected AttestKey continue to hardware.
-            // Hardware executes the key generation natively without custom exception replies
-            // or parcel byte mutation.
             return Continue
         }
 
@@ -64,13 +61,6 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             reply == null ||
             resultCode != 0
         ) {
-            return Skip
-        }
-
-        // Caller-selected AttestKeys (!usesDefaultAttestationKey) must never be rewritten with a
-        // generic keybox chain. Preserving the genuine hardware-signed child certificate preserves
-        // its cryptographic parent-child relationship untouched.
-        if (!Utils.usesDefaultAttestationKey(data)) {
             return Skip
         }
 
