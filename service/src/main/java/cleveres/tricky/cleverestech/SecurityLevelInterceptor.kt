@@ -24,6 +24,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         private val generateKeyTransaction =
             getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "generateKey")
 
+        /** KeyMint Tag.ATTESTATION_CHALLENGE — the tag value we scan for and strip. */
+        private const val TAG_ATTESTATION_CHALLENGE = -1879047484
+
+        /** KeyMint Tag.INVALID — overwrites the challenge tag so hardware ignores it. */
+        private const val TAG_INVALID = 0
+
         val INTERCEPTED_CODES = validTransactCodes(generateKeyTransaction)
     }
 
@@ -41,18 +47,52 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             Config.needHack(callingUid)
         ) {
             if (!Utils.usesDefaultAttestationKey(data)) {
-                // Reject gracefully with CANNOT_ATTEST_IDS (-66) via AOSP Binder exception format
-                val reply = Parcel.obtain()
-                reply.writeInt(-8) // exception_code: EX_SERVICE_SPECIFIC
-                reply.writeString("CANNOT_ATTEST_IDS") // message
-                reply.writeInt(0) // stack_trace_header (0 means empty stack trace)
-                reply.writeInt(-66) // service_specific_error_code (CANNOT_ATTEST_IDS)
-                return OverrideReply(0, reply)
+                // Explicit AttestKey: strip the attestation challenge so hardware generates a
+                // plain key without an attestation extension. This avoids RootOfTrust divergence
+                // without crashing the app or breaking cryptographic signatures.
+                return stripAttestationChallenge(data)
             }
             return Continue
         }
 
         return Skip
+    }
+
+    /**
+     * Copies the request parcel and scans integer-by-integer for [TAG_ATTESTATION_CHALLENGE].
+     * When found, overwrites it with [TAG_INVALID] so the hardware treats the parameter as
+     * absent. This is immune to OEM-specific Parcel alignment because it does not attempt to
+     * parse the full KeyParameter[] AIDL structure.
+     */
+    private fun stripAttestationChallenge(data: Parcel): Result {
+        val size = data.dataSize()
+        if (size < Int.SIZE_BYTES) return Continue
+
+        val mutated = Parcel.obtain()
+        try {
+            mutated.appendFrom(data, 0, size)
+            mutated.setDataPosition(0)
+
+            // Scan every 4-byte-aligned integer for the challenge tag.
+            val limit = size - Int.SIZE_BYTES
+            var pos = 0
+            while (pos <= limit) {
+                mutated.setDataPosition(pos)
+                if (mutated.readInt() == TAG_ATTESTATION_CHALLENGE) {
+                    mutated.setDataPosition(pos)
+                    mutated.writeInt(TAG_INVALID)
+                    break
+                }
+                pos += Int.SIZE_BYTES
+            }
+
+            mutated.setDataPosition(0)
+            return OverrideData(mutated)
+        } catch (error: Throwable) {
+            mutated.recycle()
+            Logger.e("Failed to strip attestation challenge: ${error.javaClass.simpleName}")
+            return Continue
+        }
     }
 
     override fun onPostTransact(
