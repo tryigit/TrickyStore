@@ -32,15 +32,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): Result {
-        if (code == generateKeyTransaction) {
-            // Caller-selected AttestKeys (!usesDefaultAttestationKey) must execute natively on hardware KeyMint.
-            if (!Utils.usesDefaultAttestationKey(data)) {
-                return Continue
-            }
-
-            if (CertHack.canHack() && Config.needHack(callingUid)) {
-                return Continue
-            }
+        if (
+            code == generateKeyTransaction &&
+            CertHack.canHack() &&
+            Config.needHack(callingUid)
+        ) {
+            return Continue
         }
 
         return Skip
@@ -64,13 +61,6 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             reply == null ||
             resultCode != 0
         ) {
-            return Skip
-        }
-
-        // Caller-selected AttestKeys (!usesDefaultAttestationKey) must never be rewritten with a
-        // generic keybox chain. Preserving the genuine hardware-signed child certificate preserves
-        // its cryptographic parent-child relationship untouched.
-        if (!Utils.usesDefaultAttestationKey(data)) {
             return Skip
         }
 
