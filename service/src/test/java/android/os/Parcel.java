@@ -65,6 +65,7 @@ public class Parcel {
     public byte[] createByteArray() { return new byte[0]; }
     public void readByteArray(byte[] val) {}
     public void setDataPosition(int pos) {}
+    public void setDataSize(int size) {}
     public int dataPosition() { return 0; }
     public int dataAvail() { return queue.isEmpty() ? lastDeclaredSize : Integer.MAX_VALUE; }
     public void appendFrom(Parcel parcel, int offset, int length) {}

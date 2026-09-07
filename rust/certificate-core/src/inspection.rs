@@ -76,13 +76,13 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
     if fields.len() <= TEE_INDEX {
         return Err(Error::AttestationRewrite);
     }
-    let attestation_version = <i32 as attestation_der::Decode>::from_der(&fields[0])
+    let attestation_version = <i32 as attestation_der::Decode>::from_der(fields[0])
         .map_err(|_| Error::AttestationRewrite)?;
     let security_levels = security_levels_from_fields(&fields)?;
-    let keymint_version = <i32 as attestation_der::Decode>::from_der(&fields[2])
+    let keymint_version = <i32 as attestation_der::Decode>::from_der(fields[2])
         .map_err(|_| Error::AttestationRewrite)?;
-    let list_six = tagged_fields(&fields[SOFTWARE_INDEX])?;
-    let list_seven = tagged_fields(&fields[TEE_INDEX])?;
+    let list_six = tagged_fields(fields[SOFTWARE_INDEX])?;
+    let list_seven = tagged_fields(fields[TEE_INDEX])?;
     let six_root_count = list_six
         .iter()
         .filter(|field| field.0 == ROOT_OF_TRUST_TAG)
@@ -123,10 +123,10 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
     })
 }
 
-fn security_levels_from_fields(fields: &[Vec<u8>]) -> Result<SecurityLevels, Error> {
+fn security_levels_from_fields(fields: &[&[u8]]) -> Result<SecurityLevels, Error> {
     Ok(SecurityLevels {
-        attestation: decode_security_level(&fields[1])?,
-        keymint: decode_security_level(&fields[3])?,
+        attestation: decode_security_level(fields[1])?,
+        keymint: decode_security_level(fields[3])?,
     })
 }
 
@@ -143,15 +143,15 @@ fn decode_security_level(encoded: &[u8]) -> Result<SecurityLevel, Error> {
     }
 }
 
-fn tagged_fields(encoded: &[u8]) -> Result<Vec<(u32, Vec<u8>)>, Error> {
+fn tagged_fields(encoded: &[u8]) -> Result<Vec<(u32, &[u8])>, Error> {
     let sequence = AnyRef::from_der(encoded).map_err(|_| Error::AttestationRewrite)?;
     if sequence.tag() != Tag::Sequence {
         return Err(Error::AttestationRewrite);
     }
     split(sequence.value(), MAX_TAGS)?
         .into_iter()
-        .map(|encoded| {
-            let any = AnyRef::from_der(&encoded).map_err(|_| Error::AttestationRewrite)?;
+        .map(|slice| {
+            let any = AnyRef::from_der(slice).map_err(|_| Error::AttestationRewrite)?;
             let tag = match any.tag() {
                 Tag::ContextSpecific {
                     constructed: true,
@@ -159,7 +159,7 @@ fn tagged_fields(encoded: &[u8]) -> Result<Vec<(u32, Vec<u8>)>, Error> {
                 } => number.value(),
                 _ => return Err(Error::AttestationRewrite),
             };
-            Ok((tag, encoded))
+            Ok((tag, slice))
         })
         .collect()
 }
@@ -174,24 +174,24 @@ fn parse_root_of_trust(encoded: &[u8]) -> Result<BootDigests, Error> {
     if fields.len() != 4 {
         return Err(Error::AttestationRewrite);
     }
-    let key_ref = AnyRef::from_der(&fields[0]).map_err(|_| Error::AttestationRewrite)?;
+    let key_ref = AnyRef::from_der(fields[0]).map_err(|_| Error::AttestationRewrite)?;
     if key_ref.tag() != Tag::OctetString {
         return Err(Error::AttestationRewrite);
     }
-    <bool as AttestationDecode>::from_der(&fields[1]).map_err(|_| Error::AttestationRewrite)?;
-    let state_ref = AnyRef::from_der(&fields[2]).map_err(|_| Error::AttestationRewrite)?;
+    <bool as AttestationDecode>::from_der(fields[1]).map_err(|_| Error::AttestationRewrite)?;
+    let state_ref = AnyRef::from_der(fields[2]).map_err(|_| Error::AttestationRewrite)?;
     if state_ref.tag() != Tag::Enumerated
         || state_ref.value().len() != 1
         || !matches!(state_ref.value()[0], 0..=3)
     {
         return Err(Error::AttestationRewrite);
     }
-    let hash_ref = AnyRef::from_der(&fields[3]).map_err(|_| Error::AttestationRewrite)?;
+    let hash_ref = AnyRef::from_der(fields[3]).map_err(|_| Error::AttestationRewrite)?;
     if hash_ref.tag() != Tag::OctetString {
         return Err(Error::AttestationRewrite);
     }
-    let key = decode_digest(&fields[0]);
-    let hash = decode_digest(&fields[3]);
+    let key = decode_digest(fields[0]);
+    let hash = decode_digest(fields[3]);
     Ok((key, hash))
 }
 
@@ -204,7 +204,7 @@ fn decode_digest(encoded: &[u8]) -> Option<[u8; 32]> {
     (!digest.iter().all(|byte| *byte == 0)).then_some(digest)
 }
 
-fn split(mut encoded: &[u8], max_items: usize) -> Result<Vec<Vec<u8>>, Error> {
+fn split(mut encoded: &[u8], max_items: usize) -> Result<Vec<&[u8]>, Error> {
     let mut output = Vec::new();
     while !encoded.is_empty() {
         if output.len() >= max_items {
@@ -218,7 +218,7 @@ fn split(mut encoded: &[u8], max_items: usize) -> Result<Vec<Vec<u8>>, Error> {
         if consumed == 0 {
             return Err(Error::AttestationRewrite);
         }
-        output.push(encoded[..consumed].to_vec());
+        output.push(&encoded[..consumed]);
         encoded = rest;
     }
     Ok(output)

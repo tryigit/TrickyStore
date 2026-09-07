@@ -1,0 +1,227 @@
+package cleveres.tricky.cleverestech.keystore;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.cert.X509v3CertificateBuilder;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.operator.ContentSigner;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
+import org.junit.BeforeClass;
+import org.junit.Test;
+
+import java.io.ByteArrayInputStream;
+import java.math.BigInteger;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.NoSuchProviderException;
+import java.security.Security;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.util.Date;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class LazyX509CertificateTest {
+
+    @BeforeClass
+    public static void setUp() {
+        if (Security.getProvider("BC") == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
+    }
+
+    private static X509Certificate generateTestCert() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC", "BC");
+        kpg.initialize(256);
+        KeyPair kp = kpg.generateKeyPair();
+        X500Name name = new X500Name("CN=Test Subject, O=CleveresTricky, C=US");
+        BigInteger serial = BigInteger.valueOf(123456789L);
+        Date notBefore = new Date(System.currentTimeMillis() - 10_000);
+        Date notAfter = new Date(System.currentTimeMillis() + 100_000);
+        X509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                name, serial, notBefore, notAfter, name, kp.getPublic());
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256withECDSA").build(kp.getPrivate());
+        return new JcaX509CertificateConverter().getCertificate(builder.build(signer));
+    }
+
+    @Test
+    public void getEncodedDoesNotInstantiateDelegate() throws Exception {
+        X509Certificate original = generateTestCert();
+        byte[] encoded = original.getEncoded();
+
+        LazyX509Certificate lazy = new LazyX509Certificate(encoded);
+        assertFalse("Delegate must not be instantiated on construction",
+                lazy.isDelegateInstantiatedForTesting());
+
+        byte[] lazyEncoded = lazy.getEncoded();
+        assertFalse("getEncoded must NOT trigger delegate instantiation",
+                lazy.isDelegateInstantiatedForTesting());
+        assertArrayEquals("Encoded bytes must match original exactly", encoded, lazyEncoded);
+    }
+
+    @Test
+    public void fieldAccessInstantiatesDelegateAndMatchesOriginal() throws Exception {
+        X509Certificate original = generateTestCert();
+        byte[] encoded = original.getEncoded();
+
+        LazyX509Certificate lazy = new LazyX509Certificate(encoded);
+        assertFalse(lazy.isDelegateInstantiatedForTesting());
+
+        assertEquals(original.getSubjectDN().getName(), lazy.getSubjectDN().getName());
+        assertTrue("Delegate must be instantiated after field access",
+                lazy.isDelegateInstantiatedForTesting());
+
+        assertEquals(original.getIssuerDN().getName(), lazy.getIssuerDN().getName());
+        assertEquals(original.getSerialNumber(), lazy.getSerialNumber());
+        assertEquals(original.getPublicKey(), lazy.getPublicKey());
+        assertEquals(original.getSigAlgName(), lazy.getSigAlgName());
+        assertNotNull(lazy.getSignature());
+        lazy.checkValidity();
+    }
+
+    @Test
+    public void equalityAndHashCodeMatch() throws Exception {
+        X509Certificate original = generateTestCert();
+        byte[] encoded = original.getEncoded();
+
+        LazyX509Certificate lazy1 = new LazyX509Certificate(encoded);
+        LazyX509Certificate lazy2 = new LazyX509Certificate(encoded);
+
+        assertEquals("Two LazyX509Certificates with same DER must be equal", lazy1, lazy2);
+        assertEquals("Hash codes must match for same DER", lazy1.hashCode(), lazy2.hashCode());
+        assertFalse("Equality check between lazy certs must not instantiate delegate",
+                lazy1.isDelegateInstantiatedForTesting());
+        assertFalse(lazy2.isDelegateInstantiatedForTesting());
+
+        LazyX509Certificate lazyNoDelegate = new LazyX509Certificate(encoded);
+        assertTrue("Lazy cert must equal genuine cert with same DER", lazyNoDelegate.equals(original));
+        assertFalse("Equality check against genuine cert must not instantiate delegate",
+                lazyNoDelegate.isDelegateInstantiatedForTesting());
+        assertTrue("Genuine cert must equal lazy cert with same DER", original.equals(lazyNoDelegate));
+        assertFalse("Equality check from genuine cert must not instantiate delegate",
+                lazyNoDelegate.isDelegateInstantiatedForTesting());
+        assertEquals("Hash codes must match between lazy and genuine cert", original.hashCode(), lazyNoDelegate.hashCode());
+        assertFalse("HashCode check must not instantiate delegate",
+                lazyNoDelegate.isDelegateInstantiatedForTesting());
+
+        try {
+            CertificateFactory sunFactory = CertificateFactory.getInstance("X.509", "SUN");
+            X509Certificate sunCert = (X509Certificate) sunFactory.generateCertificate(new ByteArrayInputStream(encoded));
+            assertEquals("Standard platform cert hash must match lazy cert hash", sunCert.hashCode(), lazyNoDelegate.hashCode());
+        } catch (NoSuchProviderException ignored) {
+            // SUN provider not on Android, only on JVM
+        }
+    }
+
+    @Test
+    public void zeroCopyConstructorSharesArrayWithoutCloning() {
+        byte[] buffer = new byte[] { 0x30, 0x03, 0x02, 0x01, 0x01 };
+        LazyX509Certificate lazy = new LazyX509Certificate(buffer, false);
+        assertArrayEquals(buffer, lazy.getEncoded());
+        assertFalse(lazy.isDelegateInstantiatedForTesting());
+    }
+
+    @Test
+    public void concurrentAccessIsThreadSafe() throws Exception {
+        X509Certificate original = generateTestCert();
+        byte[] encoded = original.getEncoded();
+        LazyX509Certificate lazy = new LazyX509Certificate(encoded);
+
+        int threads = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        CountDownLatch latch = new CountDownLatch(threads);
+        AtomicBoolean errorOccurred = new AtomicBoolean(false);
+
+        for (int i = 0; i < threads; i++) {
+            executor.submit(() -> {
+                try {
+                    for (int j = 0; j < 50; j++) {
+                        assertNotNull(lazy.getSubjectDN());
+                        assertEquals(original.getSerialNumber(), lazy.getSerialNumber());
+                        assertNotNull(lazy.getEncoded());
+                    }
+                } catch (Throwable t) {
+                    errorOccurred.set(true);
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+
+        try {
+            assertTrue("All threads should complete within timeout",
+                    latch.await(5, TimeUnit.SECONDS));
+            assertFalse("No concurrent access error should occur", errorOccurred.get());
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private static X509Certificate generateCertWithExtension(
+            org.bouncycastle.asn1.ASN1ObjectIdentifier oid,
+            byte[] value
+    ) throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC", "BC");
+        kpg.initialize(256);
+        KeyPair kp = kpg.generateKeyPair();
+        X500Name name = new X500Name("CN=Test Subject, O=CleveresTricky, C=US");
+        BigInteger serial = BigInteger.valueOf(123456789L);
+        Date notBefore = new Date(System.currentTimeMillis() - 10_000);
+        Date notAfter = new Date(System.currentTimeMillis() + 100_000);
+        X509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                name, serial, notBefore, notAfter, name, kp.getPublic());
+        if (oid != null && value != null) {
+            builder.addExtension(oid, false, new org.bouncycastle.asn1.DEROctetString(value));
+        }
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256withECDSA").build(kp.getPrivate());
+        return new JcaX509CertificateConverter().getCertificate(builder.build(signer));
+    }
+
+    @Test
+    public void hasAttestationExtensionDetectsAndroidAttestationOid() throws Exception {
+        org.bouncycastle.asn1.ASN1ObjectIdentifier attestationOid =
+                new org.bouncycastle.asn1.ASN1ObjectIdentifier("1.3.6.1.4.1.11129.2.1.17");
+        X509Certificate cert = generateCertWithExtension(attestationOid, new byte[] { 0x30, 0x00 });
+        LazyX509Certificate lazy = new LazyX509Certificate(cert.getEncoded());
+
+        assertTrue(lazy.hasAttestationExtension());
+        assertFalse("Delegate must not be instantiated during attestation extension check",
+                lazy.isDelegateInstantiatedForTesting());
+    }
+
+    @Test
+    public void hasAttestationExtensionRejectsOidInUnrelatedExtensionValue() throws Exception {
+        byte[] rawAttestationOidBytes = new byte[] {
+                0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, (byte) 0xd6, 0x79, 0x02, 0x01, 0x11
+        };
+        org.bouncycastle.asn1.ASN1ObjectIdentifier unrelatedOid =
+                new org.bouncycastle.asn1.ASN1ObjectIdentifier("1.2.3.4.5");
+        X509Certificate cert = generateCertWithExtension(unrelatedOid, rawAttestationOidBytes);
+        LazyX509Certificate lazy = new LazyX509Certificate(cert.getEncoded());
+
+        assertFalse("Oid bytes embedded inside an unrelated extension value must not trigger attestation detection",
+                lazy.hasAttestationExtension());
+        assertFalse("Delegate must not be instantiated during attestation extension check",
+                lazy.isDelegateInstantiatedForTesting());
+    }
+
+    @Test
+    public void hasAttestationExtensionReturnsFalseWhenNoExtensionsPresent() throws Exception {
+        X509Certificate cert = generateTestCert();
+        LazyX509Certificate lazy = new LazyX509Certificate(cert.getEncoded());
+
+        assertFalse(lazy.hasAttestationExtension());
+        assertFalse("Delegate must not be instantiated during attestation extension check",
+                lazy.isDelegateInstantiatedForTesting());
+    }
+}

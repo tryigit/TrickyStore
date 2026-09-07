@@ -207,6 +207,85 @@ class GenerateKeyTimingFastPathTest {
         assertTrue(fallbackEncode > applyCache)
     }
 
+    @Test
+    fun `hackCertificateChain defers X509 parsing of rewritten leaf to avoid generateKey timing side channel`() {
+        val root = locateRoot()
+        val source =
+            File(
+                root,
+                "service/src/main/java/cleveres/tricky/cleverestech/keystore/CertHack.java",
+            ).readText()
+        val method = source.indexOf("public static Certificate[] hackCertificateChain")
+        val backendRewrite = source.indexOf("byte[] rewrittenDer = CertificateBackend.rewrite", method)
+        val lazyLeaf = source.indexOf("Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer", backendRewrite)
+        val eagerFactory = source.indexOf("CERTIFICATE_FACTORY.get().generateCertificate", backendRewrite)
+
+        assertTrue(backendRewrite > method)
+        assertTrue(lazyLeaf > backendRewrite)
+        assertTrue("Eager CertificateFactory call must not exist on the rewrite completion path", eagerFactory < 0)
+    }
+
+    @Test
+    fun `generateKey reply stream reuses existing reply parcel in place without Parcel obtain allocation`() {
+        val root = locateRoot()
+        val source =
+            File(
+                root,
+                "service/src/main/java/cleveres/tricky/cleverestech/SecurityLevelInterceptor.kt",
+            ).readText()
+        val postTransact = source.indexOf("override fun onPostTransact")
+        val inPlaceReset = source.indexOf("reply.setDataSize(0)", postTransact)
+        val inPlacePosition = source.indexOf("reply.setDataPosition(0)", postTransact)
+        val inPlaceNoException = source.indexOf("reply.writeNoException()", postTransact)
+        val inPlaceTypedObject = source.indexOf("reply.writeTypedObject(metadata, 0)", postTransact)
+        val inPlaceReply = source.indexOf("OverrideReply(0, reply)", postTransact)
+        val parcelObtain = source.indexOf("Parcel.obtain()", postTransact)
+
+        assertTrue(postTransact >= 0)
+        assertTrue(inPlaceReset > postTransact)
+        assertTrue(inPlacePosition > inPlaceReset)
+        assertTrue(inPlaceNoException > inPlacePosition)
+        assertTrue(inPlaceTypedObject > inPlaceNoException)
+        assertTrue(inPlaceReply > inPlaceTypedObject)
+        assertTrue("Hot path onPostTransact must not allocate new Parcel instances via Parcel.obtain()", parcelObtain < 0)
+    }
+
+    @Test
+    fun `hot path interceptor and CertHack completion path contain zero Logger calls`() {
+        val root = locateRoot()
+        val interceptorSource =
+            File(
+                root,
+                "service/src/main/java/cleveres/tricky/cleverestech/SecurityLevelInterceptor.kt",
+            ).readText()
+        assertFalse("SecurityLevelInterceptor must contain zero Logger calls", interceptorSource.contains("Logger."))
+
+        val certHackSource =
+            File(
+                root,
+                "service/src/main/java/cleveres/tricky/cleverestech/keystore/CertHack.java",
+            ).readText()
+        val method = certHackSource.indexOf("public static Certificate[] hackCertificateChain")
+        val methodEnd = certHackSource.indexOf("private static Config.AttestationPatchLevels keepPatchLevels", method)
+        val hackMethodBody = certHackSource.substring(method, methodEnd)
+        assertFalse("CertHack.hackCertificateChain must contain zero Logger calls", hackMethodBody.contains("Logger."))
+    }
+
+    @Test
+    fun `getLeafCertificate returns LazyX509Certificate and attestation check never instantiates delegate`() {
+        val metadata = android.system.keystore2.KeyMetadata()
+        metadata.certificate = ByteArray(64) { 0x30.toByte() }
+        val leaf = Utils.getLeafCertificate(metadata)
+
+        assertTrue(leaf is cleveres.tricky.cleverestech.keystore.LazyX509Certificate)
+        val lazyLeaf = leaf as cleveres.tricky.cleverestech.keystore.LazyX509Certificate
+        assertFalse(lazyLeaf.isDelegateInstantiatedForTesting)
+
+        val hasAttestation = Utils.hasAndroidAttestationExtension(leaf)
+        assertFalse(hasAttestation)
+        assertFalse("Lazy leaf delegate must not be instantiated during attestation extension check", lazyLeaf.isDelegateInstantiatedForTesting)
+    }
+
     private fun locateRoot(): File {
         var current = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
         repeat(6) {

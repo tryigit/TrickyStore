@@ -131,10 +131,10 @@ struct AuthorizationSummary {
     boot_patch: Option<i32>,
 }
 
-#[derive(Debug)]
-struct TaggedTlv {
+#[derive(Clone, Debug)]
+struct TaggedTlv<'a> {
     tag: u32,
-    encoded: Vec<u8>,
+    encoded: std::borrow::Cow<'a, [u8]>,
 }
 
 pub fn rewrite_extension(request: &RewriteRequest<'_>) -> Result<RewriteResult, Error> {
@@ -143,15 +143,15 @@ pub fn rewrite_extension(request: &RewriteRequest<'_>) -> Result<RewriteResult, 
     if outer.tag() != Tag::Sequence {
         return Err(Error::InvalidStructure);
     }
-    let mut fields = split_tlvs(outer.value(), MAX_KEY_DESCRIPTION_FIELDS)?;
-    if fields.len() <= AUTHORIZATION_LIST_TEE_INDEX {
+    let raw_fields = split_tlvs(outer.value(), MAX_KEY_DESCRIPTION_FIELDS)?;
+    if raw_fields.len() <= AUTHORIZATION_LIST_TEE_INDEX {
         return Err(Error::InvalidStructure);
     }
 
-    let attestation_version = decode_i32(&fields[0])?;
-    let attestation_level = decode_security_level(&fields[1])?;
-    let keymint_version = decode_i32(&fields[2])?;
-    let keymint_level = decode_security_level(&fields[3])?;
+    let attestation_version = decode_i32(raw_fields[0])?;
+    let attestation_level = decode_security_level(raw_fields[1])?;
+    let keymint_version = decode_i32(raw_fields[2])?;
+    let keymint_level = decode_security_level(raw_fields[3])?;
     let supports_module_hash = attestation_version >= 400 && keymint_version >= 400;
 
     let valid_hardware = matches!((attestation_level, keymint_level), (1, 1) | (2, 2) | (1, 2));
@@ -159,8 +159,8 @@ pub fn rewrite_extension(request: &RewriteRequest<'_>) -> Result<RewriteResult, 
         return Err(Error::InvalidStructure);
     }
 
-    let list_six = parse_authorization_list(&fields[AUTHORIZATION_LIST_SOFTWARE_INDEX])?;
-    let list_seven = parse_authorization_list(&fields[AUTHORIZATION_LIST_TEE_INDEX])?;
+    let list_six = parse_authorization_list(raw_fields[AUTHORIZATION_LIST_SOFTWARE_INDEX])?;
+    let list_seven = parse_authorization_list(raw_fields[AUTHORIZATION_LIST_TEE_INDEX])?;
     let summary_six = summarize_authorization_list(&list_six)?;
     let summary_seven = summarize_authorization_list(&list_seven)?;
 
@@ -195,7 +195,7 @@ pub fn rewrite_extension(request: &RewriteRequest<'_>) -> Result<RewriteResult, 
 
     let mut tee = Vec::with_capacity(tee_original.len().saturating_add(8));
     let mut software = Vec::with_capacity(software_original.len().saturating_add(4));
-    let mut original_module_hash: Option<TaggedTlv> = None;
+    let mut original_module_hash: Option<TaggedTlv<'_>> = None;
     let mut pending_ids = Vec::new();
 
     let mut sorted_overrides = request.id_overrides.to_vec();
@@ -216,7 +216,10 @@ pub fn rewrite_extension(request: &RewriteRequest<'_>) -> Result<RewriteResult, 
             if let Ok(index) = sorted_overrides.binary_search_by_key(&field.tag, |o| o.tag) {
                 pending_ids.push(TaggedTlv {
                     tag: field.tag,
-                    encoded: explicit_octet_string(field.tag, sorted_overrides[index].value)?,
+                    encoded: std::borrow::Cow::Owned(explicit_octet_string(
+                        field.tag,
+                        sorted_overrides[index].value,
+                    )?),
                 });
                 continue;
             }
@@ -267,7 +270,10 @@ pub fn rewrite_extension(request: &RewriteRequest<'_>) -> Result<RewriteResult, 
         if let Some(module_hash) = request.module_hash {
             software.push(TaggedTlv {
                 tag: MODULE_HASH_TAG,
-                encoded: explicit_octet_string(MODULE_HASH_TAG, module_hash)?,
+                encoded: std::borrow::Cow::Owned(explicit_octet_string(
+                    MODULE_HASH_TAG,
+                    module_hash,
+                )?),
             });
         } else if let Some(original) = original_module_hash {
             software.push(original);
@@ -276,15 +282,25 @@ pub fn rewrite_extension(request: &RewriteRequest<'_>) -> Result<RewriteResult, 
 
     tee.push(TaggedTlv {
         tag: ROOT_OF_TRUST_TAG,
-        encoded: explicit_root_of_trust(request.verified_boot_key, request.verified_boot_hash)?,
+        encoded: std::borrow::Cow::Owned(explicit_root_of_trust(
+            request.verified_boot_key,
+            request.verified_boot_hash,
+        )?),
     });
     tee.sort_by_key(|field| field.tag);
     software.sort_by_key(|field| field.tag);
 
-    fields[tee_index] = encode_sequence(tee.iter().map(|field| field.encoded.as_slice()))?;
-    fields[software_index] =
-        encode_sequence(software.iter().map(|field| field.encoded.as_slice()))?;
-    let extension_der = encode_sequence(fields.iter().map(Vec::as_slice))?;
+    let mut fields: Vec<std::borrow::Cow<'_, [u8]>> = raw_fields
+        .into_iter()
+        .map(std::borrow::Cow::Borrowed)
+        .collect();
+    fields[tee_index] = std::borrow::Cow::Owned(encode_sequence(
+        tee.iter().map(|field| field.encoded.as_ref()),
+    )?);
+    fields[software_index] = std::borrow::Cow::Owned(encode_sequence(
+        software.iter().map(|field| field.encoded.as_ref()),
+    )?);
+    let extension_der = encode_sequence(fields.iter().map(|f| f.as_ref()))?;
     if extension_der.len() > MAX_ATTESTATION_EXTENSION_BYTES {
         return Err(Error::Bounds);
     }
@@ -307,8 +323,8 @@ pub fn inspect_captured_patch_levels(extension_der: &[u8]) -> Result<CapturedPat
     if fields.len() <= AUTHORIZATION_LIST_TEE_INDEX {
         return Err(Error::InvalidStructure);
     }
-    let list_six = parse_authorization_list(&fields[AUTHORIZATION_LIST_SOFTWARE_INDEX])?;
-    let list_seven = parse_authorization_list(&fields[AUTHORIZATION_LIST_TEE_INDEX])?;
+    let list_six = parse_authorization_list(fields[AUTHORIZATION_LIST_SOFTWARE_INDEX])?;
+    let list_seven = parse_authorization_list(fields[AUTHORIZATION_LIST_TEE_INDEX])?;
     let summary_six = summarize_authorization_list(&list_six)?;
     let summary_seven = summarize_authorization_list(&list_seven)?;
     if summary_six.has_root_of_trust == summary_seven.has_root_of_trust {
@@ -365,7 +381,7 @@ fn validate_request(request: &RewriteRequest<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-fn parse_authorization_list(encoded: &[u8]) -> Result<Vec<TaggedTlv>, Error> {
+fn parse_authorization_list<'a>(encoded: &'a [u8]) -> Result<Vec<TaggedTlv<'a>>, Error> {
     let sequence = parse_any(encoded)?;
     if sequence.tag() != Tag::Sequence {
         return Err(Error::InvalidStructure);
@@ -373,8 +389,8 @@ fn parse_authorization_list(encoded: &[u8]) -> Result<Vec<TaggedTlv>, Error> {
     let fields = split_tlvs(sequence.value(), MAX_AUTHORIZATION_TAGS)?;
     fields
         .into_iter()
-        .map(|encoded| {
-            let any = parse_any(&encoded)?;
+        .map(|slice| {
+            let any = parse_any(slice)?;
             let tag = match any.tag() {
                 Tag::ContextSpecific {
                     constructed: true,
@@ -382,12 +398,15 @@ fn parse_authorization_list(encoded: &[u8]) -> Result<Vec<TaggedTlv>, Error> {
                 } => number.value(),
                 _ => return Err(Error::InvalidStructure),
             };
-            Ok(TaggedTlv { tag, encoded })
+            Ok(TaggedTlv {
+                tag,
+                encoded: std::borrow::Cow::Borrowed(slice),
+            })
         })
         .collect()
 }
 
-fn summarize_authorization_list(fields: &[TaggedTlv]) -> Result<AuthorizationSummary, Error> {
+fn summarize_authorization_list(fields: &[TaggedTlv<'_>]) -> Result<AuthorizationSummary, Error> {
     let mut summary = AuthorizationSummary::default();
     for field in fields {
         match field.tag {
@@ -441,9 +460,9 @@ fn should_remove_patch(tag: u32, levels: PatchLevels) -> bool {
     }
 }
 
-fn add_patch_tag(
-    tee: &mut Vec<TaggedTlv>,
-    software: &mut Vec<TaggedTlv>,
+fn add_patch_tag<'a>(
+    tee: &mut Vec<TaggedTlv<'a>>,
+    software: &mut Vec<TaggedTlv<'a>>,
     tag: u32,
     component: PatchComponent,
     was_tee: bool,
@@ -456,11 +475,14 @@ fn add_patch_tag(
     if was_tee || !was_software {
         tee.push(TaggedTlv {
             tag,
-            encoded: encoded.clone(),
+            encoded: std::borrow::Cow::Owned(encoded.clone()),
         });
     }
     if was_software {
-        software.push(TaggedTlv { tag, encoded });
+        software.push(TaggedTlv {
+            tag,
+            encoded: std::borrow::Cow::Owned(encoded),
+        });
     }
     Ok(())
 }
@@ -517,19 +539,19 @@ fn validate_root_of_trust(encoded: &[u8]) -> Result<(), Error> {
     if fields.len() != 4 {
         return Err(Error::InvalidStructure);
     }
-    let key = parse_any(&fields[0])?;
+    let key = parse_any(fields[0])?;
     if key.tag() != Tag::OctetString {
         return Err(Error::InvalidStructure);
     }
-    bool::from_der(&fields[1]).map_err(|_| Error::InvalidStructure)?;
-    let state = parse_any(&fields[2])?;
+    bool::from_der(fields[1]).map_err(|_| Error::InvalidStructure)?;
+    let state = parse_any(fields[2])?;
     if state.tag() != Tag::Enumerated
         || state.value().len() != 1
         || !matches!(state.value()[0], 0..=3)
     {
         return Err(Error::InvalidStructure);
     }
-    let hash = parse_any(&fields[3])?;
+    let hash = parse_any(fields[3])?;
     if hash.tag() != Tag::OctetString {
         return Err(Error::InvalidStructure);
     }
@@ -537,26 +559,16 @@ fn validate_root_of_trust(encoded: &[u8]) -> Result<(), Error> {
 }
 
 fn explicit_root_of_trust(boot_key: &[u8; 32], boot_hash: &[u8; 32]) -> Result<Vec<u8>, Error> {
-    let key = Any::new(Tag::OctetString, boot_key.to_vec())
-        .map_err(|_| Error::Bounds)?
-        .to_der()
-        .map_err(|_| Error::Der)?;
-    let verified = true.to_der().map_err(|_| Error::Der)?;
-    let state = Any::new(Tag::Enumerated, vec![0])
-        .map_err(|_| Error::Der)?
-        .to_der()
-        .map_err(|_| Error::Der)?;
-    let hash = Any::new(Tag::OctetString, boot_hash.to_vec())
-        .map_err(|_| Error::Bounds)?
-        .to_der()
-        .map_err(|_| Error::Der)?;
-    let sequence = encode_sequence([
-        key.as_slice(),
-        verified.as_slice(),
-        state.as_slice(),
-        hash.as_slice(),
-    ])?;
-    explicit_tag(ROOT_OF_TRUST_TAG, &sequence)
+    let mut root = vec![0u8; 80];
+    root[0..4].copy_from_slice(&[0xbf, 0x85, 0x40, 0x4c]);
+    root[4..6].copy_from_slice(&[0x30, 0x4a]);
+    root[6..8].copy_from_slice(&[0x04, 0x20]);
+    root[8..40].copy_from_slice(boot_key);
+    root[40..43].copy_from_slice(&[0x01, 0x01, 0xff]);
+    root[43..46].copy_from_slice(&[0x0a, 0x01, 0x00]);
+    root[46..48].copy_from_slice(&[0x04, 0x20]);
+    root[48..80].copy_from_slice(boot_hash);
+    Ok(root)
 }
 
 fn explicit_tag(tag: u32, inner_der: &[u8]) -> Result<Vec<u8>, Error> {
@@ -573,25 +585,45 @@ fn explicit_tag(tag: u32, inner_der: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 fn encode_sequence<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Result<Vec<u8>, Error> {
-    let mut value = Vec::new();
-    for part in parts {
-        let new_len = value.len().checked_add(part.len()).ok_or(Error::Bounds)?;
-        if new_len > MAX_ATTESTATION_EXTENSION_BYTES {
+    let mut total_len = 0usize;
+    let parts_vec: Vec<&'a [u8]> = parts.into_iter().collect();
+    for part in &parts_vec {
+        total_len = total_len.checked_add(part.len()).ok_or(Error::Bounds)?;
+        if total_len > MAX_ATTESTATION_EXTENSION_BYTES {
             return Err(Error::Bounds);
         }
-        value.extend_from_slice(part);
     }
-    Any::new(Tag::Sequence, value)
-        .map_err(|_| Error::Bounds)?
-        .to_der()
-        .map_err(|_| Error::Der)
+
+    let mut encoded = Vec::with_capacity(total_len + 5);
+    encoded.push(0x30);
+    if total_len < 128 {
+        encoded.push(total_len as u8);
+    } else if total_len <= 0xff {
+        encoded.push(0x81);
+        encoded.push(total_len as u8);
+    } else if total_len <= 0xffff {
+        encoded.push(0x82);
+        encoded.push((total_len >> 8) as u8);
+        encoded.push((total_len & 0xff) as u8);
+    } else if total_len <= MAX_ATTESTATION_EXTENSION_BYTES {
+        encoded.push(0x83);
+        encoded.push((total_len >> 16) as u8);
+        encoded.push(((total_len >> 8) & 0xff) as u8);
+        encoded.push((total_len & 0xff) as u8);
+    } else {
+        return Err(Error::Bounds);
+    }
+    for part in parts_vec {
+        encoded.extend_from_slice(part);
+    }
+    Ok(encoded)
 }
 
 fn parse_any(encoded: &[u8]) -> Result<AnyRef<'_>, Error> {
     AnyRef::from_der(encoded).map_err(|_| Error::Der)
 }
 
-fn split_tlvs(mut encoded: &[u8], max_items: usize) -> Result<Vec<Vec<u8>>, Error> {
+fn split_tlvs(mut encoded: &[u8], max_items: usize) -> Result<Vec<&[u8]>, Error> {
     let mut output = Vec::new();
     while !encoded.is_empty() {
         if output.len() >= max_items {
@@ -602,7 +634,7 @@ fn split_tlvs(mut encoded: &[u8], max_items: usize) -> Result<Vec<Vec<u8>>, Erro
         if consumed == 0 {
             return Err(Error::Der);
         }
-        output.push(encoded[..consumed].to_vec());
+        output.push(&encoded[..consumed]);
         encoded = rest;
     }
     Ok(output)
@@ -750,8 +782,8 @@ mod tests {
         let rewritten = rewrite_extension(&request).unwrap();
         let outer = parse_any(&rewritten.extension_der).unwrap();
         let fields = split_tlvs(outer.value(), MAX_KEY_DESCRIPTION_FIELDS).unwrap();
-        assert_eq!(fields[1], strongbox);
-        assert_eq!(fields[3], strongbox);
+        assert_eq!(fields[1], strongbox.as_slice());
+        assert_eq!(fields[3], strongbox.as_slice());
     }
 
     #[test]
@@ -1099,11 +1131,11 @@ mod tests {
         .unwrap()
     }
 
-    fn authorization_lists(extension: &[u8]) -> (Vec<TaggedTlv>, Vec<TaggedTlv>) {
+    fn authorization_lists(extension: &[u8]) -> (Vec<TaggedTlv<'_>>, Vec<TaggedTlv<'_>>) {
         let outer = parse_any(extension).unwrap();
         let fields = split_tlvs(outer.value(), MAX_KEY_DESCRIPTION_FIELDS).unwrap();
-        let six = parse_authorization_list(&fields[6]).unwrap();
-        let seven = parse_authorization_list(&fields[7]).unwrap();
+        let six = parse_authorization_list(fields[6]).unwrap();
+        let seven = parse_authorization_list(fields[7]).unwrap();
         let six_summary = summarize_authorization_list(&six).unwrap();
         let seven_summary = summarize_authorization_list(&seven).unwrap();
         if six_summary.has_root_of_trust && !seven_summary.has_root_of_trust {
@@ -1113,14 +1145,14 @@ mod tests {
         }
     }
 
-    fn decode_tagged_i32(fields: &[TaggedTlv], tag: u32) -> Option<i32> {
+    fn decode_tagged_i32(fields: &[TaggedTlv<'_>], tag: u32) -> Option<i32> {
         fields
             .iter()
             .find(|field| field.tag == tag)
             .map(|field| decode_explicit_i32(&field.encoded).unwrap())
     }
 
-    fn decode_tagged_octets(fields: &[TaggedTlv], tag: u32) -> Option<Vec<u8>> {
+    fn decode_tagged_octets(fields: &[TaggedTlv<'_>], tag: u32) -> Option<Vec<u8>> {
         fields.iter().find(|field| field.tag == tag).map(|field| {
             let outer = parse_any(&field.encoded).unwrap();
             let inner = parse_any(outer.value()).unwrap();
@@ -1129,7 +1161,7 @@ mod tests {
         })
     }
 
-    fn root_of_trust_fields(tee: &[TaggedTlv]) -> (Vec<u8>, bool, u8, Vec<u8>) {
+    fn root_of_trust_fields(tee: &[TaggedTlv<'_>]) -> (Vec<u8>, bool, u8, Vec<u8>) {
         let root = tee
             .iter()
             .find(|field| field.tag == ROOT_OF_TRUST_TAG)
@@ -1139,13 +1171,13 @@ mod tests {
         assert_eq!(sequence.tag(), Tag::Sequence);
         let fields = split_tlvs(sequence.value(), 4).unwrap();
         assert_eq!(fields.len(), 4);
-        let key = parse_any(&fields[0]).unwrap();
+        let key = parse_any(fields[0]).unwrap();
         assert_eq!(key.tag(), Tag::OctetString);
-        let locked = bool::from_der(&fields[1]).unwrap();
-        let state = parse_any(&fields[2]).unwrap();
+        let locked = bool::from_der(fields[1]).unwrap();
+        let state = parse_any(fields[2]).unwrap();
         assert_eq!(state.tag(), Tag::Enumerated);
         assert_eq!(state.value().len(), 1);
-        let hash = parse_any(&fields[3]).unwrap();
+        let hash = parse_any(fields[3]).unwrap();
         assert_eq!(hash.tag(), Tag::OctetString);
         (
             key.value().to_vec(),
@@ -1157,5 +1189,47 @@ mod tests {
 
     fn assert_sorted(fields: &[TaggedTlv]) {
         assert!(fields.windows(2).all(|pair| pair[0].tag <= pair[1].tag));
+    }
+
+    #[test]
+    fn encode_sequence_length_boundaries() {
+        let zero = encode_sequence([]).unwrap();
+        assert_eq!(zero, &[0x30, 0x00]);
+
+        let payload_127 = vec![0xaa; 127];
+        let enc_127 = encode_sequence([payload_127.as_slice()]).unwrap();
+        assert_eq!(&enc_127[..2], &[0x30, 0x7f]);
+        assert_eq!(&enc_127[2..], payload_127.as_slice());
+
+        let payload_128 = vec![0xbb; 128];
+        let enc_128 = encode_sequence([payload_128.as_slice()]).unwrap();
+        assert_eq!(&enc_128[..3], &[0x30, 0x81, 0x80]);
+        assert_eq!(&enc_128[3..], payload_128.as_slice());
+
+        let payload_255 = vec![0xcc; 255];
+        let enc_255 = encode_sequence([payload_255.as_slice()]).unwrap();
+        assert_eq!(&enc_255[..3], &[0x30, 0x81, 0xff]);
+        assert_eq!(&enc_255[3..], payload_255.as_slice());
+
+        let payload_256 = vec![0xdd; 256];
+        let enc_256 = encode_sequence([payload_256.as_slice()]).unwrap();
+        assert_eq!(&enc_256[..4], &[0x30, 0x82, 0x01, 0x00]);
+        assert_eq!(&enc_256[4..], payload_256.as_slice());
+
+        let payload_65535 = vec![0xee; 65535];
+        let enc_65535 = encode_sequence([payload_65535.as_slice()]).unwrap();
+        assert_eq!(&enc_65535[..4], &[0x30, 0x82, 0xff, 0xff]);
+        assert_eq!(&enc_65535[4..], payload_65535.as_slice());
+
+        let payload_max = vec![0x11; MAX_ATTESTATION_EXTENSION_BYTES];
+        let enc_max = encode_sequence([payload_max.as_slice()]).unwrap();
+        assert_eq!(&enc_max[..5], &[0x30, 0x83, 0x01, 0x00, 0x00]);
+        assert_eq!(&enc_max[5..], payload_max.as_slice());
+
+        let payload_over = vec![0x22; MAX_ATTESTATION_EXTENSION_BYTES + 1];
+        assert_eq!(
+            encode_sequence([payload_over.as_slice()]),
+            Err(Error::Bounds)
+        );
     }
 }
