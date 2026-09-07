@@ -154,15 +154,14 @@ class GenerateKeyTimingFastPathTest {
                 "service/src/main/java/cleveres/tricky/cleverestech/keystore/CertHack.java",
             ).readText()
         val rewrite = source.indexOf("byte[] rewrittenDer = CertificateBackend.rewrite")
-        val issuerEncoding = source.indexOf("byte[] issuerChainEncoded = Utils.encodeIssuerChain(result)", rewrite)
         val completed =
-            source.indexOf("new CachedCertificateChain(result, rewrittenDer, issuerChainEncoded", issuerEncoding)
+            source.indexOf("new CachedCertificateChain(result, rewrittenDer, prepared.encodedIssuerChain", rewrite)
         val cachePut = source.indexOf("cache.put(cacheKey, completed)", completed)
 
         assertTrue(rewrite >= 0)
-        assertTrue(issuerEncoding > rewrite)
-        assertTrue(completed > issuerEncoding)
+        assertTrue(completed > rewrite)
         assertTrue(cachePut > completed)
+        assertTrue(source.contains("final byte[] encodedIssuerChain;"))
     }
 
     @Test

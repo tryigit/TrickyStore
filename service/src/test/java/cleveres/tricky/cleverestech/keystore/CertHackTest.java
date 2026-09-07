@@ -470,7 +470,7 @@ public class CertHackTest {
         keyCtor.setAccessible(true);
 
         Class<?> chainClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$CachedCertificateChain");
-        java.lang.reflect.Constructor<?> chainCtor = chainClass.getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class);
+        java.lang.reflect.Constructor<?> chainCtor = chainClass.getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class);
         chainCtor.setAccessible(true);
 
         java.util.Map<Object, Object> cache = (java.util.Map<Object, Object>) cacheObj;
@@ -481,7 +481,7 @@ public class CertHackTest {
         for (int i = 0; i < 70; i++) {
             byte[] id = new byte[]{(byte) i};
             Object k = keyCtor.newInstance((Object) id);
-            Object v = chainCtor.newInstance(new Certificate[0], id, id);
+            Object v = chainCtor.newInstance(new Certificate[0], id, id, true);
             cache.put(k, v);
         }
         assertTrue(cache.size() <= 64);
@@ -494,12 +494,22 @@ public class CertHackTest {
         for (int i = 0; i < 6; i++) {
             byte[] id = new byte[]{(byte) (i + 100)};
             Object k = keyCtor.newInstance((Object) id);
-            Object v = chainCtor.newInstance(new Certificate[0], bigLeaf, bigIssuer);
+            Object v = chainCtor.newInstance(new Certificate[0], bigLeaf, bigIssuer, true);
             cache.put(k, v);
         }
         int retained = ((Number) retainedBytesMethod.invoke(cacheObj)).intValue();
         assertTrue("Retained bytes " + retained + " must be <= 4 MiB", retained <= 4 * 1024 * 1024);
         assertTrue("Cache size must have been trimmed to fit budget", cache.size() <= 4);
+
+        // 3. Both key and value bytes are accounted for in retainedBytes
+        cache.clear();
+        byte[] testKey = new byte[1000];
+        Object lk = keyCtor.newInstance((Object) testKey);
+        Object lv = chainCtor.newInstance(new Certificate[0], new byte[200], new byte[300], true);
+        cache.put(lk, lv);
+        assertEquals(1500, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
+        cache.remove(lk);
+        assertEquals(0, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
     }
 
     private X509Certificate generateAttestationCert(KeyPair kp, int attLevel, int kmLevel) throws Exception {

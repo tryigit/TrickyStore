@@ -537,12 +537,24 @@ object KeyboxVerifier {
             val parsed = KeyboxLoader.parseFileSnapshot(scope, filename, storageId)
             val snapshotSha256 = parsed.snapshotSha256?.takeIf(FULL_SHA256_PATTERN::matches)
             val keyboxes = parsed.keyboxes
-            trackedSecurityLevel =
-                when {
-                    keyboxes.any(CertHack::isStrongBoxKeybox) -> "StrongBox"
-                    keyboxes.any(CertHack::isTeeKeybox) -> "TEE"
-                    else -> "Unknown"
+            var resolvedSecurityLevel = "Unknown"
+            var hasTee = false
+            for (box in keyboxes) {
+                when (CertHack.classifyKeyboxSecurityLevel(box)) {
+                    CertHack.KeyboxSecurityLevel.STRONGBOX -> {
+                        resolvedSecurityLevel = "StrongBox"
+                        break
+                    }
+                    CertHack.KeyboxSecurityLevel.TEE -> {
+                        hasTee = true
+                    }
+                    CertHack.KeyboxSecurityLevel.UNKNOWN -> {}
                 }
+            }
+            if (resolvedSecurityLevel == "Unknown" && hasTee) {
+                resolvedSecurityLevel = "TEE"
+            }
+            trackedSecurityLevel = resolvedSecurityLevel
             val securityLevel = trackedSecurityLevel
             if (keyboxes.isEmpty()) {
                 return Result(

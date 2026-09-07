@@ -82,20 +82,14 @@ object KeystoreInterceptor : BinderInterceptor() {
         } catch (e: Exception) {
             return Skip
         }
-        val p = Parcel.obtain()
         try {
             val response = reply.readTypedObject(KeyEntryResponse.CREATOR)
-            val metadata = response?.metadata
-            if (metadata == null) {
-                p.recycle()
-                return Skip
-            }
+            val metadata = response?.metadata ?: return Skip
 
             // getKeyEntry exposes the platform-owned security level directly in KeyMetadata.
             // Generic replacement policy applies to both TEE and StrongBox metadata.
             if (metadata.keySecurityLevel != SecurityLevel.TRUSTED_ENVIRONMENT &&
                 metadata.keySecurityLevel != SecurityLevel.STRONGBOX) {
-                p.recycle()
                 return Skip
             }
 
@@ -104,7 +98,6 @@ object KeystoreInterceptor : BinderInterceptor() {
             val isFullChain = Utils.isCertificateChainRewriteCandidate(metadata)
             val isLeafOnly = Utils.hasRewritableLeafCertificate(metadata)
             if (!isFullChain && !isLeafOnly) {
-                p.recycle()
                 return Skip
             }
 
@@ -121,13 +114,18 @@ object KeystoreInterceptor : BinderInterceptor() {
                 (targeted || mayReadGrantedChain) &&
                 CertHack.applyCachedCertificateChain(metadata)
             ) {
-                p.writeNoException()
-                p.writeTypedObject(response, 0)
-                return OverrideReply(0, p)
+                val p = Parcel.obtain()
+                try {
+                    p.writeNoException()
+                    p.writeTypedObject(response, 0)
+                    return OverrideReply(0, p)
+                } catch (t: Throwable) {
+                    p.recycle()
+                    throw t
+                }
             }
 
             if (!targeted || isLeafOnly || !isFullChain) {
-                p.recycle()
                 return Skip
             }
 
@@ -138,7 +136,6 @@ object KeystoreInterceptor : BinderInterceptor() {
                 originalLeaf == null ||
                 !Utils.hasAndroidAttestationExtension(originalLeaf)
             ) {
-                p.recycle()
                 return Skip
             }
 
@@ -149,14 +146,18 @@ object KeystoreInterceptor : BinderInterceptor() {
                 }
             if (newChain != null) {
                 Utils.putCertificateChain(response, newChain)
-                p.writeNoException()
-                p.writeTypedObject(response, 0)
-                return OverrideReply(0, p)
+                val p = Parcel.obtain()
+                try {
+                    p.writeNoException()
+                    p.writeTypedObject(response, 0)
+                    return OverrideReply(0, p)
+                } catch (t: Throwable) {
+                    p.recycle()
+                    throw t
+                }
             }
-            p.recycle()
         } catch (t: Throwable) {
             Logger.e("Failed to rewrite a stored attestation certificate chain", t)
-            p.recycle()
         }
         return Skip
     }

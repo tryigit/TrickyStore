@@ -108,11 +108,11 @@ public class AttestationRequestContractTest {
                 .getDeclaredConstructor(byte[].class);
         keyConstructor.setAccessible(true);
         Constructor<?> valueConstructor = Class.forName(CertHack.class.getName() + "$CachedCertificateChain")
-                .getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class);
+                .getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class);
         valueConstructor.setAccessible(true);
         byte[] original = new byte[] {1, 2, 3};
         Object key = keyConstructor.newInstance((Object) original.clone());
-        Object value = valueConstructor.newInstance(new Certificate[0], new byte[] {4}, new byte[] {5});
+        Object value = valueConstructor.newInstance(new Certificate[0], new byte[] {4}, new byte[] {5}, true);
         Object previous = cache.put(key, value);
         try {
             KeyMetadata metadata = new KeyMetadata();

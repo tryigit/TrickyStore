@@ -47,7 +47,6 @@ class StrongBoxBinderRoutingTest {
         assertTrue(levelGate > metadataRead)
         assertTrue(cacheLookup > levelGate)
         assertTrue(chainRead > cacheLookup)
-        assertTrue(gateBody.contains("p.recycle()"))
         assertTrue(gateBody.contains("return Skip"))
         assertTrue(gateBody.contains("metadata.keySecurityLevel != SecurityLevel.STRONGBOX"))
     }

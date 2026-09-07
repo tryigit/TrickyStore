@@ -7,6 +7,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.security.KeyPair;
 import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
@@ -57,11 +58,14 @@ public final class CertHack {
     private static final class PreparedKeyBox {
         final String signatureAlgorithm;
         final Certificate[] issuerChain;
+        final byte[] encodedIssuerChain;
+
         PreparedKeyBox(KeyBox keybox) throws Exception {
             if (keybox.certificates.isEmpty()) throw new IOException("Keybox has no certificates");
             this.signatureAlgorithm = signatureAlgorithmForKeybox(keybox);
             if (this.signatureAlgorithm == null) throw new IOException("Unsupported keybox algorithm");
             this.issuerChain = keybox.certificates.toArray(new Certificate[0]);
+            this.encodedIssuerChain = encodeKeyboxIssuers(this.issuerChain);
             if (!BACKEND_KEY_FORMAT.equals(keybox.keyPair.getPrivate().getFormat())) {
                 throw new IOException("Production keybox does not use an opaque backend key handle");
             }
@@ -77,6 +81,26 @@ public final class CertHack {
                 if (encoded != null) Arrays.fill(encoded, (byte) 0);
             }
         }
+
+        private static byte[] encodeKeyboxIssuers(Certificate[] issuers) throws CertificateException {
+            if (issuers == null || issuers.length == 0) return new byte[0];
+            FastByteArrayOutputStream output = new FastByteArrayOutputStream(2048);
+            try {
+                int total = 0;
+                for (Certificate cert : issuers) {
+                    byte[] encoded = cert.getEncoded();
+                    if (encoded.length == 0 || encoded.length > MAX_LEAF_CERTIFICATE_BYTES
+                            || encoded.length > 512 * 1024 - total) {
+                        throw new CertificateException("Invalid keybox certificate-chain size");
+                    }
+                    output.write(encoded, 0, encoded.length);
+                    total += encoded.length;
+                }
+                return output.toByteArray();
+            } finally {
+                output.wipe();
+            }
+        }
     }
 
     /**
@@ -90,14 +114,6 @@ public final class CertHack {
         final byte[] issuerChainEncoded;
         final boolean passthrough;
         final boolean leafOnlySafe;
-
-        CachedCertificateChain(
-                Certificate[] certificates,
-                byte[] leafEncoded,
-                byte[] issuerChainEncoded
-        ) {
-            this(certificates, leafEncoded, issuerChainEncoded, true);
-        }
 
         CachedCertificateChain(
                 Certificate[] certificates,
@@ -220,17 +236,20 @@ public final class CertHack {
             List<KeyBox> sbEc = new ArrayList<>();
             List<KeyBox> sbRsa = new ArrayList<>();
 
-            for (Map.Entry<KeyBox, PreparedKeyBox> entry : this.preparedKeyboxes.entrySet()) {
-                KeyBox box = entry.getKey();
-                String algo = normalizeAlgorithm(box.keyPair.getPublic().getAlgorithm());
-                boolean isSb = sbKeyboxes.contains(box);
-                boolean isTee = tKeyboxes.contains(box);
-                if (KeyProperties.KEY_ALGORITHM_EC.equals(algo)) {
-                    if (isSb) sbEc.add(box);
-                    if (isTee) teeEc.add(box);
-                } else if (KeyProperties.KEY_ALGORITHM_RSA.equals(algo)) {
-                    if (isSb) sbRsa.add(box);
-                    if (isTee) teeRsa.add(box);
+            List<KeyBox> ecBoxes = this.keyboxes.get(KeyProperties.KEY_ALGORITHM_EC);
+            if (ecBoxes != null) {
+                for (KeyBox box : ecBoxes) {
+                    if (!this.preparedKeyboxes.containsKey(box)) continue;
+                    if (sbKeyboxes.contains(box)) sbEc.add(box);
+                    if (tKeyboxes.contains(box)) teeEc.add(box);
+                }
+            }
+            List<KeyBox> rsaBoxes = this.keyboxes.get(KeyProperties.KEY_ALGORITHM_RSA);
+            if (rsaBoxes != null) {
+                for (KeyBox box : rsaBoxes) {
+                    if (!this.preparedKeyboxes.containsKey(box)) continue;
+                    if (sbKeyboxes.contains(box)) sbRsa.add(box);
+                    if (tKeyboxes.contains(box)) teeRsa.add(box);
                 }
             }
 
@@ -305,6 +324,17 @@ public final class CertHack {
                 super(32, 0.75f, true);
             }
 
+            private int entryRetainedBytes(CacheKey key, CachedCertificateChain value) {
+                int bytes = 0;
+                if (key != null) {
+                    bytes += key.retainedBytes();
+                }
+                if (value != null) {
+                    bytes += value.retainedBytes();
+                }
+                return bytes;
+            }
+
             @Override
             public synchronized CachedCertificateChain get(Object key) {
                 return super.get(key);
@@ -315,6 +345,8 @@ public final class CertHack {
                 CachedCertificateChain old = super.put(key, value);
                 if (old != null) {
                     retainedBytes -= old.retainedBytes();
+                } else if (key != null) {
+                    retainedBytes += key.retainedBytes();
                 }
                 if (value != null) {
                     retainedBytes += value.retainedBytes();
@@ -337,7 +369,13 @@ public final class CertHack {
             public synchronized CachedCertificateChain remove(Object key) {
                 CachedCertificateChain old = super.remove(key);
                 if (old != null) {
+                    if (key instanceof CacheKey cacheKey) {
+                        retainedBytes -= cacheKey.retainedBytes();
+                    }
                     retainedBytes -= old.retainedBytes();
+                    if (retainedBytes < 0) {
+                        retainedBytes = 0;
+                    }
                 }
                 return old;
             }
@@ -362,8 +400,9 @@ public final class CertHack {
                 while (it.hasNext() && (size() > MAX_CERTIFICATE_CACHE_ENTRIES
                         || retainedBytes > MAX_CERTIFICATE_CACHE_RETAINED_BYTES)) {
                     Map.Entry<CacheKey, CachedCertificateChain> entry = it.next();
-                    if (entry.getValue() != null) {
-                        retainedBytes -= entry.getValue().retainedBytes();
+                    retainedBytes -= entryRetainedBytes(entry.getKey(), entry.getValue());
+                    if (retainedBytes < 0) {
+                        retainedBytes = 0;
                     }
                     it.remove();
                 }
@@ -382,6 +421,10 @@ public final class CertHack {
         CacheKey(byte[] leafEncoded) {
             this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded");
             this.hashCode = Arrays.hashCode(this.leafEncoded);
+        }
+
+        int retainedBytes() {
+            return leafEncoded != null ? leafEncoded.length : 0;
         }
 
         int indexForPool(int size) {
@@ -531,9 +574,6 @@ public final class CertHack {
         if (identifier == null) return "Unknown";
         State currentState = state;
         String level = currentState.securityLevelByIdentifier.get(identifier);
-        if (level == null && identifier.contains(":")) {
-            level = currentState.securityLevelByIdentifier.get(identifier.substring(identifier.indexOf(':') + 1));
-        }
         return level != null ? level : "Unknown";
     }
 
@@ -882,9 +922,8 @@ public final class CertHack {
             Certificate[] result = new Certificate[prepared.issuerChain.length + 1];
             result[0] = rewrittenLeaf;
             System.arraycopy(prepared.issuerChain, 0, result, 1, prepared.issuerChain.length);
-            byte[] issuerChainEncoded = Utils.encodeIssuerChain(result);
             CachedCertificateChain completed =
-                    new CachedCertificateChain(result, rewrittenDer, issuerChainEncoded, leafOnlySafe);
+                    new CachedCertificateChain(result, rewrittenDer, prepared.encodedIssuerChain, leafOnlySafe);
             synchronized (cache) {
                 if (state != currentState || currentState.certificateCacheEpoch != cacheEpoch) {
                     return result;
