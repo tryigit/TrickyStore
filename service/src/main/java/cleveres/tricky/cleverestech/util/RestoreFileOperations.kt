@@ -172,7 +172,18 @@ internal class JvmSecureRestoreFileOperations(
                     maxSnapshotBytes = maxSnapshotBytes,
                     touchedNanos = nowNanos(),
                 )
-            signalExpiryJanitorLocked()
+            try {
+                signalExpiryJanitorLocked()
+            } catch (error: Throwable) {
+                transactions.remove(token)?.let { transaction ->
+                    try {
+                        transaction.closeAndWipe()
+                    } catch (closeError: Throwable) {
+                        error.addSuppressed(closeError)
+                    }
+                }
+                throw error
+            }
         }
     }
 
