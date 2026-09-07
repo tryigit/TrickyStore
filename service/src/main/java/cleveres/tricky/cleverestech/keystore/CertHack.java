@@ -36,6 +36,7 @@ import cleveres.tricky.cleverestech.util.FastByteArrayOutputStream;
 public final class CertHack {
     private static final int MAX_CERTIFICATE_CACHE_ENTRIES = 64;
     private static final int MAX_CERTIFICATE_CACHE_RETAINED_BYTES = 4 * 1024 * 1024;
+    private static final int MAX_PREPARED_ISSUER_CHAIN_BYTES = 4 * 1024 * 1024;
     private static final int MAX_LEAF_CERTIFICATE_BYTES = 64 * 1024;
     private static final int BACKEND_KEY_ID_BYTES = 16;
     private static final String BACKEND_KEY_FORMAT = "CleveresTricky-KeyId-v1";
@@ -146,8 +147,7 @@ public final class CertHack {
 
         int retainedBytes() {
             if (passthrough) return 0;
-            return (leafEncoded != null ? leafEncoded.length : 0)
-                    + (issuerChainEncoded != null ? issuerChainEncoded.length : 0);
+            return leafEncoded != null ? leafEncoded.length : 0;
         }
 
         void applyTo(KeyMetadata metadata) {
@@ -264,11 +264,19 @@ public final class CertHack {
 
         private static Map<KeyBox, PreparedKeyBox> prepareKeyboxesForState(Map<String, List<KeyBox>> keyboxes) {
             Map<KeyBox, PreparedKeyBox> prepared = new IdentityHashMap<>();
+            int totalIssuerBytes = 0;
             for (List<KeyBox> list : keyboxes.values()) {
                 for (KeyBox keybox : list) {
                     if (prepared.containsKey(keybox)) continue;
                     try {
-                        prepared.put(keybox, new PreparedKeyBox(keybox));
+                        PreparedKeyBox pk = new PreparedKeyBox(keybox);
+                        int chainLen = pk.encodedIssuerChain != null ? pk.encodedIssuerChain.length : 0;
+                        if (totalIssuerBytes + chainLen > MAX_PREPARED_ISSUER_CHAIN_BYTES) {
+                            Logger.e("Prepared issuer chain budget exceeded, skipping keybox: " + keybox.filename);
+                            continue;
+                        }
+                        totalIssuerBytes += chainLen;
+                        prepared.put(keybox, pk);
                     } catch (Exception error) {
                         Logger.e("Could not prepare opaque keybox metadata", error);
                     }
@@ -650,6 +658,7 @@ public final class CertHack {
         Map<KeyBox, PreparedKeyBox> preparedMap = new IdentityHashMap<>();
         Map<KeyBox, KeyboxSecurityLevel> classificationMap = new IdentityHashMap<>();
         Set<String> uniqueCanonicalFiles = new HashSet<>();
+        int totalIssuerBytes = 0;
 
         for (KeyBox box : boxes) {
             String algo = normalizeAlgorithm(box.keyPair.getPublic().getAlgorithm());
@@ -664,6 +673,12 @@ public final class CertHack {
                 Logger.e("Ignoring keybox without a valid opaque backend handle", error);
                 continue;
             }
+            int chainLen = prepared.encodedIssuerChain != null ? prepared.encodedIssuerChain.length : 0;
+            if (totalIssuerBytes + chainLen > MAX_PREPARED_ISSUER_CHAIN_BYTES) {
+                Logger.e("Prepared issuer chain budget exceeded, skipping keybox: " + box.filename);
+                continue;
+            }
+            totalIssuerBytes += chainLen;
             preparedMap.put(box, prepared);
             KeyboxSecurityLevel level = classifyKeyboxSecurityLevel(box);
             classificationMap.put(box, level);
@@ -798,13 +813,14 @@ public final class CertHack {
             if (inspection == null) return caList;
             int attLevel = inspection.getAttestationSecurityLevel();
             int kmLevel = inspection.getKeymintSecurityLevel();
-            boolean isSoftware = attLevel == CertificateBackend.SECURITY_LEVEL_SOFTWARE
-                    || kmLevel == CertificateBackend.SECURITY_LEVEL_SOFTWARE;
-            boolean isStrongbox = attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
-                    || kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX;
-            boolean isTee = (attLevel == CertificateBackend.SECURITY_LEVEL_TEE
-                    || kmLevel == CertificateBackend.SECURITY_LEVEL_TEE) && !isStrongbox;
-            boolean isTeeOrStrongbox = !isSoftware && (isTee || isStrongbox);
+            boolean isTee = attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                    && kmLevel == CertificateBackend.SECURITY_LEVEL_TEE;
+            boolean isStrongbox =
+                    (attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX)
+                    || (attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
+                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX);
+            boolean isTeeOrStrongbox = isTee || isStrongbox;
             if (!isTeeOrStrongbox) {
                 synchronized (cache) {
                     if (state == currentState && currentState.certificateCacheEpoch == cacheEpoch) {

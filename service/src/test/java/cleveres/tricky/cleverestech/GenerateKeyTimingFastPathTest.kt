@@ -188,6 +188,25 @@ class GenerateKeyTimingFastPathTest {
         assertFalse(sources.contains("busyWait"))
     }
 
+    @Test
+    fun `generateKey applies cached pre-encoded chain directly before full DER re-encoding`() {
+        val root = locateRoot()
+        val source =
+            File(
+                root,
+                "service/src/main/java/cleveres/tricky/cleverestech/SecurityLevelInterceptor.kt",
+            ).readText()
+        val postTransact = source.indexOf("override fun onPostTransact")
+        val hackChain = source.indexOf("CertHack.hackCertificateChain", postTransact)
+        val applyCache = source.indexOf("CertHack.applyCachedCertificateChain(metadata)", hackChain)
+        val fallbackEncode = source.indexOf("Utils.putCertificateChain(metadata, rewritten)", applyCache)
+
+        assertTrue(postTransact >= 0)
+        assertTrue(hackChain > postTransact)
+        assertTrue(applyCache > hackChain)
+        assertTrue(fallbackEncode > applyCache)
+    }
+
     private fun locateRoot(): File {
         var current = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
         repeat(6) {

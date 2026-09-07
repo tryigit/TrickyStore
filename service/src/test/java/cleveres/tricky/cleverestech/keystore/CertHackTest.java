@@ -27,6 +27,7 @@ import java.security.KeyPairGenerator;
 import java.security.Security;
 import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
@@ -491,7 +492,7 @@ public class CertHackTest {
         // 2. Retained byte budget bound (MAX_CERTIFICATE_CACHE_RETAINED_BYTES = 4 MiB)
         cache.clear();
         assertEquals(0, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
-        byte[] bigLeaf = new byte[512 * 1024];
+        byte[] bigLeaf = new byte[1024 * 1024];
         byte[] bigIssuer = new byte[512 * 1024];
         for (int i = 0; i < 6; i++) {
             byte[] id = new byte[]{(byte) (i + 100)};
@@ -509,9 +510,86 @@ public class CertHackTest {
         Object lk = keyCtor.newInstance((Object) testKey);
         Object lv = chainCtor.newInstance(new Certificate[0], new byte[200], new byte[300], true);
         cache.put(lk, lv);
-        assertEquals(1500, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
+        assertEquals(1200, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
         cache.remove(lk);
         assertEquals(0, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
+    }
+
+    @Test
+    public void testReversedSecurityLevelRejectsRewrite() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", "BC");
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+        X509Certificate plainCert = generateIssuerCert(kp, "CN=StrongBox Intermediate, O=Android, C=US");
+        CertHack.KeyBox sbKeybox = ManagedOpaqueKeyOracle.wrap(
+                kp, List.of(plainCert), "strongbox_keybox.xml");
+
+        Map<String, List<CertHack.KeyBox>> newKeyboxes = new HashMap<>();
+        newKeyboxes.put("RSA", List.of(sbKeybox));
+        Map<String, List<CertHack.KeyBox>> newKeyboxFiles = new HashMap<>();
+        newKeyboxFiles.put("strongbox_keybox.xml", List.of(sbKeybox));
+
+        Class<?> stateClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$State");
+        java.lang.reflect.Constructor<?> ctor = stateClass.getDeclaredConstructor(Map.class, Map.class);
+        ctor.setAccessible(true);
+        Object newState = ctor.newInstance(newKeyboxes, newKeyboxFiles);
+
+        java.lang.reflect.Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object previousState = stateField.get(null);
+        stateField.set(null, newState);
+
+        try {
+            // (StrongBox attestation = 2, TEE keymint = 1) -> reversed pair (2, 1)
+            X509Certificate reversedCert = generateAttestationCert(kp, 2, 1);
+            Certificate[] reversedChain = new Certificate[]{reversedCert};
+            Certificate[] result = CertHack.hackCertificateChain(reversedChain, 0);
+            assertSame("Reversed security level (STRONGBOX, TEE) must return original chain without rewrite", reversedChain, result);
+        } finally {
+            stateField.set(null, previousState);
+        }
+    }
+
+    @Test
+    public void testPreparedIssuerChainBudgetLimit() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", "BC");
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+
+        X509Certificate largeCert = generateLargeIssuerCert(kp, "CN=Budget Test", 60000);
+        List<Certificate> certs = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            certs.add(largeCert);
+        }
+
+        Map<String, List<CertHack.KeyBox>> boxMap = new HashMap<>();
+        List<CertHack.KeyBox> list = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            list.add(ManagedOpaqueKeyOracle.wrap(kp, certs, "box" + i + ".xml"));
+        }
+        boxMap.put("RSA", list);
+
+        Class<?> stateClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$State");
+        java.lang.reflect.Method prepareMethod = stateClass.getDeclaredMethod("prepareKeyboxesForState", Map.class);
+        prepareMethod.setAccessible(true);
+
+        @SuppressWarnings("unchecked")
+        Map<?, ?> prepared = (Map<?, ?>) prepareMethod.invoke(null, boxMap);
+        assertEquals(8, prepared.size());
+    }
+
+    private X509Certificate generateLargeIssuerCert(KeyPair kp, String subjectDn, int extensionSize) throws Exception {
+        X500Name name = new X500Name(subjectDn);
+        BigInteger serial = BigInteger.valueOf(2);
+        Date notBefore = new Date();
+        Date notAfter = new Date(System.currentTimeMillis() + 100000);
+        X509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                name, serial, notBefore, notAfter, name, kp.getPublic());
+        if (extensionSize > 0) {
+            builder.addExtension(new ASN1ObjectIdentifier("1.2.3.4.5.6.7"), false, new DEROctetString(new byte[extensionSize]));
+        }
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate());
+        return new JcaX509CertificateConverter().getCertificate(builder.build(signer));
     }
 
     private X509Certificate generateAttestationCert(KeyPair kp, int attLevel, int kmLevel) throws Exception {

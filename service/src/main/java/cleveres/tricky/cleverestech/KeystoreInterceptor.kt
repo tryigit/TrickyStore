@@ -145,7 +145,9 @@ object KeystoreInterceptor : BinderInterceptor() {
                     CertHack.hackCertificateChain(it, callingUid, false).takeUnless { rewritten -> rewritten === it }
                 }
             if (newChain != null) {
-                Utils.putCertificateChain(response, newChain)
+                if (!CertHack.applyCachedCertificateChain(metadata)) {
+                    Utils.putCertificateChain(response, newChain)
+                }
                 val p = Parcel.obtain()
                 try {
                     p.writeNoException()

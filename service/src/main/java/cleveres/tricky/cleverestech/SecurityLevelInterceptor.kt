@@ -109,7 +109,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 return Skip
             }
 
-            Utils.putCertificateChain(metadata, rewritten)
+            if (!CertHack.applyCachedCertificateChain(metadata)) {
+                Utils.putCertificateChain(metadata, rewritten)
+            }
             val replacement = Parcel.obtain()
             try {
                 replacement.writeNoException()
