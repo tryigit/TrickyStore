@@ -608,6 +608,33 @@ public final class CertHack {
         return state.canonicalSourceCount;
     }
 
+    public static boolean isRkpKeybox(String identifier) {
+        if (identifier == null) return false;
+        List<KeyBox> boxes = state.keyboxFiles.get(identifier);
+        if (boxes == null) return false;
+        for (KeyBox box : boxes) {
+            if (isRkpKeybox(box)) return true;
+        }
+        return false;
+    }
+
+    public static boolean isRkpKeybox(KeyBox keybox) {
+        if (keybox == null || keybox.certificates() == null) return false;
+        for (Certificate cert : keybox.certificates()) {
+            if (cert instanceof X509Certificate x509) {
+                var subject = x509.getSubjectX500Principal();
+                if (subject != null && subject.getName().toLowerCase(Locale.ROOT).contains("droid ca")) {
+                    return true;
+                }
+                var issuer = x509.getIssuerX500Principal();
+                if (issuer != null && issuer.getName().toLowerCase(Locale.ROOT).contains("droid ca")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public static String getDeviceCertificateSerial(String identifier) {
         if (identifier == null) return null;
         List<KeyBox> boxes = state.keyboxFiles.get(identifier);

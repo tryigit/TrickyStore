@@ -285,6 +285,65 @@ public class CertHackTest {
     }
 
     @Test
+    public void testIsRkpKeybox() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+
+        X509Certificate attCert = generateAttestationCert(kp, 1, 1);
+        X509Certificate rkpCert = generateIssuerCert(kp, "CN=Droid CA2, O=Google LLC, C=US");
+        X509Certificate standardCert = generateIssuerCert(kp, "CN=Google Root CA, O=Google Inc, C=US");
+
+        CertHack.KeyBox rkpBox = new CertHack.KeyBox(kp, List.of(attCert, rkpCert), "rkp.xml");
+        CertHack.KeyBox standardBox = new CertHack.KeyBox(kp, List.of(attCert, standardCert), "standard.xml");
+        CertHack.KeyBox emptyBox = new CertHack.KeyBox(kp, List.of(), "empty.xml");
+
+        assertTrue(CertHack.isRkpKeybox(rkpBox));
+        assertFalse(CertHack.isRkpKeybox(standardBox));
+        assertFalse(CertHack.isRkpKeybox(emptyBox));
+        assertFalse(CertHack.isRkpKeybox((CertHack.KeyBox) null));
+        assertFalse(CertHack.isRkpKeybox((String) null));
+        assertFalse(CertHack.isRkpKeybox("non_existent.xml"));
+    }
+
+    @Test
+    public void testIsRkpKeyboxByStringIdentifier() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+
+        X509Certificate rkpCert = generateIssuerCert(kp, "CN=Droid CA3, O=Google LLC, C=US");
+        X509Certificate plainCert = generateIssuerCert(kp, "CN=Google Root CA, O=Google Inc, C=US");
+
+        CertHack.KeyBox rkpBox = new CertHack.KeyBox(kp, List.of(rkpCert), "rkp.xml");
+        CertHack.KeyBox plainBox = new CertHack.KeyBox(kp, List.of(plainCert), "plain.xml");
+
+        Map<String, List<CertHack.KeyBox>> keyboxes = new HashMap<>();
+        keyboxes.put("RSA", List.of(rkpBox, plainBox));
+        Map<String, List<CertHack.KeyBox>> keyboxFiles = new HashMap<>();
+        keyboxFiles.put("rkp.xml", List.of(rkpBox));
+        keyboxFiles.put("plain.xml", List.of(plainBox));
+
+        Class<?> stateClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$State");
+        java.lang.reflect.Constructor<?> ctor = stateClass.getDeclaredConstructor(Map.class, Map.class);
+        ctor.setAccessible(true);
+        Object newState = ctor.newInstance(keyboxes, keyboxFiles);
+
+        java.lang.reflect.Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object previousState = stateField.get(null);
+        stateField.set(null, newState);
+
+        try {
+            assertTrue(CertHack.isRkpKeybox("rkp.xml"));
+            assertFalse(CertHack.isRkpKeybox("plain.xml"));
+            assertFalse(CertHack.isRkpKeybox("unknown.xml"));
+        } finally {
+            stateField.set(null, previousState);
+        }
+    }
+
+    @Test
     public void testHackCertificateChainTeeWithOnlyStrongBoxKeyboxDoesNotRewrite() throws Exception {
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", "BC");
         kpg.initialize(2048);

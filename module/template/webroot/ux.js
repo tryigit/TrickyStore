@@ -3343,6 +3343,12 @@
             } else {
                 name.append(nameText);
             }
+            if (item.is_rkp) {
+                const rkpBadge = document.createElement('span');
+                rkpBadge.className = 'ct-badge ct-badge-rkp';
+                rkpBadge.textContent = 'RKP';
+                name.append(rkpBadge);
+            }
             const meta = document.createElement('div');
             meta.style.cssText = 'font-size:.78em;color:#888;margin-top:3px;overflow-wrap:anywhere;word-break:break-word;';
             const scope = item.scope === 'root' ? t('root') : t('managed');
@@ -3391,7 +3397,8 @@
                     filename: String(item?.filename ?? '').slice(0, 256),
                     scope: item?.scope === 'root' || item?.scope === 'keyboxes' || item?.scope === 'managed' ? item.scope : '',
                     certificate_serial: String(item?.certificate_serial ?? '').slice(0, 256),
-                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'TEE' ? 'TEE' : 'Unknown')
+                    security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'TEE' ? 'TEE' : 'Unknown'),
+                    is_rkp: Boolean(item?.is_rkp)
                 })).filter(item => item.id && item.filename && item.scope)
                 : [];
             const ids = new Set(inventory.map(item => item.id));
@@ -3629,6 +3636,12 @@
             } else {
                 title.append(titleText);
             }
+            if (item.is_rkp) {
+                const rkpBadge = document.createElement('span');
+                rkpBadge.className = 'ct-badge ct-badge-rkp';
+                rkpBadge.textContent = 'RKP';
+                title.append(rkpBadge);
+            }
             const meta = document.createElement('div');
             meta.style.cssText = 'font-size:.8em;color:#888;margin-top:2px';
             meta.textContent = item.certificate_serial ? t('cert') + ': ' + item.certificate_serial : t('certMissing');
@@ -3659,6 +3672,7 @@
                     status: String(item?.status ?? 'UNKNOWN').slice(0, 128),
                     certificate_serial: String(item?.certificate_serial ?? '').slice(0, 256),
                     security_level: item?.security_level === 'StrongBox' ? 'StrongBox' : (item?.security_level === 'TEE' ? 'TEE' : 'Unknown'),
+                    is_rkp: Boolean(item?.is_rkp),
                     details: String(item?.details ?? '').slice(0, 2048)
                 })).filter(item => item.filename)
                 : [];

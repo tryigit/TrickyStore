@@ -117,4 +117,25 @@ const plainName = plainBody.children[0];
 assert.equal(plainName.children[0].textContent, 'plain.xml');
 assert.equal(plainName.children.length, 1, 'plain item should not render any security badge');
 
-console.log('Keybox security badge rendering (StrongBox, TEE, Unknown) regression checks passed');
+// Test 5: TEE + RKP badge
+context.setInventory([
+  { id: '5', filename: 'tee_rkp.xml', scope: 'managed', certificate_serial: '789', security_level: 'TEE', is_rkp: true }
+]);
+list.children = [];
+context.renderKeyboxes();
+assert.equal(list.children.length, 1);
+const rkpRow = list.children[0];
+const rkpBody = rkpRow.children[1];
+const rkpName = rkpBody.children[0];
+assert.equal(rkpName.children[0].textContent, 'tee_rkp.xml');
+assert.equal(rkpName.children.length, 3);
+assert.equal(rkpName.children[1].className, 'ct-badge ct-badge-tee');
+assert.equal(rkpName.children[1].textContent, 'TEE');
+assert.equal(rkpName.children[2].className, 'ct-badge ct-badge-rkp');
+assert.equal(rkpName.children[2].textContent, 'RKP');
+
+// Test 6: Verify index.html contains .ct-badge-rkp style definition
+const htmlSource = fs.readFileSync('module/template/webroot/index.html', 'utf8');
+assert.ok(htmlSource.includes('.ct-badge-rkp'), 'index.html must define .ct-badge-rkp');
+
+console.log('Keybox security badge rendering (StrongBox, TEE, Unknown, RKP) regression checks passed');

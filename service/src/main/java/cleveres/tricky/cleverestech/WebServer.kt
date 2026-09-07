@@ -722,7 +722,8 @@ class WebServer(
                     .put("filename", source.filename)
                     .put("type", if (source.isCbox) "cbox" else "xml")
                     .put("certificate_serial", CertHack.getDeviceCertificateSerial(targetId) ?: "")
-                    .put("security_level", CertHack.getKeyboxSecurityLevel(targetId)),
+                    .put("security_level", CertHack.getKeyboxSecurityLevel(targetId))
+                    .put("is_rkp", CertHack.isRkpKeybox(targetId)),
             )
         }
         return array.toString()
@@ -3008,6 +3009,7 @@ class WebServer(
                 obj.put("filename", r.filename)
                 obj.put("storage_id", r.storageId)
                 obj.put("security_level", r.securityLevel.ifEmpty { "Unknown" })
+                obj.put("is_rkp", r.isRkp)
                 obj.put("status", r.status.name)
                 obj.put("details", r.details)
                 obj.put("certificate_serial", r.certificateSerial ?: "")
