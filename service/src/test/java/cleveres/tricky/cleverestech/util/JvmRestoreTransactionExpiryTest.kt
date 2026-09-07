@@ -50,6 +50,40 @@ class JvmRestoreTransactionExpiryTest {
         assertEquals(null, backend.pendingExpiryDelayNanosForTesting())
     }
 
+    @Test
+    fun completedReplaceCrossingTtlRemainsRollbackRestorable() {
+        var nowNanos = 0L
+        var crossTtlAtOperationCompletion = false
+        val backend =
+            JvmSecureRestoreFileOperations(
+                nowNanos = { nowNanos },
+                enableExpiryJanitor = false,
+                operationCompletionHookForTesting = {
+                    if (crossTtlAtOperationCompletion) {
+                        nowNanos += RESTORE_TTL_NANOS + 1L
+                        crossTtlAtOperationCompletion = false
+                    }
+                },
+            )
+        val configDir = tempFolder.newFolder("long-operation")
+        val target = configDir.resolve("identity.xml")
+        target.writeText("before")
+        val token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+        backend.begin(configDir, token, 4096L)
+        backend.snapshot(configDir, token, target)
+
+        crossTtlAtOperationCompletion = true
+        backend.replace(configDir, token, target, "after".toByteArray())
+
+        assertEquals("after", target.readText())
+        assertEquals(RESTORE_TTL_NANOS, backend.pendingExpiryDelayNanosForTesting())
+
+        backend.rollback(configDir, token)
+        assertEquals("before", target.readText())
+        assertEquals(null, backend.pendingExpiryDelayNanosForTesting())
+    }
+
     private companion object {
         const val RESTORE_TTL_NANOS = 15L * 60L * 1_000_000_000L
     }
