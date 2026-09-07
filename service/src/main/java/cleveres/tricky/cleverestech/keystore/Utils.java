@@ -147,6 +147,9 @@ public final class Utils {
      * the fixed extension OID is bounded and avoids any backend IPC for that common negative case.
      */
     public static boolean hasAndroidAttestationExtension(Certificate certificate) {
+        if (certificate instanceof LazyX509Certificate lazy) {
+            return lazy.hasAttestationExtension();
+        }
         if (!(certificate instanceof X509Certificate x509Certificate)) return false;
         try {
             return x509Certificate.getExtensionValue(ANDROID_ATTESTATION_EXTENSION_OID) != null;
@@ -187,7 +190,11 @@ public final class Utils {
      * is unnecessary work on the latency-sensitive generateKey reply path.
      */
     public static X509Certificate getLeafCertificate(KeyMetadata metadata) {
-        return metadata == null ? null : toCertificate(metadata.certificate);
+        if (metadata == null || metadata.certificate == null || metadata.certificate.length == 0 ||
+                metadata.certificate.length > MAX_CERTIFICATE_BYTES) {
+            return null;
+        }
+        return new LazyX509Certificate(metadata.certificate);
     }
 
     public static Certificate[] getCertificateChain(KeyEntryResponse response) {

@@ -36,7 +36,7 @@ import javax.security.auth.x500.X500Principal;
  * path incurs an unnecessary ~15-25 microsecond parsing overhead, which exposes a measurable
  * timing side-channel distinguishing attested from non-attested key generation.
  */
-final class LazyX509Certificate extends X509Certificate {
+public final class LazyX509Certificate extends X509Certificate {
     private static final long serialVersionUID = 1L;
 
     private static final ThreadLocal<CertificateFactory> FACTORY =
@@ -48,14 +48,37 @@ final class LazyX509Certificate extends X509Certificate {
                 }
             });
 
+    private static final byte[] ANDROID_ATTESTATION_OID_DER = new byte[] {
+            0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, (byte) 0xd6, 0x79, 0x02, 0x01, 0x11
+    };
+
     private final byte[] der;
     private volatile X509Certificate delegate;
 
-    LazyX509Certificate(byte[] der) {
+    public LazyX509Certificate(byte[] der) {
         this.der = Objects.requireNonNull(der, "der").clone();
     }
 
-    boolean isDelegateInstantiatedForTesting() {
+    boolean hasAttestationExtension() {
+        return indexOfSubarray(der, ANDROID_ATTESTATION_OID_DER) >= 0;
+    }
+
+    private static int indexOfSubarray(byte[] array, byte[] target) {
+        if (target.length == 0 || array.length < target.length) return -1;
+        int max = array.length - target.length;
+        outer:
+        for (int i = 0; i <= max; i++) {
+            for (int j = 0; j < target.length; j++) {
+                if (array[i + j] != target[j]) {
+                    continue outer;
+                }
+            }
+            return i;
+        }
+        return -1;
+    }
+
+    public boolean isDelegateInstantiatedForTesting() {
         return delegate != null;
     }
 

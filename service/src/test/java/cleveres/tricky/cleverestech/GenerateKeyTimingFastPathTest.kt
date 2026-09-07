@@ -271,6 +271,21 @@ class GenerateKeyTimingFastPathTest {
         assertFalse("CertHack.hackCertificateChain must contain zero Logger calls", hackMethodBody.contains("Logger."))
     }
 
+    @Test
+    fun `getLeafCertificate returns LazyX509Certificate and attestation check never instantiates delegate`() {
+        val metadata = android.system.keystore2.KeyMetadata()
+        metadata.certificate = ByteArray(64) { 0x30.toByte() }
+        val leaf = Utils.getLeafCertificate(metadata)
+
+        assertTrue(leaf is cleveres.tricky.cleverestech.keystore.LazyX509Certificate)
+        val lazyLeaf = leaf as cleveres.tricky.cleverestech.keystore.LazyX509Certificate
+        assertFalse(lazyLeaf.isDelegateInstantiatedForTesting)
+
+        val hasAttestation = Utils.hasAndroidAttestationExtension(leaf)
+        assertFalse(hasAttestation)
+        assertFalse("Lazy leaf delegate must not be instantiated during attestation extension check", lazyLeaf.isDelegateInstantiatedForTesting)
+    }
+
     private fun locateRoot(): File {
         var current = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
         repeat(6) {

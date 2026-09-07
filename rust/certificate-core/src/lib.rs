@@ -299,6 +299,8 @@ fn signature_algorithm_der(algorithm: SigningAlgorithm) -> &'static [u8] {
     }
 }
 
+const VERSION_V3_DER: &[u8] = &[0xa0, 0x03, 0x02, 0x01, 0x02];
+
 fn rebuild_tbs_certificate(
     leaf: &Certificate,
     issuer_name_der: &[u8],
@@ -310,7 +312,6 @@ fn rebuild_tbs_certificate(
     // Match the managed X509v3CertificateBuilder oracle: rebuild from genuine serial, validity,
     // subject, SPKI and extensions; issuer comes from the selected keybox. The managed builder did
     // not preserve issuer/subject unique IDs, so they are intentionally omitted here as well.
-    let version = encode_explicit(0, &2i32.to_der().map_err(|_| Error::Encoding)?)?;
     let serial = leaf_tbs
         .serial_number()
         .to_der()
@@ -325,7 +326,7 @@ fn rebuild_tbs_certificate(
     let extensions = encode_explicit(3, &extensions)?;
 
     encode_sequence(&[
-        &version,
+        VERSION_V3_DER,
         &serial,
         algorithm_der,
         issuer_name_der,
@@ -337,45 +338,82 @@ fn rebuild_tbs_certificate(
 }
 
 fn encode_extensions(extensions: &Extensions) -> Result<Vec<u8>, Error> {
-    let mut encoded = Vec::new();
+    let mut total_len = 0usize;
+    let mut encoded_fields = Vec::with_capacity(extensions.len());
     for extension in extensions {
         let field = extension.to_der().map_err(|_| Error::Encoding)?;
-        encoded
-            .try_reserve(field.len())
-            .map_err(|_| Error::Encoding)?;
-        encoded.extend_from_slice(&field);
+        total_len = total_len.checked_add(field.len()).ok_or(Error::Encoding)?;
+        encoded_fields.push(field);
     }
-    Any::new(Tag::Sequence, encoded)
-        .map_err(|_| Error::Encoding)?
-        .to_der()
-        .map_err(|_| Error::Encoding)
+    if total_len > MAX_CERTIFICATE_DER_BYTES {
+        return Err(Error::Bounds);
+    }
+    let refs: Vec<&[u8]> = encoded_fields.iter().map(Vec::as_slice).collect();
+    encode_sequence(&refs)
 }
 
 fn encode_explicit(tag: u32, inner: &[u8]) -> Result<Vec<u8>, Error> {
-    Any::new(
-        Tag::ContextSpecific {
-            constructed: true,
-            number: TagNumber(tag),
-        },
-        inner.to_vec(),
-    )
-    .map_err(|_| Error::Encoding)?
-    .to_der()
-    .map_err(|_| Error::Encoding)
+    let total_len = inner.len();
+    if total_len > MAX_CERTIFICATE_DER_BYTES {
+        return Err(Error::Bounds);
+    }
+    let mut encoded = Vec::with_capacity(total_len + 6);
+    if tag < 31 {
+        encoded.push(0x80 | 0x20 | (tag as u8));
+    } else {
+        return Any::new(
+            Tag::ContextSpecific {
+                constructed: true,
+                number: TagNumber(tag),
+            },
+            inner.to_vec(),
+        )
+        .map_err(|_| Error::Encoding)?
+        .to_der()
+        .map_err(|_| Error::Encoding);
+    }
+    if total_len < 128 {
+        encoded.push(total_len as u8);
+    } else if total_len <= 0xff {
+        encoded.push(0x81);
+        encoded.push(total_len as u8);
+    } else if total_len <= 0xffff {
+        encoded.push(0x82);
+        encoded.push((total_len >> 8) as u8);
+        encoded.push((total_len & 0xff) as u8);
+    } else {
+        return Err(Error::Encoding);
+    }
+    encoded.extend_from_slice(inner);
+    Ok(encoded)
 }
 
 fn encode_sequence(fields: &[&[u8]]) -> Result<Vec<u8>, Error> {
-    let mut encoded = Vec::new();
+    let mut total_len = 0usize;
     for field in fields {
-        encoded
-            .try_reserve(field.len())
-            .map_err(|_| Error::Encoding)?;
+        total_len = total_len.checked_add(field.len()).ok_or(Error::Encoding)?;
+    }
+    if total_len > MAX_CERTIFICATE_DER_BYTES {
+        return Err(Error::Bounds);
+    }
+    let mut encoded = Vec::with_capacity(total_len + 4);
+    encoded.push(0x30);
+    if total_len < 128 {
+        encoded.push(total_len as u8);
+    } else if total_len <= 0xff {
+        encoded.push(0x81);
+        encoded.push(total_len as u8);
+    } else if total_len <= 0xffff {
+        encoded.push(0x82);
+        encoded.push((total_len >> 8) as u8);
+        encoded.push((total_len & 0xff) as u8);
+    } else {
+        return Err(Error::Encoding);
+    }
+    for field in fields {
         encoded.extend_from_slice(field);
     }
-    Any::new(Tag::Sequence, encoded)
-        .map_err(|_| Error::Encoding)?
-        .to_der()
-        .map_err(|_| Error::Encoding)
+    Ok(encoded)
 }
 
 fn encode_signed_certificate(

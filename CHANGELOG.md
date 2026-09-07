@@ -13,6 +13,7 @@
 - **Module Installation & Compatibility:**
   - Automatically detects and removes conflicting or outdated third-party attestation modules during installation to prevent conflicts and ensure a clean setup.
 - **Performance & Latency:**
-  - Eliminated key generation timing side-channels by deferring X.509 leaf parsing via lazy wrappers and streaming reply parcel serialization in-place without intermediary allocations.
+  - Eliminated key generation timing side-channels by deferring X.509 leaf parsing via lazy wrappers, bypassing dynamic ASN.1 re-serialization with zero-copy TLV slicing, and streaming reply parcel serialization in-place without intermediary allocations.
+  - Pre-computed constant DER byte templates for RootOfTrust structures in the native attestation engine, reducing post-processing latency to negligible sub-microsecond levels.
   - Streamlined high-frequency Binder transaction reply paths: purged logging, reflection, and redundant memory copies from latency-critical key generation routines.
   - Faster keystore response times with pre-encoded issuer chain caching and consistent readback cache synchronization.
