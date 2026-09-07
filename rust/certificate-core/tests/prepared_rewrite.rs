@@ -169,7 +169,124 @@ mod fixture {
             rewritten_ext.critical,
             "rewritten extension must preserve critical = true"
         );
+        assert_eq!(
+            output.tbs_certificate().issuer_unique_id(),
+            genuine.tbs_certificate().issuer_unique_id(),
+            "issuerUniqueID must survive the hot-path TBS rebuild",
+        );
+        assert_eq!(
+            output.tbs_certificate().subject_unique_id(),
+            genuine.tbs_certificate().subject_unique_id(),
+            "subjectUniqueID must survive the hot-path TBS rebuild",
+        );
         verify_signature(&output, &issuer, algorithm);
+    }
+
+    pub(super) fn run_prepared_rejects_extra_outer_field(
+        xml: &[u8],
+        algorithm: SigningAlgorithm,
+    ) {
+        let document = parse_keybox_xml_bytes(xml).expect("fixture XML");
+        let key = document.keys.first().expect("fixture key");
+        let private_key = normalize_private_key_pkcs8(&key.algorithm, &key.private_key_pem)
+            .expect("fixture key DER");
+        let issuer = Certificate::from_pem(
+            normalized_pem(
+                key.certificates_pem
+                    .first()
+                    .expect("fixture issuer certificate"),
+            )
+            .as_bytes(),
+        )
+        .expect("fixture issuer DER");
+        let issuer_der = issuer.to_der().expect("issuer DER");
+        let prepared = cleverestricky_certificate_core::PreparedIssuer::new(
+            &issuer_der,
+            private_key.as_slice(),
+            algorithm,
+        )
+        .expect("prepared issuer");
+        let genuine = synthetic_genuine_leaf(&issuer);
+        let tbs = genuine.tbs_certificate().to_der().expect("TBS DER");
+        let outer_algorithm = genuine
+            .signature_algorithm()
+            .to_der()
+            .expect("outer algorithm DER");
+        let outer_signature = genuine.signature().to_der().expect("outer signature DER");
+        let extra = 0i32.to_der().expect("extra DER");
+        let malformed = x509_sequence([
+            tbs.as_slice(),
+            outer_algorithm.as_slice(),
+            outer_signature.as_slice(),
+            extra.as_slice(),
+        ]);
+
+        let result = cleverestricky_certificate_core::rewrite_certificate_prepared(
+            &cleverestricky_certificate_core::PreparedCertificateRewriteRequest {
+                genuine_leaf_der: &malformed,
+                issuer: &prepared,
+                patch_levels: PatchLevels::default(),
+                id_overrides: &[],
+                module_hash: None,
+                verified_boot_key: &BOOT_KEY,
+                verified_boot_hash: &BOOT_HASH,
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(cleverestricky_certificate_core::Error::InvalidCertificate)
+        ));
+    }
+
+    pub(super) fn run_prepared_rejects_v2_with_extensions(
+        xml: &[u8],
+        algorithm: SigningAlgorithm,
+    ) {
+        let document = parse_keybox_xml_bytes(xml).expect("fixture XML");
+        let key = document.keys.first().expect("fixture key");
+        let private_key = normalize_private_key_pkcs8(&key.algorithm, &key.private_key_pem)
+            .expect("fixture key DER");
+        let issuer = Certificate::from_pem(
+            normalized_pem(
+                key.certificates_pem
+                    .first()
+                    .expect("fixture issuer certificate"),
+            )
+            .as_bytes(),
+        )
+        .expect("fixture issuer DER");
+        let issuer_der = issuer.to_der().expect("issuer DER");
+        let prepared = cleverestricky_certificate_core::PreparedIssuer::new(
+            &issuer_der,
+            private_key.as_slice(),
+            algorithm,
+        )
+        .expect("prepared issuer");
+        let mut malformed = synthetic_genuine_leaf(&issuer)
+            .to_der()
+            .expect("genuine DER");
+        let v3_marker = [0xa0, 0x03, 0x02, 0x01, 0x02];
+        let version_offset = malformed
+            .windows(v3_marker.len())
+            .position(|window| window == v3_marker)
+            .expect("v3 version marker");
+        malformed[version_offset + v3_marker.len() - 1] = 0x01;
+
+        let result = cleverestricky_certificate_core::rewrite_certificate_prepared(
+            &cleverestricky_certificate_core::PreparedCertificateRewriteRequest {
+                genuine_leaf_der: &malformed,
+                issuer: &prepared,
+                patch_levels: PatchLevels::default(),
+                id_overrides: &[],
+                module_hash: None,
+                verified_boot_key: &BOOT_KEY,
+                verified_boot_hash: &BOOT_HASH,
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(cleverestricky_certificate_core::Error::InvalidCertificate)
+        ));
     }
 
     pub(super) fn ec() -> &'static [u8] {
@@ -198,8 +315,24 @@ fn prepared_rsa_issuer_rewrites_and_signs_without_per_call_key_parse() {
 }
 
 #[test]
-fn prepared_rewrite_preserves_critical_attestation_extension() {
+fn prepared_rewrite_preserves_critical_attestation_extension_and_unique_ids() {
     fixture::run_prepared_critical_fixture(
+        fixture::ec(),
+        cleverestricky_certificate_core::SigningAlgorithm::EcP256Sha256,
+    );
+}
+
+#[test]
+fn prepared_rewrite_rejects_extra_outer_certificate_fields() {
+    fixture::run_prepared_rejects_extra_outer_field(
+        fixture::ec(),
+        cleverestricky_certificate_core::SigningAlgorithm::EcP256Sha256,
+    );
+}
+
+#[test]
+fn prepared_rewrite_rejects_extensions_on_v2_certificate() {
+    fixture::run_prepared_rejects_v2_with_extensions(
         fixture::ec(),
         cleverestricky_certificate_core::SigningAlgorithm::EcP256Sha256,
     );
