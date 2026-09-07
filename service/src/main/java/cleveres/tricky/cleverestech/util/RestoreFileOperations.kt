@@ -77,6 +77,7 @@ internal object RestoreFiles {
 internal class JvmSecureRestoreFileOperations(
     private val nowNanos: () -> Long = System::nanoTime,
     private val enableExpiryJanitor: Boolean = true,
+    private val operationCompletionHookForTesting: (() -> Unit)? = null,
 ) : RestoreFileOperations {
     private data class Original(
         val relativePath: String,
@@ -193,25 +194,26 @@ internal class JvmSecureRestoreFileOperations(
         target: File,
     ) {
         synchronized(lock) {
-            val transaction = requireTransaction(configDir, token)
-            val relative = relativeTarget(transaction.rootPath, target)
-            if (transaction.originals.any { it.relativePath == relative }) {
-                throw IOException("Restore target was already snapshotted")
-            }
-            if (transaction.originals.size >= MAX_RESTORE_TARGETS) {
-                throw IOException("Restore transaction target count exceeds bound")
-            }
+            withActiveTransaction(configDir, token) { transaction ->
+                val relative = relativeTarget(transaction.rootPath, target)
+                if (transaction.originals.any { it.relativePath == relative }) {
+                    throw IOException("Restore target was already snapshotted")
+                }
+                if (transaction.originals.size >= MAX_RESTORE_TARGETS) {
+                    throw IOException("Restore transaction target count exceeds bound")
+                }
 
-            val globalUsed = transactions.values.sumOf { it.snapshotBytes }
-            val ownRemaining = transaction.maxSnapshotBytes - transaction.snapshotBytes
-            val globalRemaining = MAX_GLOBAL_RESTORE_SNAPSHOT_BYTES - globalUsed
-            if (ownRemaining < 0L || globalRemaining < 0L) {
-                throw IOException("Restore snapshot accounting is inconsistent")
+                val globalUsed = transactions.values.sumOf { it.snapshotBytes }
+                val ownRemaining = transaction.maxSnapshotBytes - transaction.snapshotBytes
+                val globalRemaining = MAX_GLOBAL_RESTORE_SNAPSHOT_BYTES - globalUsed
+                if (ownRemaining < 0L || globalRemaining < 0L) {
+                    throw IOException("Restore snapshot accounting is inconsistent")
+                }
+                val bytes = readOptional(transaction, relative, minOf(ownRemaining, globalRemaining))
+                val added = bytes?.size?.toLong() ?: 0L
+                transaction.snapshotBytes = Math.addExact(transaction.snapshotBytes, added)
+                transaction.originals += Original(relative, bytes)
             }
-            val bytes = readOptional(transaction, relative, minOf(ownRemaining, globalRemaining))
-            val added = bytes?.size?.toLong() ?: 0L
-            transaction.snapshotBytes = Math.addExact(transaction.snapshotBytes, added)
-            transaction.originals += Original(relative, bytes)
         }
     }
 
@@ -222,10 +224,11 @@ internal class JvmSecureRestoreFileOperations(
         content: ByteArray,
     ) {
         synchronized(lock) {
-            val transaction = requireTransaction(configDir, token)
-            val relative = requireSnapshotted(transaction, target)
-            withParent(transaction, relative) { parent, leaf ->
-                atomicWrite(parent, leaf, content)
+            withActiveTransaction(configDir, token) { transaction ->
+                val relative = requireSnapshotted(transaction, target)
+                withParent(transaction, relative) { parent, leaf ->
+                    atomicWrite(parent, leaf, content)
+                }
             }
         }
     }
@@ -236,18 +239,19 @@ internal class JvmSecureRestoreFileOperations(
         target: File,
     ) {
         synchronized(lock) {
-            val transaction = requireTransaction(configDir, token)
-            val relative = requireSnapshotted(transaction, target)
-            try {
-                withParent(transaction, relative) { parent, leaf ->
-                    try {
-                        parent.deleteFile(leaf)
-                    } catch (_: NoSuchFileException) {
-                        // Already absent is the requested state.
+            withActiveTransaction(configDir, token) { transaction ->
+                val relative = requireSnapshotted(transaction, target)
+                try {
+                    withParent(transaction, relative) { parent, leaf ->
+                        try {
+                            parent.deleteFile(leaf)
+                        } catch (_: NoSuchFileException) {
+                            // Already absent is the requested state.
+                        }
                     }
+                } catch (_: NoSuchFileException) {
+                    // A parent that was absent at begin also means the target is absent.
                 }
-            } catch (_: NoSuchFileException) {
-                // A parent that was absent at begin also means the target is absent.
             }
         }
     }
@@ -257,22 +261,23 @@ internal class JvmSecureRestoreFileOperations(
         token: String,
     ) {
         synchronized(lock) {
-            val transaction = requireTransaction(configDir, token)
-            var failure: Throwable? = null
-            transaction.originals.asReversed().forEach { original ->
-                try {
-                    restoreOriginal(transaction, original)
-                } catch (error: Throwable) {
-                    val first = failure
-                    if (first == null) {
-                        failure = error
-                    } else {
-                        first.addSuppressed(error)
+            withActiveTransaction(configDir, token) { transaction ->
+                var failure: Throwable? = null
+                transaction.originals.asReversed().forEach { original ->
+                    try {
+                        restoreOriginal(transaction, original)
+                    } catch (error: Throwable) {
+                        val first = failure
+                        if (first == null) {
+                            failure = error
+                        } else {
+                            first.addSuppressed(error)
+                        }
                     }
                 }
+                failure?.let { throw IOException("Secure restore rollback was incomplete", it) }
+                removeTransaction(token)
             }
-            failure?.let { throw IOException("Secure restore rollback was incomplete", it) }
-            removeTransaction(token)
         }
     }
 
@@ -299,47 +304,47 @@ internal class JvmSecureRestoreFileOperations(
     override fun exportRecovery(
         configDir: File,
         token: String,
-    ): String {
+    ): String =
         synchronized(lock) {
-            val transaction = requireTransaction(configDir, token)
-            val created = ArrayList<Path>()
-            val manifest = StringBuilder()
-            try {
-                transaction.originals.forEachIndexed { index, original ->
-                    val encodedPath = original.relativePath.toByteArray(Charsets.UTF_8).toHex()
-                    val bytes = original.bytes
-                    if (bytes != null) {
-                        val name = ".restore-recovery-$token-${index.toString().padStart(4, '0')}.bak"
-                        val path = FileSystems.getDefault().getPath(name)
-                        atomicWrite(transaction.root, path, bytes)
-                        created.add(path)
-                        manifest.append(index.toString().padStart(4, '0'))
-                            .append("\tpresent\t")
-                            .append(encodedPath)
-                            .append('\n')
-                    } else {
-                        manifest.append(index.toString().padStart(4, '0'))
-                            .append("\tabsent\t")
-                            .append(encodedPath)
-                            .append('\n')
-                    }
-                }
-                val manifestName = ".restore-recovery-$token.manifest"
-                val manifestPath = FileSystems.getDefault().getPath(manifestName)
-                val manifestBytes = manifest.toString().toByteArray(Charsets.UTF_8)
+            withActiveTransaction(configDir, token) { transaction ->
+                val created = ArrayList<Path>()
+                val manifest = StringBuilder()
                 try {
-                    atomicWrite(transaction.root, manifestPath, manifestBytes)
-                } finally {
-                    manifestBytes.fill(0)
+                    transaction.originals.forEachIndexed { index, original ->
+                        val encodedPath = original.relativePath.toByteArray(Charsets.UTF_8).toHex()
+                        val bytes = original.bytes
+                        if (bytes != null) {
+                            val name = ".restore-recovery-$token-${index.toString().padStart(4, '0')}.bak"
+                            val path = FileSystems.getDefault().getPath(name)
+                            atomicWrite(transaction.root, path, bytes)
+                            created.add(path)
+                            manifest.append(index.toString().padStart(4, '0'))
+                                .append("\tpresent\t")
+                                .append(encodedPath)
+                                .append('\n')
+                        } else {
+                            manifest.append(index.toString().padStart(4, '0'))
+                                .append("\tabsent\t")
+                                .append(encodedPath)
+                                .append('\n')
+                        }
+                    }
+                    val manifestName = ".restore-recovery-$token.manifest"
+                    val manifestPath = FileSystems.getDefault().getPath(manifestName)
+                    val manifestBytes = manifest.toString().toByteArray(Charsets.UTF_8)
+                    try {
+                        atomicWrite(transaction.root, manifestPath, manifestBytes)
+                    } finally {
+                        manifestBytes.fill(0)
+                    }
+                    removeTransaction(token)
+                    transaction.rootPath.resolve(manifestName).toString()
+                } catch (error: Throwable) {
+                    created.forEach { path -> runCatching { transaction.root.deleteFile(path) } }
+                    throw IOException("Could not export restore recovery data", error)
                 }
-                removeTransaction(token)
-                return transaction.rootPath.resolve(manifestName).toString()
-            } catch (error: Throwable) {
-                created.forEach { path -> runCatching { transaction.root.deleteFile(path) } }
-                throw IOException("Could not export restore recovery data", error)
             }
         }
-    }
 
     private fun requireTransaction(
         configDir: File,
@@ -354,6 +359,23 @@ internal class JvmSecureRestoreFileOperations(
         transaction.touchedNanos = nowNanos()
         signalExpiryJanitorLocked()
         return transaction
+    }
+
+    private inline fun <T> withActiveTransaction(
+        configDir: File,
+        token: String,
+        block: (Transaction) -> T,
+    ): T {
+        val transaction = requireTransaction(configDir, token)
+        return try {
+            block(transaction)
+        } finally {
+            if (transactions[token] === transaction) {
+                operationCompletionHookForTesting?.invoke()
+                transaction.touchedNanos = nowNanos()
+                signalExpiryJanitorLocked()
+            }
+        }
     }
 
     private fun pruneExpiredTransactions(now: Long = nowNanos()) {
