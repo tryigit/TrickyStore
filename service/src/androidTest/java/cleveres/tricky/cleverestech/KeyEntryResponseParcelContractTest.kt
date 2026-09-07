@@ -37,9 +37,10 @@ class KeyEntryResponseParcelContractTest {
         assertTrue(parsed.hasFullCertificateChain())
 
         val cache = certificateCache()
+        val originalCache = synchronized(cache) { java.util.LinkedHashMap(cache) }
         val key = cacheKey(originalLeaf)
         val value = cachedChain(replacementLeaf, replacementChain)
-        val previous = synchronized(cache) { cache.put(key, value) }
+        synchronized(cache) { cache[key] = value }
         try {
             assertEquals(
                 CertHack.CachedParcelAction.REWRITTEN,
@@ -85,10 +86,11 @@ class KeyEntryResponseParcelContractTest {
             assertEquals(reply.dataSize(), reply.dataPosition())
         } finally {
             synchronized(cache) {
-                if (previous == null) {
-                    cache.remove(key)
-                } else {
-                    cache[key] = previous
+                cache.clear()
+                // Restore through CertificateCache.put(), not inherited putAll(), so retainedBytes
+                // accounting and the original LRU iteration order are both reconstructed.
+                for ((originalKey, originalValue) in originalCache) {
+                    cache[originalKey] = originalValue
                 }
             }
             reply.recycle()
