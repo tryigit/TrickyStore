@@ -3334,10 +3334,11 @@
             nameText.textContent = String(item.filename || '');
             const isStrongBox = item.security_level === 'StrongBox';
             const isTee = item.security_level === 'TEE';
-            if (isStrongBox || isTee) {
+            const isUnknown = item.security_level === 'Unknown';
+            if (isStrongBox || isTee || isUnknown) {
                 const badge = document.createElement('span');
-                badge.className = 'ct-badge ' + (isStrongBox ? 'ct-badge-strongbox' : 'ct-badge-tee');
-                badge.textContent = isStrongBox ? 'StrongBox' : 'TEE';
+                badge.className = 'ct-badge ' + (isStrongBox ? 'ct-badge-strongbox' : (isTee ? 'ct-badge-tee' : 'ct-badge-unknown'));
+                badge.textContent = isStrongBox ? 'StrongBox' : (isTee ? 'TEE' : 'Unknown');
                 name.append(nameText, badge);
             } else {
                 name.append(nameText);
@@ -3619,10 +3620,11 @@
             titleText.textContent = String(item.filename || '') + ' - ' + String(item.status || '');
             const isStrongBox = item.security_level === 'StrongBox';
             const isTee = item.security_level === 'TEE';
-            if (isStrongBox || isTee) {
+            const isUnknown = item.security_level === 'Unknown';
+            if (isStrongBox || isTee || isUnknown) {
                 const badge = document.createElement('span');
-                badge.className = 'ct-badge ' + (isStrongBox ? 'ct-badge-strongbox' : 'ct-badge-tee');
-                badge.textContent = isStrongBox ? 'StrongBox' : 'TEE';
+                badge.className = 'ct-badge ' + (isStrongBox ? 'ct-badge-strongbox' : (isTee ? 'ct-badge-tee' : 'ct-badge-unknown'));
+                badge.textContent = isStrongBox ? 'StrongBox' : (isTee ? 'TEE' : 'Unknown');
                 title.append(titleText, badge);
             } else {
                 title.append(titleText);

@@ -522,9 +522,6 @@ public final class CertHack {
             if (lower.contains("strongbox")) {
                 return KeyboxSecurityLevel.STRONGBOX;
             }
-            if (lower.contains("unknown") || lower.contains("unclassified")) {
-                return KeyboxSecurityLevel.UNKNOWN;
-            }
             if (lower.contains("tee")) {
                 return KeyboxSecurityLevel.TEE;
             }

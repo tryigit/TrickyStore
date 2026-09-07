@@ -207,15 +207,10 @@ public class CertHackTest {
         assertEquals(List.of(standardBox), CertHack.filterKeyboxesBySecurityLevel(List.of(standardBox), false));
         assertTrue(CertHack.filterKeyboxesBySecurityLevel(List.of(standardBox), true).isEmpty());
 
-        CertHack.KeyBox unknownBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "unknown.xml");
-        assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(unknownBox));
-        assertFalse(CertHack.isTeeKeybox(unknownBox));
-        assertFalse(CertHack.isStrongBoxKeybox(unknownBox));
-        assertTrue(CertHack.filterKeyboxesBySecurityLevel(List.of(unknownBox), false).isEmpty());
-        assertTrue(CertHack.filterKeyboxesBySecurityLevel(List.of(unknownBox), true).isEmpty());
-
-        CertHack.KeyBox unclassifiedBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "custom_unclassified.xml");
-        assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(unclassifiedBox));
+        CertHack.KeyBox arbitraryNamedBox = new CertHack.KeyBox(keyPair, List.of(plainCert), "unknown.xml");
+        assertEquals(CertHack.KeyboxSecurityLevel.TEE, CertHack.classifyKeyboxSecurityLevel(arbitraryNamedBox));
+        assertTrue(CertHack.isTeeKeybox(arbitraryNamedBox));
+        assertFalse(CertHack.isStrongBoxKeybox(arbitraryNamedBox));
     }
 
     @Test
@@ -370,9 +365,9 @@ public class CertHackTest {
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", "BC");
         kpg.initialize(2048);
         KeyPair kp = kpg.generateKeyPair();
-        X509Certificate plainCert = generateIssuerCert(kp, "CN=Generic Unbranded CA, O=Custom, C=US");
+        X509Certificate swCert = generateAttestationCert(kp, 0, 0);
         CertHack.KeyBox unknownKeybox = ManagedOpaqueKeyOracle.wrap(
-                kp, List.of(plainCert), "unknown.xml");
+                kp, List.of(swCert), "unknown.xml");
 
         Map<String, List<CertHack.KeyBox>> newKeyboxes = new HashMap<>();
         newKeyboxes.put("RSA", List.of(unknownKeybox));
