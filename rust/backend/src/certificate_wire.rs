@@ -423,12 +423,12 @@ mod tests {
         ))
         .is_ok());
 
-        // StrongBox attestation with TEE keymint
+        // Reversed StrongBox attestation with TEE keymint must be rejected
         assert!(validate_hardware_provenance(&make_inspection(
             SecurityLevel::StrongBox,
             SecurityLevel::TrustedEnvironment,
         ))
-        .is_ok());
+        .is_err());
 
         // Software attestation or keymint must fail closed
         assert!(validate_hardware_provenance(&make_inspection(
