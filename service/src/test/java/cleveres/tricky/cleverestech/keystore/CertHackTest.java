@@ -110,7 +110,6 @@ public class CertHackTest {
         assertEquals(0, ManagedKeyboxStateOracle.parse(new StringReader(mixedXml), "mixed.xml").size());
     }
 
-
     @Test
     public void testVerifiedBootDigestSelectionWithFallback() {
         byte[] runtime = new byte[32];
@@ -368,12 +367,9 @@ public class CertHackTest {
         stateField.set(null, newState);
 
         try {
-            // Genuine TEE leaf (attestation=1, keymint=1)
             X509Certificate teeLeaf = generateAttestationCert(kp, 1, 1);
             Certificate[] inputChain = new Certificate[]{teeLeaf};
             Certificate[] resultChain = CertHack.hackCertificateChain(inputChain, 0);
-
-            // Must NOT rewrite using StrongBox keybox: returns original chain untouched
             assertSame("TEE leaf must not fall back to StrongBox keybox", inputChain, resultChain);
         } finally {
             stateField.set(null, previousState);
@@ -405,12 +401,9 @@ public class CertHackTest {
         stateField.set(null, newState);
 
         try {
-            // Genuine StrongBox leaf (attestation=2, keymint=2)
             X509Certificate sbLeaf = generateAttestationCert(kp, 2, 2);
             Certificate[] inputChain = new Certificate[]{sbLeaf};
             Certificate[] resultChain = CertHack.hackCertificateChain(inputChain, 0);
-
-            // Asymmetric fallback: StrongBox leaf successfully rewrites using TEE keybox
             assertNotEquals("StrongBox leaf must fall back to TEE keybox and rewrite", inputChain, resultChain);
             assertEquals(2, resultChain.length);
             assertEquals(teeCert, resultChain[1]);
@@ -444,13 +437,11 @@ public class CertHackTest {
         stateField.set(null, newState);
 
         try {
-            // 1. Genuine TEE leaf must NOT rewrite when only UNKNOWN keybox is available
             X509Certificate teeLeaf = generateAttestationCert(kp, 1, 1);
             Certificate[] teeChain = new Certificate[]{teeLeaf};
             Certificate[] teeResult = CertHack.hackCertificateChain(teeChain, 0);
             assertSame("TEE leaf must not rewrite when only UNKNOWN keybox is available", teeChain, teeResult);
 
-            // 2. Genuine StrongBox leaf must NOT rewrite when only UNKNOWN keybox is available
             X509Certificate sbLeaf = generateAttestationCert(kp, 2, 2);
             Certificate[] sbChain = new Certificate[]{sbLeaf};
             Certificate[] sbResult = CertHack.hackCertificateChain(sbChain, 0);
@@ -466,27 +457,22 @@ public class CertHackTest {
         kpg.initialize(2048);
         KeyPair kp = kpg.generateKeyPair();
 
-        // 1. (TEE, TEE) -> TEE
         X509Certificate teeCert = generateAttestationCert(kp, 1, 1);
         CertHack.KeyBox teeBox = ManagedOpaqueKeyOracle.wrap(kp, List.of(teeCert), "custom.xml");
         assertEquals(CertHack.KeyboxSecurityLevel.TEE, CertHack.classifyKeyboxSecurityLevel(teeBox));
 
-        // 2. (StrongBox, StrongBox) -> STRONGBOX
         X509Certificate sbCert = generateAttestationCert(kp, 2, 2);
         CertHack.KeyBox sbBox = ManagedOpaqueKeyOracle.wrap(kp, List.of(sbCert), "custom.xml");
         assertEquals(CertHack.KeyboxSecurityLevel.STRONGBOX, CertHack.classifyKeyboxSecurityLevel(sbBox));
 
-        // 3. (TEE, StrongBox) -> STRONGBOX
         X509Certificate mixedCert = generateAttestationCert(kp, 1, 2);
         CertHack.KeyBox mixedBox = ManagedOpaqueKeyOracle.wrap(kp, List.of(mixedCert), "custom.xml");
         assertEquals(CertHack.KeyboxSecurityLevel.STRONGBOX, CertHack.classifyKeyboxSecurityLevel(mixedBox));
 
-        // 4. (StrongBox, TEE) -> UNKNOWN (fail closed, even if filename mentions tee or strongbox)
         X509Certificate reversedCert = generateAttestationCert(kp, 2, 1);
         CertHack.KeyBox reversedBox = ManagedOpaqueKeyOracle.wrap(kp, List.of(reversedCert), "tee_strongbox.xml");
         assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(reversedBox));
 
-        // 5. (Software, Software) -> UNKNOWN (fail closed, even if filename mentions tee)
         X509Certificate swCert = generateAttestationCert(kp, 0, 0);
         CertHack.KeyBox swBox = ManagedOpaqueKeyOracle.wrap(kp, List.of(swCert), "tee_keybox.xml");
         assertEquals(CertHack.KeyboxSecurityLevel.UNKNOWN, CertHack.classifyKeyboxSecurityLevel(swBox));
@@ -501,7 +487,6 @@ public class CertHackTest {
         CertHack.KeyBox box1 = ManagedOpaqueKeyOracle.wrap(kp, List.of(cert), "shared_file.xml");
 
         Map<String, List<CertHack.KeyBox>> keyboxes = Map.of("RSA", List.of(box1));
-        // Simulate two alias keys pointing to the same file
         Map<String, List<CertHack.KeyBox>> keyboxFiles = Map.of(
                 "shared_file.xml", List.of(box1),
                 "alias_name", List.of(box1)
@@ -537,23 +522,27 @@ public class CertHackTest {
         keyCtor.setAccessible(true);
 
         Class<?> chainClass = Class.forName("cleveres.tricky.cleverestech.keystore.CertHack$CachedCertificateChain");
-        java.lang.reflect.Constructor<?> chainCtor = chainClass.getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class);
+        java.lang.reflect.Constructor<?> chainCtor = chainClass.getDeclaredConstructor(
+                Certificate[].class,
+                byte[].class,
+                byte[].class,
+                boolean.class,
+                boolean.class
+        );
         chainCtor.setAccessible(true);
 
         java.util.Map<Object, Object> cache = (java.util.Map<Object, Object>) cacheObj;
         java.lang.reflect.Method retainedBytesMethod = cacheClass.getDeclaredMethod("retainedBytes");
         retainedBytesMethod.setAccessible(true);
 
-        // 1. Entry count bound (MAX_CERTIFICATE_CACHE_ENTRIES = 64)
         for (int i = 0; i < 70; i++) {
             byte[] id = new byte[]{(byte) i};
             Object k = keyCtor.newInstance((Object) id);
-            Object v = chainCtor.newInstance(new Certificate[0], id, id, true);
+            Object v = chainCtor.newInstance(new Certificate[0], id, id, true, true);
             cache.put(k, v);
         }
         assertTrue(cache.size() <= 64);
 
-        // 2. Retained byte budget bound (MAX_CERTIFICATE_CACHE_RETAINED_BYTES = 4 MiB)
         cache.clear();
         assertEquals(0, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
         byte[] bigLeaf = new byte[1024 * 1024];
@@ -561,20 +550,19 @@ public class CertHackTest {
         for (int i = 0; i < 6; i++) {
             byte[] id = new byte[]{(byte) (i + 100)};
             Object k = keyCtor.newInstance((Object) id);
-            Object v = chainCtor.newInstance(new Certificate[0], bigLeaf, bigIssuer, true);
+            Object v = chainCtor.newInstance(new Certificate[0], bigLeaf, bigIssuer, true, true);
             cache.put(k, v);
         }
         int retained = ((Number) retainedBytesMethod.invoke(cacheObj)).intValue();
         assertTrue("Retained bytes " + retained + " must be <= 4 MiB", retained <= 4 * 1024 * 1024);
         assertTrue("Cache size must have been trimmed to fit budget", cache.size() <= 4);
 
-        // 3. Both key and value bytes are accounted for in retainedBytes
         cache.clear();
         byte[] testKey = new byte[1000];
         Object lk = keyCtor.newInstance((Object) testKey);
-        Object lv = chainCtor.newInstance(new Certificate[0], new byte[200], new byte[300], true);
+        Object lv = chainCtor.newInstance(new Certificate[0], new byte[200], new byte[300], true, true);
         cache.put(lk, lv);
-        assertEquals(1200, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
+        assertEquals(1500, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
         cache.remove(lk);
         assertEquals(0, ((Number) retainedBytesMethod.invoke(cacheObj)).intValue());
     }
@@ -604,7 +592,6 @@ public class CertHackTest {
         stateField.set(null, newState);
 
         try {
-            // (StrongBox attestation = 2, TEE keymint = 1) -> reversed pair (2, 1)
             X509Certificate reversedCert = generateAttestationCert(kp, 2, 1);
             Certificate[] reversedChain = new Certificate[]{reversedCert};
             Certificate[] result = CertHack.hackCertificateChain(reversedChain, 0);
@@ -615,7 +602,7 @@ public class CertHackTest {
     }
 
     @Test
-    public void testPreparedIssuerChainBudgetLimit() throws Exception {
+    public void testPreparedIssuerChainsAreLazyAndBudgetNeverDropsValidKeyboxes() throws Exception {
         KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", "BC");
         kpg.initialize(2048);
         KeyPair kp = kpg.generateKeyPair();
@@ -639,7 +626,12 @@ public class CertHackTest {
 
         @SuppressWarnings("unchecked")
         Map<?, ?> prepared = (Map<?, ?>) prepareMethod.invoke(null, boxMap);
-        assertEquals(8, prepared.size());
+        assertEquals("Memory budget must not change the valid keybox set", 10, prepared.size());
+
+        CertHack.setKeyboxes(list);
+        assertEquals(10, CertHack.getPublishedKeyboxCountForTesting());
+        assertEquals("Issuer DER must not be retained eagerly at publication", 0,
+                CertHack.getPreparedIssuerChainRetainedBytesForTesting());
     }
 
     private X509Certificate generateLargeIssuerCert(KeyPair kp, String subjectDn, int extensionSize) throws Exception {
