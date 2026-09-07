@@ -138,4 +138,62 @@ public class LazyX509CertificateTest {
             executor.shutdownNow();
         }
     }
+
+    private static X509Certificate generateCertWithExtension(
+            org.bouncycastle.asn1.ASN1ObjectIdentifier oid,
+            byte[] value
+    ) throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC", "BC");
+        kpg.initialize(256);
+        KeyPair kp = kpg.generateKeyPair();
+        X500Name name = new X500Name("CN=Test Subject, O=CleveresTricky, C=US");
+        BigInteger serial = BigInteger.valueOf(123456789L);
+        Date notBefore = new Date(System.currentTimeMillis() - 10_000);
+        Date notAfter = new Date(System.currentTimeMillis() + 100_000);
+        X509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                name, serial, notBefore, notAfter, name, kp.getPublic());
+        if (oid != null && value != null) {
+            builder.addExtension(oid, false, new org.bouncycastle.asn1.DEROctetString(value));
+        }
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256withECDSA").build(kp.getPrivate());
+        return new JcaX509CertificateConverter().getCertificate(builder.build(signer));
+    }
+
+    @Test
+    public void hasAttestationExtensionDetectsAndroidAttestationOid() throws Exception {
+        org.bouncycastle.asn1.ASN1ObjectIdentifier attestationOid =
+                new org.bouncycastle.asn1.ASN1ObjectIdentifier("1.3.6.1.4.1.11129.2.1.17");
+        X509Certificate cert = generateCertWithExtension(attestationOid, new byte[] { 0x30, 0x00 });
+        LazyX509Certificate lazy = new LazyX509Certificate(cert.getEncoded());
+
+        assertTrue(lazy.hasAttestationExtension());
+        assertFalse("Delegate must not be instantiated during attestation extension check",
+                lazy.isDelegateInstantiatedForTesting());
+    }
+
+    @Test
+    public void hasAttestationExtensionRejectsOidInUnrelatedExtensionValue() throws Exception {
+        byte[] rawAttestationOidBytes = new byte[] {
+                0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, (byte) 0xd6, 0x79, 0x02, 0x01, 0x11
+        };
+        org.bouncycastle.asn1.ASN1ObjectIdentifier unrelatedOid =
+                new org.bouncycastle.asn1.ASN1ObjectIdentifier("1.2.3.4.5");
+        X509Certificate cert = generateCertWithExtension(unrelatedOid, rawAttestationOidBytes);
+        LazyX509Certificate lazy = new LazyX509Certificate(cert.getEncoded());
+
+        assertFalse("Oid bytes embedded inside an unrelated extension value must not trigger attestation detection",
+                lazy.hasAttestationExtension());
+        assertFalse("Delegate must not be instantiated during attestation extension check",
+                lazy.isDelegateInstantiatedForTesting());
+    }
+
+    @Test
+    public void hasAttestationExtensionReturnsFalseWhenNoExtensionsPresent() throws Exception {
+        X509Certificate cert = generateTestCert();
+        LazyX509Certificate lazy = new LazyX509Certificate(cert.getEncoded());
+
+        assertFalse(lazy.hasAttestationExtension());
+        assertFalse("Delegate must not be instantiated during attestation extension check",
+                lazy.isDelegateInstantiatedForTesting());
+    }
 }

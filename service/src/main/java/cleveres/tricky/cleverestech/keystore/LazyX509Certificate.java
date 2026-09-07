@@ -60,22 +60,127 @@ public final class LazyX509Certificate extends X509Certificate {
     }
 
     boolean hasAttestationExtension() {
-        return indexOfSubarray(der, ANDROID_ATTESTATION_OID_DER) >= 0;
-    }
+        try {
+            DerReader certReader = new DerReader(der, 0, der.length);
+            DerReader certSeq = certReader.readConstructed(0x30); // Certificate SEQUENCE
+            if (certSeq == null) return false;
 
-    private static int indexOfSubarray(byte[] array, byte[] target) {
-        if (target.length == 0 || array.length < target.length) return -1;
-        int max = array.length - target.length;
-        outer:
-        for (int i = 0; i <= max; i++) {
-            for (int j = 0; j < target.length; j++) {
-                if (array[i + j] != target[j]) {
-                    continue outer;
+            DerReader tbsSeq = certSeq.readConstructed(0x30); // TBSCertificate SEQUENCE
+            if (tbsSeq == null) return false;
+
+            // 1. version [0] EXPLICIT
+            if (tbsSeq.peekTag() == 0xa0) {
+                if (!tbsSeq.skipTlv()) return false;
+            }
+            // 2. serialNumber (0x02 INTEGER)
+            if (tbsSeq.peekTag() != 0x02 || !tbsSeq.skipTlv()) return false;
+            // 3. signature (0x30 SEQUENCE)
+            if (tbsSeq.peekTag() != 0x30 || !tbsSeq.skipTlv()) return false;
+            // 4. issuer (0x30 SEQUENCE)
+            if (tbsSeq.peekTag() != 0x30 || !tbsSeq.skipTlv()) return false;
+            // 5. validity (0x30 SEQUENCE)
+            if (tbsSeq.peekTag() != 0x30 || !tbsSeq.skipTlv()) return false;
+            // 6. subject (0x30 SEQUENCE)
+            if (tbsSeq.peekTag() != 0x30 || !tbsSeq.skipTlv()) return false;
+            // 7. subjectPublicKeyInfo (0x30 SEQUENCE)
+            if (tbsSeq.peekTag() != 0x30 || !tbsSeq.skipTlv()) return false;
+
+            // Optional issuerUniqueID [1]
+            if (tbsSeq.peekTag() == 0x81 || tbsSeq.peekTag() == 0xa1) {
+                if (!tbsSeq.skipTlv()) return false;
+            }
+            // Optional subjectUniqueID [2]
+            if (tbsSeq.peekTag() == 0x82 || tbsSeq.peekTag() == 0xa2) {
+                if (!tbsSeq.skipTlv()) return false;
+            }
+
+            // 8. extensions [3] EXPLICIT (tag 0xa3)
+            if (tbsSeq.peekTag() != 0xa3) return false;
+            DerReader extContainer = tbsSeq.readConstructed(0xa3);
+            if (extContainer == null) return false;
+
+            DerReader extsSeq = extContainer.readConstructed(0x30); // Extensions SEQUENCE
+            if (extsSeq == null) return false;
+
+            while (extsSeq.hasNext()) {
+                DerReader extSeq = extsSeq.readConstructed(0x30); // Extension SEQUENCE
+                if (extSeq == null) return false;
+
+                // First item in Extension SEQUENCE is extnID (OBJECT IDENTIFIER 0x06)
+                if (extSeq.peekTag() == 0x06 && extSeq.matchesNextBytes(ANDROID_ATTESTATION_OID_DER)) {
+                    return true;
                 }
             }
-            return i;
+            return false;
+        } catch (Throwable ignored) {
+            return false;
         }
-        return -1;
+    }
+
+    private static final class DerReader {
+        private final byte[] data;
+        private int pos;
+        private final int limit;
+
+        DerReader(byte[] data, int offset, int length) {
+            this.data = data;
+            this.pos = offset;
+            this.limit = offset + length;
+        }
+
+        boolean hasNext() {
+            return pos < limit;
+        }
+
+        int peekTag() {
+            if (pos >= limit) return -1;
+            return data[pos] & 0xff;
+        }
+
+        DerReader readConstructed(int expectedTag) {
+            if (pos >= limit) return null;
+            int tag = data[pos++] & 0xff;
+            if (tag != expectedTag) return null;
+            int len = readLength();
+            if (len < 0 || pos + len > limit) return null;
+            int start = pos;
+            pos += len;
+            return new DerReader(data, start, len);
+        }
+
+        boolean skipTlv() {
+            if (pos >= limit) return false;
+            pos++;
+            int len = readLength();
+            if (len < 0 || pos + len > limit) return false;
+            pos += len;
+            return true;
+        }
+
+        private int readLength() {
+            if (pos >= limit) return -1;
+            int b = data[pos++] & 0xff;
+            if ((b & 0x80) == 0) {
+                return b;
+            }
+            int numBytes = b & 0x7f;
+            if (numBytes == 0 || numBytes > 4 || pos + numBytes > limit) {
+                return -1;
+            }
+            int len = 0;
+            for (int i = 0; i < numBytes; i++) {
+                len = (len << 8) | (data[pos++] & 0xff);
+            }
+            return len;
+        }
+
+        boolean matchesNextBytes(byte[] target) {
+            if (limit - pos < target.length) return false;
+            for (int i = 0; i < target.length; i++) {
+                if (data[pos + i] != target[i]) return false;
+            }
+            return true;
+        }
     }
 
     public boolean isDelegateInstantiatedForTesting() {
