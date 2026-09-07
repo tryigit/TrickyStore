@@ -396,6 +396,44 @@ pub(crate) fn parse_any(encoded: &[u8]) -> Result<AnyRef<'_>, Error> {
     X509Decode::from_der(encoded).map_err(|_| Error::InvalidCertificate)
 }
 
+pub(crate) struct TlvIterator<'a> {
+    remaining: &'a [u8],
+}
+
+impl<'a> TlvIterator<'a> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+        Self { remaining: bytes }
+    }
+}
+
+impl<'a> Iterator for TlvIterator<'a> {
+    type Item = Result<&'a [u8], Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining.is_empty() {
+            return None;
+        }
+        match <AnyRef<'a> as X509Decode>::from_der_partial(self.remaining) {
+            Ok((_, rest)) => {
+                let consumed = match self.remaining.len().checked_sub(rest.len()) {
+                    Some(c) if c > 0 => c,
+                    _ => {
+                        self.remaining = &[];
+                        return Some(Err(Error::InvalidCertificate));
+                    }
+                };
+                let slice = &self.remaining[..consumed];
+                self.remaining = rest;
+                Some(Ok(slice))
+            }
+            Err(_) => {
+                self.remaining = &[];
+                Some(Err(Error::InvalidCertificate))
+            }
+        }
+    }
+}
+
 pub(crate) fn split_tlvs(mut encoded: &[u8]) -> Result<Vec<&[u8]>, Error> {
     let mut output = Vec::new();
     while !encoded.is_empty() {
