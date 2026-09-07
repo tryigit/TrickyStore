@@ -294,31 +294,34 @@ pub fn rewrite_certificate_prepared(
     }
 
     let extensions_seq = parse_any(extensions_explicit.value())?;
+    if extensions_seq.tag() != Tag::Sequence {
+        return Err(Error::InvalidCertificate);
+    }
     let extensions = split_tlvs(extensions_seq.value())?;
 
-    let mut attestation_index = None;
+    let mut attestation_info = None;
     for (index, ext_der) in extensions.iter().enumerate() {
-        let ext_seq = parse_any(ext_der)?;
-        let ext_fields = split_tlvs(ext_seq.value())?;
-        if ext_fields.is_empty() {
-            return Err(Error::InvalidCertificate);
-        }
-        let extn_id = parse_any(ext_fields[0])?;
+        let parsed = parse_extension(ext_der)?;
+        let extn_id = parse_any(parsed.id_der)?;
         if extn_id.value() == ANDROID_ATTESTATION_OID_BYTES
-            && attestation_index.replace(index).is_some()
+            && attestation_info
+                .replace((
+                    index,
+                    parsed.id_der,
+                    parsed.critical_der,
+                    parsed.value_bytes,
+                ))
+                .is_some()
         {
             return Err(Error::DuplicateAttestationExtension);
         }
     }
 
-    let index = attestation_index.ok_or(Error::MissingAttestationExtension)?;
-
-    let ext_seq = parse_any(extensions[index])?;
-    let ext_fields = split_tlvs(ext_seq.value())?;
-    let extn_value_any = parse_any(ext_fields.last().unwrap())?;
+    let (index, id_der, critical_der, extn_value) =
+        attestation_info.ok_or(Error::MissingAttestationExtension)?;
 
     let rewritten = rewrite_extension(&RewriteRequest {
-        extension_der: extn_value_any.value(),
+        extension_der: extn_value,
         patch_levels: request.patch_levels,
         id_overrides: request.id_overrides,
         module_hash: request.module_hash,
@@ -332,7 +335,10 @@ pub fn rewrite_certificate_prepared(
         .to_der()
         .map_err(|_| Error::Encoding)?;
 
-    let new_ext = encode_sequence(&[ext_fields[0], &new_extn_value_der])?;
+    let new_ext = match critical_der {
+        Some(crit) => encode_sequence(&[id_der, crit, &new_extn_value_der])?,
+        None => encode_sequence(&[id_der, &new_extn_value_der])?,
+    };
 
     let mut final_extensions = Vec::with_capacity(extensions.len());
     for (i, ext_der) in extensions.iter().enumerate() {
@@ -394,6 +400,58 @@ fn signature_algorithm_der(algorithm: SigningAlgorithm) -> &'static [u8] {
 
 pub(crate) fn parse_any(encoded: &[u8]) -> Result<AnyRef<'_>, Error> {
     X509Decode::from_der(encoded).map_err(|_| Error::InvalidCertificate)
+}
+
+pub(crate) struct ParsedExtension<'a> {
+    pub(crate) id_der: &'a [u8],
+    pub(crate) critical_der: Option<&'a [u8]>,
+    pub(crate) value_bytes: &'a [u8],
+}
+
+pub(crate) fn parse_extension(ext_der: &[u8]) -> Result<ParsedExtension<'_>, Error> {
+    let ext_seq = parse_any(ext_der)?;
+    if ext_seq.tag() != Tag::Sequence {
+        return Err(Error::InvalidCertificate);
+    }
+
+    let mut ext_iter = TlvIterator::new(ext_seq.value());
+    let id_der = ext_iter.next().ok_or(Error::InvalidCertificate)??;
+    let extn_id = parse_any(id_der)?;
+    if extn_id.tag() != Tag::ObjectIdentifier {
+        return Err(Error::InvalidCertificate);
+    }
+
+    let second_der = ext_iter.next().ok_or(Error::InvalidCertificate)??;
+    let second_any = parse_any(second_der)?;
+
+    let (critical_der, value_any) = match ext_iter.next() {
+        Some(third_res) => {
+            let third_der = third_res?;
+            if second_any.tag() != Tag::Boolean {
+                return Err(Error::InvalidCertificate);
+            }
+            let third_any = parse_any(third_der)?;
+            if third_any.tag() != Tag::OctetString {
+                return Err(Error::InvalidCertificate);
+            }
+            if ext_iter.next().is_some() {
+                return Err(Error::InvalidCertificate);
+            }
+            (Some(second_der), third_any)
+        }
+        None => {
+            if second_any.tag() != Tag::OctetString {
+                return Err(Error::InvalidCertificate);
+            }
+            (None, second_any)
+        }
+    };
+
+    Ok(ParsedExtension {
+        id_der,
+        critical_der,
+        value_bytes: value_any.value(),
+    })
 }
 
 pub(crate) struct TlvIterator<'a> {

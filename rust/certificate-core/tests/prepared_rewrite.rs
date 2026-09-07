@@ -64,6 +64,114 @@ mod fixture {
         verify_signature(&output, &issuer, algorithm);
     }
 
+    pub(super) fn synthetic_genuine_leaf_with_critical(
+        issuer: &Certificate,
+        critical: bool,
+    ) -> Certificate {
+        let issuer_tbs = issuer.tbs_certificate();
+        let version = explicit_x509_tag(0, &2i32.to_der().expect("v3 DER"));
+        let serial = 0x80i32.to_der().expect("serial DER");
+        let signature = issuer_tbs
+            .signature()
+            .to_der()
+            .expect("signature algorithm DER");
+        let issuer_name = issuer_tbs.subject().to_der().expect("issuer name DER");
+        let validity = issuer_tbs.validity().to_der().expect("validity DER");
+        let subject = issuer_tbs.subject().to_der().expect("subject DER");
+        let spki = issuer_tbs
+            .subject_public_key_info()
+            .to_der()
+            .expect("SPKI DER");
+        let issuer_unique_id = implicit_unique_id(1, 0xa0);
+        let subject_unique_id = implicit_unique_id(2, 0xb0);
+
+        let extension_der = synthetic_attestation_extension();
+        let mut extensions = issuer_tbs.extensions().cloned().unwrap_or_default();
+        extensions.retain(|extension| extension.extn_id != ANDROID_ATTESTATION_OID);
+        extensions.push(Extension {
+            extn_id: ANDROID_ATTESTATION_OID,
+            critical,
+            extn_value: OctetString::new(extension_der).expect("attestation octets"),
+        });
+        let extensions = extensions.to_der().expect("extensions DER");
+        let extensions = explicit_x509_tag(3, &extensions);
+
+        let tbs = x509_sequence([
+            version.as_slice(),
+            serial.as_slice(),
+            signature.as_slice(),
+            issuer_name.as_slice(),
+            validity.as_slice(),
+            subject.as_slice(),
+            spki.as_slice(),
+            issuer_unique_id.as_slice(),
+            subject_unique_id.as_slice(),
+            extensions.as_slice(),
+        ]);
+        let outer_algorithm = issuer
+            .signature_algorithm()
+            .to_der()
+            .expect("outer signature algorithm DER");
+        let outer_signature = issuer.signature().to_der().expect("outer signature DER");
+        let certificate = x509_sequence([
+            tbs.as_slice(),
+            outer_algorithm.as_slice(),
+            outer_signature.as_slice(),
+        ]);
+        Certificate::from_der(&certificate).expect("synthetic genuine certificate")
+    }
+
+    pub(super) fn run_prepared_critical_fixture(xml: &[u8], algorithm: SigningAlgorithm) {
+        let document = parse_keybox_xml_bytes(xml).expect("fixture XML");
+        let key = document.keys.first().expect("fixture key");
+        let private_key = normalize_private_key_pkcs8(&key.algorithm, &key.private_key_pem)
+            .expect("fixture key DER");
+        let issuer_pem = key
+            .certificates_pem
+            .first()
+            .expect("fixture issuer certificate");
+        let issuer = Certificate::from_pem(normalized_pem(issuer_pem).as_bytes())
+            .expect("fixture issuer DER");
+        let genuine = synthetic_genuine_leaf_with_critical(&issuer, true);
+        let genuine_der = genuine.to_der().expect("genuine DER");
+        let issuer_der = issuer.to_der().expect("issuer DER");
+
+        let prepared = cleverestricky_certificate_core::PreparedIssuer::new(
+            &issuer_der,
+            private_key.as_slice(),
+            algorithm,
+        )
+        .expect("prepared issuer");
+
+        let rewritten = cleverestricky_certificate_core::rewrite_certificate_prepared(
+            &cleverestricky_certificate_core::PreparedCertificateRewriteRequest {
+                genuine_leaf_der: &genuine_der,
+                issuer: &prepared,
+                patch_levels: PatchLevels::default(),
+                id_overrides: &[],
+                module_hash: None,
+                verified_boot_key: &BOOT_KEY,
+                verified_boot_hash: &BOOT_HASH,
+            },
+        )
+        .expect("rewrite critical attestation extension");
+
+        let output = Certificate::from_der(&rewritten.leaf_der).expect("rewritten certificate DER");
+        let rewritten_ext = output
+            .tbs_certificate()
+            .extensions()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .find(|extension| extension.extn_id == ANDROID_ATTESTATION_OID)
+            .expect("rewritten attestation extension");
+        assert!(
+            rewritten_ext.critical,
+            "rewritten extension must preserve critical = true"
+        );
+        verify_signature(&output, &issuer, algorithm);
+    }
+
     pub(super) fn ec() -> &'static [u8] {
         VALID_EC
     }
@@ -86,5 +194,13 @@ fn prepared_rsa_issuer_rewrites_and_signs_without_per_call_key_parse() {
     fixture::run_prepared_fixture(
         fixture::rsa(),
         cleverestricky_certificate_core::SigningAlgorithm::RsaPkcs1Sha256,
+    );
+}
+
+#[test]
+fn prepared_rewrite_preserves_critical_attestation_extension() {
+    fixture::run_prepared_critical_fixture(
+        fixture::ec(),
+        cleverestricky_certificate_core::SigningAlgorithm::EcP256Sha256,
     );
 }
