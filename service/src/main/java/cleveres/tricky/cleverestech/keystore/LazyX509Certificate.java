@@ -38,6 +38,9 @@ import javax.security.auth.x500.X500Principal;
  */
 public final class LazyX509Certificate extends X509Certificate {
     private static final long serialVersionUID = 1L;
+    private static final byte ATTESTATION_UNKNOWN = 0;
+    private static final byte ATTESTATION_ABSENT = 1;
+    private static final byte ATTESTATION_PRESENT = 2;
 
     private static final ThreadLocal<CertificateFactory> FACTORY =
             ThreadLocal.withInitial(() -> {
@@ -54,6 +57,7 @@ public final class LazyX509Certificate extends X509Certificate {
 
     private final byte[] der;
     private volatile X509Certificate delegate;
+    private volatile byte attestationExtensionState = ATTESTATION_UNKNOWN;
 
     public LazyX509Certificate(byte[] der) {
         this(der, true);
@@ -65,6 +69,17 @@ public final class LazyX509Certificate extends X509Certificate {
     }
 
     public boolean hasAttestationExtension() {
+        byte state = attestationExtensionState;
+        if (state != ATTESTATION_UNKNOWN) {
+            return state == ATTESTATION_PRESENT;
+        }
+
+        boolean present = scanAttestationExtension();
+        attestationExtensionState = present ? ATTESTATION_PRESENT : ATTESTATION_ABSENT;
+        return present;
+    }
+
+    private boolean scanAttestationExtension() {
         try {
             DerReader certReader = new DerReader(der, 0, der.length);
             DerReader certSeq = certReader.readConstructed(0x30); // Certificate SEQUENCE
