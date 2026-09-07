@@ -225,7 +225,7 @@ pub fn rewrite_certificate(
     })
 }
 
-const ANDROID_ATTESTATION_OID_BYTES: &[u8] =
+pub(crate) const ANDROID_ATTESTATION_OID_BYTES: &[u8] =
     &[0x2b, 0x06, 0x01, 0x04, 0x01, 0xd6, 0x79, 0x02, 0x01, 0x11];
 
 pub fn rewrite_certificate_prepared(
@@ -392,11 +392,11 @@ fn signature_algorithm_der(algorithm: SigningAlgorithm) -> &'static [u8] {
     }
 }
 
-fn parse_any(encoded: &[u8]) -> Result<AnyRef<'_>, Error> {
+pub(crate) fn parse_any(encoded: &[u8]) -> Result<AnyRef<'_>, Error> {
     X509Decode::from_der(encoded).map_err(|_| Error::InvalidCertificate)
 }
 
-fn split_tlvs(mut encoded: &[u8]) -> Result<Vec<&[u8]>, Error> {
+pub(crate) fn split_tlvs(mut encoded: &[u8]) -> Result<Vec<&[u8]>, Error> {
     let mut output = Vec::new();
     while !encoded.is_empty() {
         let (_, rest): (AnyRef<'_>, &[u8]) =

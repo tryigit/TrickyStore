@@ -59,12 +59,12 @@ public final class LazyX509Certificate extends X509Certificate {
         this(der, true);
     }
 
-    LazyX509Certificate(byte[] der, boolean copy) {
+    public LazyX509Certificate(byte[] der, boolean copy) {
         Objects.requireNonNull(der, "der");
         this.der = copy ? der.clone() : der;
     }
 
-    boolean hasAttestationExtension() {
+    public boolean hasAttestationExtension() {
         try {
             DerReader certReader = new DerReader(der, 0, der.length);
             DerReader certSeq = certReader.readConstructed(0x30); // Certificate SEQUENCE

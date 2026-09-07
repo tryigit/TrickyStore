@@ -1,9 +1,10 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
-use crate::{Error, ANDROID_ATTESTATION_OID, MAX_CERTIFICATE_DER_BYTES};
+use crate::{
+    parse_any, split_tlvs, Error, ANDROID_ATTESTATION_OID_BYTES, MAX_CERTIFICATE_DER_BYTES,
+};
 use attestation_der::asn1::AnyRef;
 use attestation_der::{Decode as AttestationDecode, Tag, Tagged};
 use cleverestricky_attestation_core::{inspect_captured_patch_levels, CapturedPatchLevels};
-use x509_cert::Certificate;
 
 const SOFTWARE_INDEX: usize = 6;
 const TEE_INDEX: usize = 7;
@@ -50,19 +51,51 @@ pub fn inspect_certificate(leaf_der: &[u8]) -> Result<CertificateInspection, Err
     if leaf_der.is_empty() || leaf_der.len() > MAX_CERTIFICATE_DER_BYTES {
         return Err(Error::Bounds);
     }
-    let leaf = Certificate::from_der(leaf_der).map_err(|_| Error::InvalidCertificate)?;
-    let extensions = leaf
-        .tbs_certificate()
-        .extensions()
-        .ok_or(Error::MissingAttestationExtension)?;
+    let cert_seq = parse_any(leaf_der)?;
+    if cert_seq.tag() != Tag::Sequence {
+        return Err(Error::InvalidCertificate);
+    }
+    let cert_fields = split_tlvs(cert_seq.value())?;
+    if cert_fields.len() < 3 {
+        return Err(Error::InvalidCertificate);
+    }
+
+    let tbs_seq = parse_any(cert_fields[0])?;
+    if tbs_seq.tag() != Tag::Sequence {
+        return Err(Error::InvalidCertificate);
+    }
+    let tbs_fields = split_tlvs(tbs_seq.value())?;
+    if tbs_fields.len() < 7 {
+        return Err(Error::InvalidCertificate);
+    }
+
+    let extensions_explicit = parse_any(tbs_fields.last().unwrap())?;
+    if !matches!(
+        extensions_explicit.tag(),
+        Tag::ContextSpecific {
+            constructed: true,
+            number
+        } if number.value() == 3
+    ) {
+        return Err(Error::MissingAttestationExtension);
+    }
+
+    let extensions_seq = parse_any(extensions_explicit.value())?;
+    let extensions = split_tlvs(extensions_seq.value())?;
+
     let mut attestation = None;
-    for extension in extensions {
-        if extension.extn_id == ANDROID_ATTESTATION_OID
-            && attestation
-                .replace(extension.extn_value.as_bytes())
-                .is_some()
-        {
-            return Err(Error::DuplicateAttestationExtension);
+    for ext_der in extensions {
+        let ext_seq = parse_any(ext_der)?;
+        let ext_fields = split_tlvs(ext_seq.value())?;
+        if ext_fields.is_empty() {
+            return Err(Error::InvalidCertificate);
+        }
+        let extn_id = parse_any(ext_fields[0])?;
+        if extn_id.value() == ANDROID_ATTESTATION_OID_BYTES {
+            let extn_value_any = parse_any(ext_fields.last().unwrap())?;
+            if attestation.replace(extn_value_any.value()).is_some() {
+                return Err(Error::DuplicateAttestationExtension);
+            }
         }
     }
     let extension_der = attestation.ok_or(Error::MissingAttestationExtension)?;
