@@ -1,7 +1,7 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../../NOTICE.
 use super::{
-    prune_stale_restore_transactions, refresh_restore_transaction, restore_transactions,
-    RestoreMutationLease, RestoreTransaction, RESTORE_TRANSACTION_TTL,
+    prune_stale_restore_transactions, restore_transactions, RestoreTransaction,
+    RESTORE_TRANSACTION_TTL,
 };
 use cleverestricky_service_core::secure_fs::TrustedDir;
 use std::collections::HashMap;
@@ -96,6 +96,7 @@ fn next_expiry_wait(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{refresh_restore_transaction, RestoreMutationLease};
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -178,7 +179,9 @@ mod tests {
         let token = "ffffffffffffffffffffffffffffffff";
         let stale_touch = Instant::now() - Duration::from_secs(60);
         {
-            let mut transactions = restore_transactions().lock().expect("restore registry lock");
+            let mut transactions = restore_transactions()
+                .lock()
+                .expect("restore registry lock");
             transactions.remove(token);
             transactions.insert(token.to_string(), transaction(stale_touch, true));
         }
@@ -190,8 +193,12 @@ mod tests {
         }));
         assert!(unwind.is_err());
 
-        let mut transactions = restore_transactions().lock().expect("restore registry lock");
-        let transaction = transactions.get(token).expect("transaction remains recoverable");
+        let mut transactions = restore_transactions()
+            .lock()
+            .expect("restore registry lock");
+        let transaction = transactions
+            .get(token)
+            .expect("transaction remains recoverable");
         assert!(!transaction.mutation_in_progress);
         assert!(transaction.touched >= before_unwind);
         transactions.remove(token);
@@ -206,7 +213,9 @@ mod tests {
         }));
         assert!(mutex.is_poisoned());
 
-        let poisoned = mutex.lock().expect_err("mutex should remain poisoned until recovery");
+        let poisoned = mutex
+            .lock()
+            .expect_err("mutex should remain poisoned until recovery");
         drop(recover_poison(&mutex, poisoned));
 
         assert!(!mutex.is_poisoned());
