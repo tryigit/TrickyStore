@@ -38,7 +38,9 @@ pub fn serve(mut stream: UnixStream, root: &TrustedDir) -> io::Result<()> {
     loop {
         let header = match read_header_bounded(&mut stream, MAX_REQUEST_BYTES) {
             Ok(header) => header,
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(crate::service_guard::clean_exit_error())
+            }
             Err(error) => return Err(error),
         };
         stream.read_exact(&mut request[..header.payload_len])?;
@@ -444,5 +446,15 @@ mod tests {
         let mut payload = vec![SCOPE_KEYBOX_DIRECTORY];
         payload.extend(std::iter::repeat_n(b'a', MAX_REQUEST_BYTES));
         assert!(open_requested_from(&root, &payload).is_err());
+    }
+
+    #[test]
+    fn peer_close_is_marked_as_expected_service_completion() {
+        let test = TestRoot::new();
+        let root = TrustedDir::open(&test.path).unwrap();
+        let (client, server) = UnixStream::pair().unwrap();
+        drop(client);
+
+        assert!(crate::service_guard::run(|| serve(server, &root)).is_ok());
     }
 }
