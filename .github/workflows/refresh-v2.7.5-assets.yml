@@ -88,22 +88,33 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
+          assets_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100")
           mapfile -t stale_zips < <(
-            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
-              --jq ".[] | select(.name | test(\"^CleveresTricky-V2\\.7\\.5-.*-release\\.zip$\")) | select(.name != \"${NEW_ZIP}\") | .name"
+            jq -r --arg new "$NEW_ZIP" '
+              .[]
+              | select(.name | startswith("CleveresTricky-V2.7.5-"))
+              | select(.name | endswith("-release.zip"))
+              | select(.name != $new)
+              | .name
+            ' <<<"$assets_json"
           )
           for asset in "${stale_zips[@]}"; do
             gh release delete-asset "$TAG" "$asset" --repo "$GITHUB_REPOSITORY" --yes
           done
 
-          names=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" --jq '.[].name')
+          assets_json=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100")
+          names=$(jq -r '.[].name' <<<"$assets_json")
           grep -Fx "$NEW_ZIP" <<<"$names" >/dev/null
           grep -Fx "$APK" <<<"$names" >/dev/null
           grep -Fx 'SHA256SUMS' <<<"$names" >/dev/null
-          if grep -E '^CleveresTricky-V2\.7\.5-.*-release\.zip$' <<<"$names" | grep -Fvx "$NEW_ZIP" >/dev/null; then
-            echo '::error::A stale V2.7.5 module ZIP remains on the release'
-            exit 1
-          fi
+          stale=$(jq -r --arg new "$NEW_ZIP" '
+            .[]
+            | select(.name | startswith("CleveresTricky-V2.7.5-"))
+            | select(.name | endswith("-release.zip"))
+            | select(.name != $new)
+            | .name
+          ' <<<"$assets_json")
+          test -z "$stale" || { echo "::error::A stale V2.7.5 module ZIP remains: $stale"; exit 1; }
 
       - name: Update update.json
         env:
