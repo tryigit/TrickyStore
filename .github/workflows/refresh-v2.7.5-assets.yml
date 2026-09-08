@@ -17,10 +17,11 @@ jobs:
     env:
       SOURCE_RUN: '34265010949'
       TAG: 'V2.7.5'
+      VERSION_CODE: '3938'
+      BUILD_HASH: 'f98d141d'
       MODULE_ARTIFACT: 'CleveresTricky-V2.7.5-3938-f98d141d-release.zip'
       NEW_ZIP: 'CleveresTricky-V2.7.5-3938-f98d141d-release.zip'
       APK: 'encryptor-app-release.apk'
-      UPDATE_REPO: 'tryigit/cleverestricky-update'
       UPDATE_FILE: 'update.json'
 
     steps:
@@ -116,20 +117,16 @@ jobs:
           ' <<<"$assets_json")
           test -z "$stale" || { echo "::error::A stale V2.7.5 module ZIP remains: $stale"; exit 1; }
 
-      - name: Update update.json
+      - name: Update update.json in this repository
         env:
-          GH_TOKEN: ${{ secrets.UPDATE_REPO_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          : "${GH_TOKEN:?UPDATE_REPO_TOKEN secret is required}"
           tmpdir=$(mktemp -d)
-          gh repo clone "$UPDATE_REPO" "$tmpdir/update-repo" -- --depth 1
-          cd "$tmpdir/update-repo"
-
-          ZIP_SHA=$(sha256sum "$GITHUB_WORKSPACE/release-assets/$NEW_ZIP" | awk '{print $1}')
-          APK_SHA=$(sha256sum "$GITHUB_WORKSPACE/release-assets/$APK" | awk '{print $1}')
-          export ZIP_SHA APK_SHA NEW_ZIP APK TAG SOURCE_REPOSITORY="$GITHUB_REPOSITORY"
+          gh repo clone "$GITHUB_REPOSITORY" "$tmpdir/repo" -- --depth 1 --branch "$GITHUB_REF_NAME"
+          cd "$tmpdir/repo"
+          export NEW_ZIP TAG VERSION_CODE BUILD_HASH SOURCE_REPOSITORY="$GITHUB_REPOSITORY"
 
           python - <<'PY'
           import json
@@ -139,18 +136,17 @@ jobs:
 
           path = Path(os.environ.get("UPDATE_FILE", "update.json"))
           data = json.loads(path.read_text())
-          base = (
+          data["version"] = f'{os.environ["TAG"]} ({os.environ["VERSION_CODE"]}-{os.environ["BUILD_HASH"]}-release)'
+          data["versionCode"] = int(os.environ["VERSION_CODE"])
+          data["zipUrl"] = (
               "https://github.com/"
               + os.environ["SOURCE_REPOSITORY"]
               + "/releases/download/"
               + quote(os.environ["TAG"], safe="")
               + "/"
+              + quote(os.environ["NEW_ZIP"], safe="")
           )
-          data["moduleUrl"] = base + quote(os.environ["NEW_ZIP"], safe="")
-          data["moduleSha256"] = os.environ["ZIP_SHA"]
-          data["encryptorUrl"] = base + quote(os.environ["APK"], safe="")
-          data["encryptorSha256"] = os.environ["APK_SHA"]
-          path.write_text(json.dumps(data, ensure_ascii=False, indent=4) + "\n")
+          path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
           PY
 
           git config user.name 'github-actions[bot]'
@@ -160,7 +156,7 @@ jobs:
             echo 'update.json is already current.'
           else
             git commit -m 'chore: refresh V2.7.5 update manifest'
-            git push
+            git push origin "HEAD:$GITHUB_REF_NAME"
           fi
 
       - name: Show published checksums
