@@ -25,7 +25,15 @@ pub(super) fn spawn_restore_janitor(root: Arc<TrustedDir>) -> io::Result<()> {
     thread::Builder::new()
         .name("ct-restore-gc".to_string())
         .stack_size(RESTORE_JANITOR_STACK_BYTES)
-        .spawn(move || run_restore_janitor(root))?;
+        .spawn(move || {
+            if let Err(error) = crate::service_guard::run(|| {
+                run_restore_janitor(root);
+                Ok(())
+            }) {
+                eprintln!("cleverestrickyd: restore janitor failed: {error}");
+                std::process::exit(1);
+            }
+        })?;
     Ok(())
 }
 
