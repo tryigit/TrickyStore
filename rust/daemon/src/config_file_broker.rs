@@ -665,9 +665,9 @@ impl<'a> RestoreTerminalLease<'a> {
                     "terminal restore transaction lease was not active",
                 ));
             }
-            transactions
-                .remove(self.token)
-                .ok_or_else(|| io::Error::other("terminal restore transaction disappeared during finalization"))?;
+            transactions.remove(self.token).ok_or_else(|| {
+                io::Error::other("terminal restore transaction disappeared during finalization")
+            })?;
             Ok(())
         })();
         match result {
@@ -831,9 +831,9 @@ fn stage_terminal_restore_transaction<'a>(
         .ok_or_else(|| invalid("restore transaction is not active"))?;
     ensure_transaction_idle(transaction)?;
     let placeholder = placeholder_transaction(transaction);
-    let transaction = transactions
-        .remove(token)
-        .ok_or_else(|| io::Error::other("restore transaction disappeared while registry was locked"))?;
+    let transaction = transactions.remove(token).ok_or_else(|| {
+        io::Error::other("restore transaction disappeared while registry was locked")
+    })?;
     transactions.insert(token.to_string(), placeholder);
     Ok(RestoreTerminalLease {
         token,
