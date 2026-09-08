@@ -393,14 +393,8 @@ internal class JvmSecureRestoreFileOperations(
     }
 
     private fun removeTransaction(token: String) {
-        val cleanupFailure = transactions.remove(token)?.let(::closeTransaction)
-        try {
-            signalExpiryJanitorLocked()
-        } catch (error: Throwable) {
-            cleanupFailure?.let { error.addSuppressed(it) }
-            throw error
-        }
-        cleanupFailure?.let { throw it }
+        transactions.remove(token)?.let(::closeTransaction)
+        signalExpiryJanitorLocked()
     }
 
     private fun closeTransaction(transaction: Transaction): Exception? {
