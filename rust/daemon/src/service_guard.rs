@@ -1,6 +1,30 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
+use std::error::Error;
+use std::fmt;
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+
+#[derive(Debug)]
+struct CleanServiceExit;
+
+impl fmt::Display for CleanServiceExit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("service completed after expected peer shutdown")
+    }
+}
+
+impl Error for CleanServiceExit {}
+
+pub(crate) fn clean_exit_error() -> io::Error {
+    io::Error::other(CleanServiceExit)
+}
+
+fn is_clean_exit(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<CleanServiceExit>())
+        .is_some()
+}
 
 pub(crate) fn run<F>(service: F) -> io::Result<()>
 where
@@ -8,17 +32,8 @@ where
 {
     match catch_unwind(AssertUnwindSafe(service)) {
         Ok(Ok(())) => Err(io::Error::other("service thread exited unexpectedly")),
+        Ok(Err(error)) if is_clean_exit(&error) => Ok(()),
         Ok(Err(error)) => Err(error),
-        Err(_) => Err(io::Error::other("service thread panicked")),
-    }
-}
-
-pub(crate) fn run_allow_clean_exit<F>(service: F) -> io::Result<()>
-where
-    F: FnOnce() -> io::Result<()>,
-{
-    match catch_unwind(AssertUnwindSafe(service)) {
-        Ok(result) => result,
         Err(_) => Err(io::Error::other("service thread panicked")),
     }
 }
@@ -61,15 +76,8 @@ mod tests {
     }
 
     #[test]
-    fn clean_exit_can_be_explicitly_allowed_for_bounded_services() {
-        assert!(run_allow_clean_exit(|| Ok(())).is_ok());
-        let error = run_allow_clean_exit(|| {
-            Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "transport failed",
-            ))
-        })
-        .expect_err("real service errors must still propagate");
-        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    fn explicitly_marked_peer_shutdown_is_clean_completion() {
+        assert!(run(|| Err(clean_exit_error())).is_ok());
+        assert!(run(|| Ok(())).is_err());
     }
 }
