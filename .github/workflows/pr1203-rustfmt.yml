@@ -1,0 +1,54 @@
+name: PR 1203 Rustfmt Fix
+
+on:
+  push:
+    branches:
+      - perf-zero-alloc-keystore
+
+permissions:
+  contents: write
+
+jobs:
+  rustfmt:
+    name: Format PR 1203 Rust
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: perf-zero-alloc-keystore
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Apply rustfmt and commit only the expected fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd rust
+          cargo fmt --all
+          cd ..
+
+          changed=$(git diff --name-only)
+          if [[ "$changed" != "rust/daemon/src/config_file_broker.rs" ]]; then
+            echo "::error::rustfmt changed unexpected files"
+            printf '%s\n' "$changed"
+            exit 1
+          fi
+
+          git add rust/daemon/src/config_file_broker.rs
+          git rm .github/workflows/pr1203-rustfmt.yml
+
+          staged=$(git diff --cached --name-only)
+          expected=$'.github/workflows/pr1203-rustfmt.yml\nrust/daemon/src/config_file_broker.rs'
+          if [[ "$staged" != "$expected" ]]; then
+            echo "::error::unexpected staged files"
+            printf '%s\n' "$staged"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "style: format restore broker"
+          git push origin HEAD:perf-zero-alloc-keystore
