@@ -180,6 +180,68 @@ mod fixture {
         leaf_with_ext(ext)
     }
 
+    pub(super) fn mismatched_signature_algorithm_leaf_der() -> Vec<u8> {
+        let genuine = Certificate::from_der(&genuine_leaf_der()).expect("genuine certificate");
+        let tbs = genuine.tbs_certificate().to_der().expect("TBS DER");
+        let outer_signature = genuine.signature().to_der().expect("signature DER");
+        let rsa_sha256_algorithm = [
+            0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b, 0x05,
+            0x00,
+        ];
+        x509_sequence([
+            tbs.as_slice(),
+            rsa_sha256_algorithm.as_slice(),
+            outer_signature.as_slice(),
+        ])
+    }
+
+    pub(super) fn misordered_unique_ids_leaf_der() -> Vec<u8> {
+        let mut der = genuine_leaf_der();
+        let issuer_uid = implicit_unique_id(1, 0xa0);
+        let subject_uid = implicit_unique_id(2, 0xb0);
+        assert_eq!(issuer_uid.len(), subject_uid.len());
+        let issuer_offset = der
+            .windows(issuer_uid.len())
+            .position(|window| window == issuer_uid.as_slice())
+            .expect("issuerUniqueID marker");
+        let subject_offset = der
+            .windows(subject_uid.len())
+            .position(|window| window == subject_uid.as_slice())
+            .expect("subjectUniqueID marker");
+        assert!(issuer_offset < subject_offset);
+        der[issuer_offset..issuer_offset + issuer_uid.len()].copy_from_slice(&subject_uid);
+        der[subject_offset..subject_offset + subject_uid.len()].copy_from_slice(&issuer_uid);
+        der
+    }
+
+    pub(super) fn v2_with_extensions_leaf_der() -> Vec<u8> {
+        let mut der = genuine_leaf_der();
+        let v3_marker = [0xa0, 0x03, 0x02, 0x01, 0x02];
+        let version_offset = der
+            .windows(v3_marker.len())
+            .position(|window| window == v3_marker)
+            .expect("v3 version marker");
+        der[version_offset + v3_marker.len() - 1] = 0x01;
+        der
+    }
+
+    pub(super) fn extra_outer_field_leaf_der() -> Vec<u8> {
+        let genuine = Certificate::from_der(&genuine_leaf_der()).expect("genuine certificate");
+        let tbs = genuine.tbs_certificate().to_der().expect("TBS DER");
+        let outer_algorithm = genuine
+            .signature_algorithm()
+            .to_der()
+            .expect("outer algorithm DER");
+        let outer_signature = genuine.signature().to_der().expect("signature DER");
+        let extra = 0i32.to_der().expect("extra DER");
+        x509_sequence([
+            tbs.as_slice(),
+            outer_algorithm.as_slice(),
+            outer_signature.as_slice(),
+            extra.as_slice(),
+        ])
+    }
+
     fn synthetic_leaf_with_ext(issuer: &Certificate, extension_der: Vec<u8>) -> Certificate {
         let issuer_tbs = issuer.tbs_certificate();
         let version = explicit_x509_tag(0, &2i32.to_der().expect("v3 DER"));
@@ -312,5 +374,37 @@ fn inspection_rejects_implicitly_tagged_root_of_trust() {
     assert_eq!(
         inspect_certificate(&fixture::implicit_root_leaf_der()).unwrap_err(),
         Error::AttestationRewrite
+    );
+}
+
+#[test]
+fn inspection_rejects_mismatched_certificate_signature_algorithm() {
+    assert_eq!(
+        inspect_certificate(&fixture::mismatched_signature_algorithm_leaf_der()).unwrap_err(),
+        Error::InvalidCertificate
+    );
+}
+
+#[test]
+fn inspection_rejects_misordered_unique_ids() {
+    assert_eq!(
+        inspect_certificate(&fixture::misordered_unique_ids_leaf_der()).unwrap_err(),
+        Error::InvalidCertificate
+    );
+}
+
+#[test]
+fn inspection_rejects_extensions_on_v2_certificate() {
+    assert_eq!(
+        inspect_certificate(&fixture::v2_with_extensions_leaf_der()).unwrap_err(),
+        Error::InvalidCertificate
+    );
+}
+
+#[test]
+fn inspection_rejects_extra_outer_certificate_fields() {
+    assert_eq!(
+        inspect_certificate(&fixture::extra_outer_field_leaf_der()).unwrap_err(),
+        Error::InvalidCertificate
     );
 }

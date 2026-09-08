@@ -182,8 +182,14 @@ fn run_fixture(xml: &[u8], algorithm: SigningAlgorithm) {
     );
     assert!(genuine.tbs_certificate().issuer_unique_id().is_some());
     assert!(genuine.tbs_certificate().subject_unique_id().is_some());
-    assert!(output.tbs_certificate().issuer_unique_id().is_none());
-    assert!(output.tbs_certificate().subject_unique_id().is_none());
+    assert_eq!(
+        output.tbs_certificate().issuer_unique_id(),
+        genuine.tbs_certificate().issuer_unique_id(),
+    );
+    assert_eq!(
+        output.tbs_certificate().subject_unique_id(),
+        genuine.tbs_certificate().subject_unique_id(),
+    );
     assert_eq!(
         output.tbs_certificate().issuer(),
         issuer.tbs_certificate().subject()

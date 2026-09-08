@@ -31,24 +31,26 @@ class StrongBoxBinderRoutingTest {
     }
 
     @Test
-    fun `StrongBox getKeyEntry does not exit before cache hashing`() {
+    fun `StrongBox getKeyEntry reaches raw cache before typed fallback`() {
         val source = source("KeystoreInterceptor.kt")
-        val metadataRead = source.indexOf("val metadata = response?.metadata")
+        val rawParse = source.indexOf("val parsed = Utils.parseKeyEntryResponseParcel(reply)")
         val levelGate =
             source.indexOf(
-                "metadata.keySecurityLevel != SecurityLevel.TRUSTED_ENVIRONMENT &&",
-                metadataRead,
+                "parsed.keySecurityLevel != SecurityLevel.TRUSTED_ENVIRONMENT &&",
+                rawParse,
             )
-        val cacheLookup = source.indexOf("CertHack.applyCachedCertificateChain(metadata)", levelGate)
-        val chainRead = source.indexOf("val originalChain = Utils.getCertificateChain(response)", cacheLookup)
+        val cacheLookup = source.indexOf("CertHack.applyCachedCertificateChain(reply, parsed)", levelGate)
+        val typedFallback = source.indexOf("val response = reply.readTypedObject", cacheLookup)
+        val chainRead = source.indexOf("val originalChain = Utils.getCertificateChain(response)", typedFallback)
         val gateBody = source.substring(levelGate, cacheLookup)
 
-        assertTrue(metadataRead >= 0)
-        assertTrue(levelGate > metadataRead)
+        assertTrue(rawParse >= 0)
+        assertTrue(levelGate > rawParse)
         assertTrue(cacheLookup > levelGate)
-        assertTrue(chainRead > cacheLookup)
+        assertTrue(typedFallback > cacheLookup)
+        assertTrue(chainRead > typedFallback)
         assertTrue(gateBody.contains("return Skip"))
-        assertTrue(gateBody.contains("metadata.keySecurityLevel != SecurityLevel.STRONGBOX"))
+        assertTrue(gateBody.contains("parsed.keySecurityLevel != SecurityLevel.STRONGBOX"))
     }
 
     @Test

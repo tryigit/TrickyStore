@@ -66,15 +66,51 @@ class SecurityLevelInterceptor : BinderInterceptor() {
 
         return try {
             reply.readException()
+
+            // Fast parcel check: parse just the byte offsets without allocating the full KeyMetadata.
+            val parsed = Utils.parseKeyMetadataParcel(reply)
+            if (parsed != null) {
+                val originalLeaf = cleveres.tricky.cleverestech.keystore.LazyX509Certificate(parsed.leafEncoded, false)
+                if (!Utils.hasAndroidAttestationExtension(originalLeaf)) {
+                    return Skip
+                }
+
+                val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
+                val rewritten =
+                    CertHack.hackCertificateChain(
+                        originalLeafOnly,
+                        callingUid,
+                        true,
+                    )
+                if (rewritten === originalLeafOnly) {
+                    return Skip
+                }
+
+                // hackCertificateChain publishes the completed rewrite bytes in its epoch-protected
+                // cache before returning. Reuse those exact bytes here instead of calling getEncoded()
+                // on the rewritten leaf and DER-encoding the issuer chain a second time. A state/epoch
+                // race can legitimately prevent publication, so retain the allocation-heavy fallback.
+                if (
+                    CertHack.applyCachedCertificateChain(reply, parsed) ==
+                        CertHack.CachedParcelAction.REWRITTEN
+                ) {
+                    return OverrideReply(code = 0, reply = reply)
+                }
+
+                val newLeaf = rewritten[0].encoded
+                val newChain = Utils.encodeIssuerChain(rewritten)
+                if (!Utils.rewriteKeyMetadataParcel(reply, parsed, newLeaf, newChain)) {
+                    return Skip
+                }
+                return OverrideReply(code = 0, reply = reply)
+            }
+
+            // Contract-compliant fallback for non-standard parcels or test mocks.
             val metadata = reply.readTypedObject(KeyMetadata.CREATOR) ?: return Skip
             if (!Utils.isCertificateChainRewriteCandidate(metadata) && !Utils.hasRewritableLeafCertificate(metadata)) {
                 return Skip
             }
 
-            // Parse only the leaf first. A normal asymmetric key without an Android attestation
-            // challenge still has a self-signed X.509 leaf, but it must never cross the Rust
-            // certificate backend boundary. Preserving this zero-backend fast path avoids
-            // a measurable non-attested-only UDS/parser cost.
             val originalLeaf = Utils.getLeafCertificate(metadata)
             if (
                 originalLeaf == null ||
@@ -83,16 +119,13 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 return Skip
             }
 
-            // A successful TEE or StrongBox attestation rewrite discards Android's genuine issuer chain and
-            // replaces it with the selected keybox chain. Parsing every genuine issuer first
-            // therefore adds work only to attested generateKey calls. Keep the hot path leaf-only
-            // until CertHack confirms that a replacement can actually be produced.
             val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
-            val rewritten = CertHack.hackCertificateChain(
-                originalLeafOnly,
-                callingUid,
-                true,
-            )
+            val rewritten =
+                CertHack.hackCertificateChain(
+                    originalLeafOnly,
+                    callingUid,
+                    true,
+                )
             if (rewritten === originalLeafOnly) {
                 return Skip
             }

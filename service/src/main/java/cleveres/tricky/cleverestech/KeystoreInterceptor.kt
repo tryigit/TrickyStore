@@ -83,6 +83,35 @@ object KeystoreInterceptor : BinderInterceptor() {
             return Skip
         }
         try {
+            // Duck Detector measures repeated service.getKeyEntry calls, not generateKey. Read only
+            // the stable-AIDL offsets and genuine leaf bytes on that path. A cache hit rewrites the
+            // existing reply in place, avoiding the KeyEntryResponse/KeyMetadata object graph and
+            // the second Parcel that made attested reads observably slower than non-attested reads.
+            val parsed = Utils.parseKeyEntryResponseParcel(reply)
+            if (parsed != null) {
+                if (
+                    parsed.keySecurityLevel != SecurityLevel.TRUSTED_ENVIRONMENT &&
+                    parsed.keySecurityLevel != SecurityLevel.STRONGBOX
+                ) {
+                    return Skip
+                }
+
+                when (CertHack.applyCachedCertificateChain(reply, parsed)) {
+                    CertHack.CachedParcelAction.REWRITTEN ->
+                        return OverrideReply(code = 0, reply = reply)
+                    CertHack.CachedParcelAction.PASSTHROUGH -> return Skip
+                    CertHack.CachedParcelAction.MISS -> Unit
+                }
+
+                // Leaf-only entries must preserve their caller-selected issuer contract. A full
+                // chain cache miss may still need the compatibility fallback below, but only for a
+                // targeted caller. POST is emitted only after PRE accepted this transaction.
+                if (parsed.hasLeafOnlyCertificate() || !Config.needHack(callingUid)) {
+                    return Skip
+                }
+            }
+
+            // Compatibility fallback for a non-standard parcel or an uncached full chain.
             val response = reply.readTypedObject(KeyEntryResponse.CREATOR)
             val metadata = response?.metadata ?: return Skip
 
@@ -104,12 +133,8 @@ object KeystoreInterceptor : BinderInterceptor() {
             val targeted = Config.needHack(callingUid)
             val mayReadGrantedChain = callingUid >= FIRST_APPLICATION_UID
 
-            // Post-processing timing probes create the keys once and then measure repeated
-            // service.getKeyEntry calls. generateKey has already populated CertHack's replacement
-            // cache for an attested key, so try the genuine raw leaf DER before constructing any
-            // X509Certificate objects. A hit assigns the already-encoded replacement leaf/issuers
-            // directly to KeyMetadata and avoids CertificateFactory, Certificate[] allocation,
-            // getEncoded(), issuer parsing and every Rust backend operation on the measured path.
+            // A non-standard parcel cannot use the raw fast path, but it may still carry a cacheable
+            // platform KeyMetadata object. Keep this path contract-compatible for vendor variants.
             if (
                 (targeted || mayReadGrantedChain) &&
                 CertHack.applyCachedCertificateChain(metadata)

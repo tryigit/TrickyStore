@@ -23,6 +23,9 @@ public final class Utils {
     private static final int MAX_CERTIFICATE_BYTES = 64 * 1024;
     private static final int MAX_CHAIN_BYTES = 512 * 1024;
     private static final int MAX_CERTIFICATES = 16;
+    private static final int MAX_AUTHORIZATIONS = 256;
+    private static final int MAX_REWRITTEN_PARCEL_BYTES = 8 * 1024 * 1024;
+    private static final int MAX_RETAINED_SCRATCH_PARCEL_BYTES = 64 * 1024;
 
     private static final ThreadLocal<CertificateFactory> CERTIFICATE_FACTORY =
             new ThreadLocal<CertificateFactory>() {
@@ -73,20 +76,38 @@ public final class Utils {
     }
 
     private static boolean skipStableParcelableBody(Parcel request) {
-        if (request.dataAvail() < Integer.BYTES) {
-            return false;
-        }
-        int parcelableStart = request.dataPosition();
-        int parcelableSize = request.readInt();
-        if (parcelableSize < Integer.BYTES ||
-                parcelableStart > Integer.MAX_VALUE - parcelableSize) {
-            return false;
-        }
+        return skipStableParcelableBody(request, request.dataSize());
+    }
 
-        int parcelableEnd = parcelableStart + parcelableSize;
-        if (parcelableEnd > request.dataSize()) return false;
+    private static boolean skipStableParcelableBody(Parcel request, int enclosingEnd) {
+        int parcelableEnd = readStableParcelableEnd(request, enclosingEnd);
+        if (parcelableEnd < 0) return false;
         request.setDataPosition(parcelableEnd);
         return true;
+    }
+
+    private static int readStableParcelableEnd(Parcel parcel, int enclosingEnd) {
+        if (!hasBytes(parcel, enclosingEnd, Integer.BYTES)) return -1;
+        int parcelableStart = parcel.dataPosition();
+        int parcelableSize = parcel.readInt();
+        if (parcelableSize < Integer.BYTES ||
+                parcelableStart > Integer.MAX_VALUE - parcelableSize) {
+            return -1;
+        }
+        int parcelableEnd = parcelableStart + parcelableSize;
+        return parcelableEnd <= enclosingEnd && parcelableEnd <= parcel.dataSize()
+                ? parcelableEnd
+                : -1;
+    }
+
+    private static boolean hasBytes(Parcel parcel, int end, int byteCount) {
+        int position = parcel.dataPosition();
+        return byteCount >= 0 && position >= 0 && position <= end && byteCount <= end - position;
+    }
+
+    private static int paddedByteCount(int byteCount) {
+        if (byteCount < 0 || byteCount > Integer.MAX_VALUE - 3) return -1;
+        return (byteCount + 3) & ~3;
     }
 
     /**
@@ -134,6 +155,254 @@ public final class Utils {
                     new ByteArrayInputStream(encoded));
         } catch (CertificateException | ClassCastException error) {
             return null;
+        }
+    }
+
+    public static final class ParcelParseResult {
+        public final byte[] leafEncoded;
+        public final int keySecurityLevel;
+        public final int chainLength;
+        public final int certOffset;
+        public final int chainOffset;
+        public final int afterChainOffset;
+        public final int metadataStart;
+        public final int metadataSize;
+        public final int outerParcelableStart;
+        public final int outerParcelableSize;
+        public final int sourceDataSize;
+        public final int oldCertPaddedLen;
+        public final int oldChainPaddedLen;
+
+        private ParcelParseResult(
+                byte[] leafEncoded,
+                int keySecurityLevel,
+                int chainLength,
+                int certOffset,
+                int chainOffset,
+                int afterChainOffset,
+                int metadataStart,
+                int metadataSize,
+                int outerParcelableStart,
+                int outerParcelableSize,
+                int sourceDataSize,
+                int oldCertPaddedLen,
+                int oldChainPaddedLen
+        ) {
+            this.leafEncoded = leafEncoded;
+            this.keySecurityLevel = keySecurityLevel;
+            this.chainLength = chainLength;
+            this.certOffset = certOffset;
+            this.chainOffset = chainOffset;
+            this.afterChainOffset = afterChainOffset;
+            this.metadataStart = metadataStart;
+            this.metadataSize = metadataSize;
+            this.outerParcelableStart = outerParcelableStart;
+            this.outerParcelableSize = outerParcelableSize;
+            this.sourceDataSize = sourceDataSize;
+            this.oldCertPaddedLen = oldCertPaddedLen;
+            this.oldChainPaddedLen = oldChainPaddedLen;
+        }
+
+        public boolean hasFullCertificateChain() {
+            return chainLength > 0;
+        }
+
+        public boolean hasLeafOnlyCertificate() {
+            return chainLength == -1 || chainLength == 0;
+        }
+    }
+
+    public static ParcelParseResult parseKeyMetadataParcel(Parcel reply) {
+        if (reply == null) return null;
+        int posBefore = reply.dataPosition();
+        try {
+            return parseKeyMetadataParcel(reply, reply.dataSize(), -1, 0);
+        } catch (RuntimeException e) {
+            return null;
+        } finally {
+            reply.setDataPosition(posBefore);
+        }
+    }
+
+    /** Parses KeyEntryResponse's stable-AIDL envelope without constructing its object graph. */
+    public static ParcelParseResult parseKeyEntryResponseParcel(Parcel reply) {
+        if (reply == null) return null;
+        int posBefore = reply.dataPosition();
+        try {
+            if (!hasBytes(reply, reply.dataSize(), Integer.BYTES) || reply.readInt() != 1) {
+                return null;
+            }
+            int responseStart = reply.dataPosition();
+            int responseEnd = readStableParcelableEnd(reply, reply.dataSize());
+            if (responseEnd < 0) return null;
+
+            if (!hasBytes(reply, responseEnd, Integer.BYTES)) return null;
+            reply.readStrongBinder();
+            if (reply.dataPosition() > responseEnd) return null;
+
+            return parseKeyMetadataParcel(
+                    reply,
+                    responseEnd,
+                    responseStart,
+                    responseEnd - responseStart
+            );
+        } catch (RuntimeException e) {
+            return null;
+        } finally {
+            reply.setDataPosition(posBefore);
+        }
+    }
+
+    private static ParcelParseResult parseKeyMetadataParcel(
+            Parcel reply,
+            int enclosingEnd,
+            int outerParcelableStart,
+            int outerParcelableSize
+    ) {
+        if (!hasBytes(reply, enclosingEnd, Integer.BYTES) || reply.readInt() != 1) {
+            return null;
+        }
+        int metadataStart = reply.dataPosition();
+        int metadataEnd = readStableParcelableEnd(reply, enclosingEnd);
+        if (metadataEnd < 0) return null;
+
+        if (!hasBytes(reply, metadataEnd, Integer.BYTES)) return null;
+        int keyPresence = reply.readInt();
+        if (keyPresence == 1) {
+            if (!skipStableParcelableBody(reply, metadataEnd)) return null;
+        } else if (keyPresence != 0) {
+            return null;
+        }
+
+        if (!hasBytes(reply, metadataEnd, Integer.BYTES)) return null;
+        int keySecurityLevel = reply.readInt();
+
+        if (!hasBytes(reply, metadataEnd, Integer.BYTES)) return null;
+        int authorizationCount = reply.readInt();
+        if (authorizationCount < -1 || authorizationCount > MAX_AUTHORIZATIONS) return null;
+        for (int index = 0; index < authorizationCount; index++) {
+            if (!hasBytes(reply, metadataEnd, Integer.BYTES)) return null;
+            int authorizationPresence = reply.readInt();
+            if (authorizationPresence == 1) {
+                if (!skipStableParcelableBody(reply, metadataEnd)) return null;
+            } else if (authorizationPresence != 0) {
+                return null;
+            }
+        }
+
+        if (!hasBytes(reply, metadataEnd, Integer.BYTES)) return null;
+        int certOffset = reply.dataPosition();
+        int leafLength = reply.readInt();
+        int leafPaddedLength = paddedByteCount(leafLength);
+        if (leafLength <= 0 || leafLength > MAX_CERTIFICATE_BYTES ||
+                leafPaddedLength < 0 || !hasBytes(reply, metadataEnd, leafPaddedLength)) {
+            return null;
+        }
+        int afterLeafOffset = reply.dataPosition() + leafPaddedLength;
+        reply.setDataPosition(certOffset);
+        byte[] leafEncoded = reply.createByteArray();
+        if (leafEncoded == null || leafEncoded.length != leafLength ||
+                reply.dataPosition() != afterLeafOffset) {
+            return null;
+        }
+
+        if (!hasBytes(reply, metadataEnd, Integer.BYTES)) return null;
+        int chainOffset = reply.dataPosition();
+        int chainLength = reply.readInt();
+        if (chainLength < -1 || chainLength > MAX_CHAIN_BYTES) return null;
+        int chainPaddedLength = chainLength < 0 ? 0 : paddedByteCount(chainLength);
+        if (chainPaddedLength < 0 || !hasBytes(reply, metadataEnd, chainPaddedLength)) {
+            return null;
+        }
+        int afterChainOffset = reply.dataPosition() + chainPaddedLength;
+        reply.setDataPosition(afterChainOffset);
+
+        return new ParcelParseResult(
+                leafEncoded,
+                keySecurityLevel,
+                chainLength,
+                certOffset,
+                chainOffset,
+                afterChainOffset,
+                metadataStart,
+                metadataEnd - metadataStart,
+                outerParcelableStart,
+                outerParcelableSize,
+                reply.dataSize(),
+                afterLeafOffset - certOffset,
+                afterChainOffset - chainOffset
+        );
+    }
+
+    private static final ThreadLocal<Parcel> SCRATCH_PARCEL = ThreadLocal.withInitial(Parcel::obtain);
+
+    public static boolean rewriteKeyMetadataParcel(
+            Parcel reply,
+            ParcelParseResult parsed,
+            byte[] newLeaf,
+            byte[] newChain
+    ) {
+        if (reply == null || parsed == null || newLeaf == null || newChain == null ||
+                newLeaf.length == 0 || newLeaf.length > MAX_CERTIFICATE_BYTES ||
+                newChain.length > MAX_CHAIN_BYTES ||
+                reply.dataSize() != parsed.sourceDataSize ||
+                parsed.metadataStart < 0 || parsed.certOffset < parsed.metadataStart ||
+                parsed.chainOffset < parsed.certOffset ||
+                parsed.afterChainOffset < parsed.chainOffset ||
+                parsed.afterChainOffset > parsed.sourceDataSize) {
+            return false;
+        }
+
+        int newCertPaddedLen = Integer.BYTES + paddedByteCount(newLeaf.length);
+        int newChainPaddedLen = Integer.BYTES + paddedByteCount(newChain.length);
+        long sizeDiff = (long) newCertPaddedLen + newChainPaddedLen -
+                parsed.oldCertPaddedLen - parsed.oldChainPaddedLen;
+        long newMetadataSize = (long) parsed.metadataSize + sizeDiff;
+        long newOuterParcelableSize = (long) parsed.outerParcelableSize + sizeDiff;
+        long newReplySize = (long) parsed.sourceDataSize + sizeDiff;
+        if (newMetadataSize < Integer.BYTES || newMetadataSize > Integer.MAX_VALUE ||
+                (parsed.outerParcelableStart >= 0 &&
+                        (newOuterParcelableSize < Integer.BYTES ||
+                                newOuterParcelableSize > Integer.MAX_VALUE)) ||
+                newReplySize < 0 || newReplySize > MAX_REWRITTEN_PARCEL_BYTES) {
+            return false;
+        }
+
+        Parcel scratch = SCRATCH_PARCEL.get();
+        scratch.setDataSize(0);
+        scratch.setDataPosition(0);
+        try {
+            scratch.appendFrom(reply, 0, parsed.certOffset);
+            scratch.writeByteArray(newLeaf);
+            scratch.writeByteArray(newChain);
+
+            int remaining = reply.dataSize() - parsed.afterChainOffset;
+            if (remaining > 0) {
+                scratch.appendFrom(reply, parsed.afterChainOffset, remaining);
+            }
+            if (scratch.dataSize() != (int) newReplySize) return false;
+
+            scratch.setDataPosition(parsed.metadataStart);
+            scratch.writeInt((int) newMetadataSize);
+            if (parsed.outerParcelableStart >= 0) {
+                scratch.setDataPosition(parsed.outerParcelableStart);
+                scratch.writeInt((int) newOuterParcelableSize);
+            }
+
+            reply.setDataSize(0);
+            reply.setDataPosition(0);
+            reply.appendFrom(scratch, 0, scratch.dataSize());
+            reply.setDataPosition(0);
+            return true;
+        } finally {
+            scratch.setDataSize(0);
+            scratch.setDataPosition(0);
+            // Native Parcel capacity only grows; setDataSize(0) releases Binder objects but does
+            // not shrink an owned data buffer. Do not pin an exceptional reply on every thread.
+            if (scratch.dataCapacity() > MAX_RETAINED_SCRATCH_PARCEL_BYTES) {
+                scratch.recycle();
+                SCRATCH_PARCEL.remove();
+            }
         }
     }
 
@@ -194,7 +463,7 @@ public final class Utils {
                 metadata.certificate.length > MAX_CERTIFICATE_BYTES) {
             return null;
         }
-        return new LazyX509Certificate(metadata.certificate);
+        return new LazyX509Certificate(metadata.certificate, false);
     }
 
     public static Certificate[] getCertificateChain(KeyEntryResponse response) {
@@ -220,7 +489,7 @@ public final class Utils {
         return chain;
     }
 
-    static byte[] encodeIssuerChain(Certificate[] chain) throws CertificateException {
+    public static byte[] encodeIssuerChain(Certificate[] chain) throws CertificateException {
         if (chain.length <= 1) return new byte[0];
 
         FastByteArrayOutputStream output = new FastByteArrayOutputStream(2048);

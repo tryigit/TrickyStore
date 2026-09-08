@@ -1,5 +1,6 @@
 package cleveres.tricky.cleverestech.keystore;
 
+import android.os.Parcel;
 import android.security.keystore.KeyProperties;
 import android.system.keystore2.KeyMetadata;
 
@@ -59,14 +60,12 @@ public final class CertHack {
     private static final class PreparedKeyBox {
         final String signatureAlgorithm;
         final Certificate[] issuerChain;
-        final byte[] encodedIssuerChain;
 
         PreparedKeyBox(KeyBox keybox) throws Exception {
             if (keybox.certificates.isEmpty()) throw new IOException("Keybox has no certificates");
             this.signatureAlgorithm = signatureAlgorithmForKeybox(keybox);
             if (this.signatureAlgorithm == null) throw new IOException("Unsupported keybox algorithm");
             this.issuerChain = keybox.certificates.toArray(new Certificate[0]);
-            this.encodedIssuerChain = encodeKeyboxIssuers(this.issuerChain);
             if (!BACKEND_KEY_FORMAT.equals(keybox.keyPair.getPrivate().getFormat())) {
                 throw new IOException("Production keybox does not use an opaque backend key handle");
             }
@@ -115,6 +114,7 @@ public final class CertHack {
         final byte[] issuerChainEncoded;
         final boolean passthrough;
         final boolean leafOnlySafe;
+        final boolean accountIssuerChainBytes;
 
         CachedCertificateChain(
                 Certificate[] certificates,
@@ -122,11 +122,22 @@ public final class CertHack {
                 byte[] issuerChainEncoded,
                 boolean leafOnlySafe
         ) {
+            this(certificates, leafEncoded, issuerChainEncoded, leafOnlySafe, false);
+        }
+
+        CachedCertificateChain(
+                Certificate[] certificates,
+                byte[] leafEncoded,
+                byte[] issuerChainEncoded,
+                boolean leafOnlySafe,
+                boolean accountIssuerChainBytes
+        ) {
             this.certificates = certificates.clone();
             this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded");
             this.issuerChainEncoded = Objects.requireNonNull(issuerChainEncoded, "issuerChainEncoded");
             this.passthrough = false;
             this.leafOnlySafe = leafOnlySafe;
+            this.accountIssuerChainBytes = accountIssuerChainBytes;
         }
 
         private CachedCertificateChain() {
@@ -135,6 +146,7 @@ public final class CertHack {
             this.issuerChainEncoded = null;
             this.passthrough = true;
             this.leafOnlySafe = true; // Passthrough is always safe for leaves (it does nothing)
+            this.accountIssuerChainBytes = false;
         }
 
         static CachedCertificateChain passthrough() {
@@ -147,7 +159,11 @@ public final class CertHack {
 
         int retainedBytes() {
             if (passthrough) return 0;
-            return leafEncoded != null ? leafEncoded.length : 0;
+            int bytes = leafEncoded != null ? leafEncoded.length : 0;
+            if (accountIssuerChainBytes && issuerChainEncoded != null) {
+                bytes += issuerChainEncoded.length;
+            }
+            return bytes;
         }
 
         void applyTo(KeyMetadata metadata) {
@@ -174,6 +190,7 @@ public final class CertHack {
         final List<KeyBox> globalStrongBoxEc;
         final List<KeyBox> globalStrongBoxRsa;
 
+        final PreparedIssuerChainCache preparedIssuerChains;
         final CertificateCache certificateCache;
         volatile Object certificateCacheEpoch;
 
@@ -258,25 +275,22 @@ public final class CertHack {
             this.globalStrongBoxEc = List.copyOf(sbEc);
             this.globalStrongBoxRsa = List.copyOf(sbRsa);
 
+            this.preparedIssuerChains = new PreparedIssuerChainCache();
             this.certificateCache = new CertificateCache();
             this.certificateCacheEpoch = new Object();
         }
 
+        byte[] encodedIssuerChain(PreparedKeyBox prepared) throws CertificateException {
+            return preparedIssuerChains.getOrEncode(prepared);
+        }
+
         private static Map<KeyBox, PreparedKeyBox> prepareKeyboxesForState(Map<String, List<KeyBox>> keyboxes) {
             Map<KeyBox, PreparedKeyBox> prepared = new IdentityHashMap<>();
-            int totalIssuerBytes = 0;
             for (List<KeyBox> list : keyboxes.values()) {
                 for (KeyBox keybox : list) {
                     if (prepared.containsKey(keybox)) continue;
                     try {
-                        PreparedKeyBox pk = new PreparedKeyBox(keybox);
-                        int chainLen = pk.encodedIssuerChain != null ? pk.encodedIssuerChain.length : 0;
-                        if (totalIssuerBytes + chainLen > MAX_PREPARED_ISSUER_CHAIN_BYTES) {
-                            Logger.e("Prepared issuer chain budget exceeded, skipping keybox: " + keybox.filename);
-                            continue;
-                        }
-                        totalIssuerBytes += chainLen;
-                        prepared.put(keybox, pk);
+                        prepared.put(keybox, new PreparedKeyBox(keybox));
                     } catch (Exception error) {
                         Logger.e("Could not prepare opaque keybox metadata", error);
                     }
@@ -321,6 +335,42 @@ public final class CertHack {
             Map<String, List<KeyBox>> copy = new HashMap<>();
             source.forEach((key, value) -> copy.put(key, List.copyOf(value)));
             return Map.copyOf(copy);
+        }
+
+        @SuppressWarnings("serial")
+        static final class PreparedIssuerChainCache extends LinkedHashMap<PreparedKeyBox, byte[]> {
+            private static final long serialVersionUID = 1L;
+            private int retainedBytes = 0;
+
+            PreparedIssuerChainCache() {
+                super(8, 0.75f, true);
+            }
+
+            synchronized byte[] getOrEncode(PreparedKeyBox prepared) throws CertificateException {
+                byte[] cached = super.get(prepared);
+                if (cached != null) return cached;
+
+                byte[] encoded = PreparedKeyBox.encodeKeyboxIssuers(prepared.issuerChain);
+                super.put(prepared, encoded);
+                retainedBytes += encoded.length;
+                trimLocked();
+                return encoded;
+            }
+
+            synchronized int retainedBytes() {
+                return retainedBytes;
+            }
+
+            private void trimLocked() {
+                Iterator<Map.Entry<PreparedKeyBox, byte[]>> it = entrySet().iterator();
+                while (it.hasNext() && retainedBytes > MAX_PREPARED_ISSUER_CHAIN_BYTES) {
+                    Map.Entry<PreparedKeyBox, byte[]> entry = it.next();
+                    byte[] bytes = entry.getValue();
+                    retainedBytes -= bytes != null ? bytes.length : 0;
+                    if (retainedBytes < 0) retainedBytes = 0;
+                    it.remove();
+                }
+            }
         }
 
         @SuppressWarnings("serial")
@@ -592,7 +642,6 @@ public final class CertHack {
         return level != null ? level : "Unknown";
     }
 
-
     public static int getKeyboxCount() {
         if (!KeyboxLoader.isActiveSetHealthy()) {
             throw new IllegalStateException("Rust keybox backend activation is unavailable");
@@ -663,6 +712,10 @@ public final class CertHack {
         return count;
     }
 
+    static int getPreparedIssuerChainRetainedBytesForTesting() {
+        return state.preparedIssuerChains.retainedBytes();
+    }
+
     /**
      * JVM-unit-test compatibility seam. The managed/BC parser is physically present only in
      * src/test; release builds have no such class and therefore cannot execute a managed parser.
@@ -680,7 +733,6 @@ public final class CertHack {
         }
     }
 
-
     public static synchronized void setKeyboxes(List<KeyBox> boxes) {
         if (boxes == null || boxes.isEmpty()) {
             Logger.i("clear all keyboxes");
@@ -692,7 +744,6 @@ public final class CertHack {
         Map<KeyBox, PreparedKeyBox> preparedMap = new IdentityHashMap<>();
         Map<KeyBox, KeyboxSecurityLevel> classificationMap = new IdentityHashMap<>();
         Set<String> uniqueCanonicalFiles = new HashSet<>();
-        int totalIssuerBytes = 0;
 
         for (KeyBox box : boxes) {
             String algo = normalizeAlgorithm(box.keyPair.getPublic().getAlgorithm());
@@ -707,12 +758,6 @@ public final class CertHack {
                 Logger.e("Ignoring keybox without a valid opaque backend handle", error);
                 continue;
             }
-            int chainLen = prepared.encodedIssuerChain != null ? prepared.encodedIssuerChain.length : 0;
-            if (totalIssuerBytes + chainLen > MAX_PREPARED_ISSUER_CHAIN_BYTES) {
-                Logger.e("Prepared issuer chain budget exceeded, skipping keybox: " + box.filename);
-                continue;
-            }
-            totalIssuerBytes += chainLen;
             preparedMap.put(box, prepared);
             KeyboxSecurityLevel level = classifyKeyboxSecurityLevel(box);
             classificationMap.put(box, level);
@@ -774,13 +819,51 @@ public final class CertHack {
             cached = currentState.certificateCache.get(new CacheKey(metadata.certificate));
         }
         if (cached == null) return false;
-        
+
         if (isLeafOnly && !cached.leafOnlySafe) {
             return false;
         }
 
         cached.applyTo(metadata);
         return true;
+    }
+
+    public enum CachedParcelAction {
+        MISS,
+        PASSTHROUGH,
+        REWRITTEN
+    }
+
+    /**
+     * Applies a cache hit directly to the stable-AIDL reply bytes. This is the measured
+     * getKeyEntry path, so it must not instantiate KeyEntryResponse, KeyMetadata, their
+     * authorization graph, or a second reply Parcel.
+     */
+    public static CachedParcelAction applyCachedCertificateChain(
+            Parcel reply,
+            Utils.ParcelParseResult parsed
+    ) {
+        if (reply == null || parsed == null ||
+                (!parsed.hasFullCertificateChain() && !parsed.hasLeafOnlyCertificate())) {
+            return CachedParcelAction.MISS;
+        }
+
+        State currentState = state;
+        CachedCertificateChain cached;
+        synchronized (currentState.certificateCache) {
+            cached = currentState.certificateCache.get(new CacheKey(parsed.leafEncoded));
+        }
+        if (cached == null || (parsed.hasLeafOnlyCertificate() && !cached.leafOnlySafe)) {
+            return CachedParcelAction.MISS;
+        }
+        if (cached.passthrough) return CachedParcelAction.PASSTHROUGH;
+
+        return Utils.rewriteKeyMetadataParcel(
+                reply,
+                parsed,
+                cached.leafEncoded,
+                cached.issuerChainEncoded
+        ) ? CachedParcelAction.REWRITTEN : CachedParcelAction.MISS;
     }
 
     public static Certificate[] getCachedCertificateChain(Certificate[] caList) {
@@ -957,12 +1040,18 @@ public final class CertHack {
             if (rewrittenDer == null || rewrittenDer.length == 0 || rewrittenDer.length > MAX_LEAF_CERTIFICATE_BYTES) {
                 return caList;
             }
+            byte[] encodedIssuerChain = currentState.encodedIssuerChain(prepared);
             Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer, false);
             Certificate[] result = new Certificate[prepared.issuerChain.length + 1];
             result[0] = rewrittenLeaf;
             System.arraycopy(prepared.issuerChain, 0, result, 1, prepared.issuerChain.length);
-            CachedCertificateChain completed =
-                    new CachedCertificateChain(result, rewrittenDer, prepared.encodedIssuerChain, leafOnlySafe);
+            CachedCertificateChain completed = new CachedCertificateChain(
+                    result,
+                    rewrittenDer,
+                    encodedIssuerChain,
+                    leafOnlySafe,
+                    true
+            );
             synchronized (cache) {
                 if (state != currentState || currentState.certificateCacheEpoch != cacheEpoch) {
                     return result;
@@ -989,7 +1078,6 @@ public final class CertHack {
                 new Config.AttestationPatchComponent(Config.PatchDisposition.KEEP, 0);
         return new Config.AttestationPatchLevels(keep, keep, keep);
     }
-
 
     private static Map<Integer, byte[]> presentIdOverrides(int uid, int mask) {
         if (mask == 0) return Collections.emptyMap();
@@ -1049,7 +1137,6 @@ public final class CertHack {
         return filterKeyboxesByAlgorithm(candidates, KeyProperties.KEY_ALGORITHM_RSA);
     }
 
-
     private static String signatureAlgorithmForKeybox(KeyBox keybox) {
         String algorithm = normalizeAlgorithm(keybox.keyPair.getPrivate().getAlgorithm());
         if (KeyProperties.KEY_ALGORITHM_EC.equals(algorithm)) return "SHA256withECDSA";
@@ -1062,7 +1149,9 @@ public final class CertHack {
         if (algorithm.equalsIgnoreCase("EC") || algorithm.equalsIgnoreCase("ECDSA")) {
             return KeyProperties.KEY_ALGORITHM_EC;
         }
-        if (algorithm.equalsIgnoreCase("RSA")) return KeyProperties.KEY_ALGORITHM_RSA;
+        if (algorithm.equalsIgnoreCase("RSA")) {
+            return KeyProperties.KEY_ALGORITHM_RSA;
+        }
         return null;
     }
 

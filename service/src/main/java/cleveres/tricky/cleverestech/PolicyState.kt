@@ -1313,13 +1313,13 @@ object PolicyState {
         invalidateResolutionCaches()
         Config.signalRuntimeController()
         CronAutoIdentity.onPolicyChanged()
-        cleveres.tricky.cleverestech.keystore.CertHack.clearCertificateCache()
     }
 
     private fun invalidateResolutionCaches() {
         automaticCache.clear()
         capturedByPackage.clear()
         uidResolutionCache.clear()
+        cleveres.tricky.cleverestech.keystore.CertHack.clearCertificateCache()
     }
 
     fun invalidateUid(uid: Int) {
@@ -1347,8 +1347,6 @@ object PolicyState {
         root = File("/data/adb/cleverestricky")
         currentDateSource = { LocalDate.now() }
         snapshot = legacySnapshot("legacy")
-        automaticCache.clear()
-        capturedByPackage.clear()
-        uidResolutionCache.clear()
+        invalidateResolutionCaches()
     }
 }
