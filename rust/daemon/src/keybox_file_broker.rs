@@ -1,6 +1,8 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
 use cleverestricky_service_core::fd_transport::send_one_fd;
-use cleverestricky_service_core::ipc::{read_header_bounded, write_frame_bounded, FLAG_ERROR};
+use cleverestricky_service_core::ipc::{
+    read_header_bounded_or_eof, write_frame_bounded, FLAG_ERROR,
+};
 use cleverestricky_service_core::secure_fs::TrustedDir;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -36,12 +38,8 @@ struct FileFingerprint {
 pub fn serve(mut stream: UnixStream, root: &TrustedDir) -> io::Result<()> {
     let mut request = [0u8; MAX_REQUEST_BYTES];
     loop {
-        let header = match read_header_bounded(&mut stream, MAX_REQUEST_BYTES) {
-            Ok(header) => header,
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                return Err(crate::service_guard::clean_exit_error())
-            }
-            Err(error) => return Err(error),
+        let Some(header) = read_header_bounded_or_eof(&mut stream, MAX_REQUEST_BYTES)? else {
+            return Err(crate::service_guard::clean_exit_error());
         };
         stream.read_exact(&mut request[..header.payload_len])?;
         if header.opcode != OP_KEYBOX_BROKER_OPEN || header.flags != 0 {
@@ -270,6 +268,7 @@ fn invalid(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cleverestricky_service_core::ipc::PROTOCOL_MAGIC;
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -456,5 +455,18 @@ mod tests {
         drop(client);
 
         assert!(crate::service_guard::run(|| serve(server, &root)).is_ok());
+    }
+
+    #[test]
+    fn partial_header_is_reported_as_broker_failure() {
+        let test = TestRoot::new();
+        let root = TrustedDir::open(&test.path).unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.write_all(&PROTOCOL_MAGIC).unwrap();
+        drop(client);
+
+        let error = crate::service_guard::run(|| serve(server, &root))
+            .expect_err("truncated broker headers must reach the supervisor");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 }
