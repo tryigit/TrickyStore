@@ -5,7 +5,7 @@ use super::{
 use cleverestricky_service_core::secure_fs::TrustedDir;
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,38 +41,68 @@ fn recover_poison<T, U>(mutex: &Mutex<T>, poisoned: PoisonError<U>) -> U {
     poisoned.into_inner()
 }
 
-fn run_restore_janitor(root: Arc<TrustedDir>) {
-    let mutex = restore_transactions();
-    let mut transactions = match mutex.lock() {
+fn lock_transactions<'a>(
+    mutex: &'a Mutex<HashMap<String, RestoreTransaction>>,
+) -> MutexGuard<'a, HashMap<String, RestoreTransaction>> {
+    match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             eprintln!("cleverestrickyd: restore janitor recovered poisoned transaction state");
             recover_poison(mutex, poisoned)
         }
+    }
+}
+
+fn export_staged_transactions(
+    root: &TrustedDir,
+    pending_exports: Vec<(String, RestoreTransaction)>,
+) -> Vec<String> {
+    let mut completed_tokens = Vec::with_capacity(pending_exports.len());
+    for (token, transaction) in pending_exports {
+        let _ = export_transaction_to_root(root, &token, &transaction);
+        // Zeroize the moved snapshot bytes before releasing the placeholder's accounting.
+        drop(transaction);
+        completed_tokens.push(token);
+    }
+    completed_tokens
+}
+
+fn finish_staged_transactions(
+    transactions: &mut HashMap<String, RestoreTransaction>,
+    completed_tokens: Vec<String>,
+) {
+    for token in completed_tokens {
+        transactions.remove(&token);
+    }
+}
+
+pub(super) fn collect_expired_now(root: &TrustedDir) {
+    let mutex = restore_transactions();
+    let pending_exports = {
+        let mut transactions = lock_transactions(mutex);
+        stage_expired_exports(&mut transactions, Instant::now())
     };
+    if pending_exports.is_empty() {
+        return;
+    }
+
+    // Recovery export can write tens of MiB. Never keep the global transaction registry locked
+    // while doing filesystem I/O; placeholders preserve path conflicts and snapshot accounting.
+    let completed_tokens = export_staged_transactions(root, pending_exports);
+    let mut transactions = lock_transactions(mutex);
+    finish_staged_transactions(&mut transactions, completed_tokens);
+}
+
+fn run_restore_janitor(root: Arc<TrustedDir>) {
+    let mutex = restore_transactions();
+    let mut transactions = lock_transactions(mutex);
     loop {
         let pending_exports = stage_expired_exports(&mut transactions, Instant::now());
         if !pending_exports.is_empty() {
             drop(transactions);
-            let mut completed_tokens = Vec::with_capacity(pending_exports.len());
-            for (token, transaction) in pending_exports {
-                let _ = export_transaction_to_root(&root, &token, &transaction);
-                // Zeroize the moved snapshot bytes before releasing the placeholder's accounting.
-                drop(transaction);
-                completed_tokens.push(token);
-            }
-            transactions = match mutex.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    eprintln!(
-                        "cleverestrickyd: restore janitor recovered poisoned transaction state"
-                    );
-                    recover_poison(mutex, poisoned)
-                }
-            };
-            for token in completed_tokens {
-                transactions.remove(&token);
-            }
+            let completed_tokens = export_staged_transactions(&root, pending_exports);
+            transactions = lock_transactions(mutex);
+            finish_staged_transactions(&mut transactions, completed_tokens);
             continue;
         }
 
