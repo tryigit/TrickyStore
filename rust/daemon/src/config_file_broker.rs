@@ -414,7 +414,9 @@ fn restore_target_size(
     path: &str,
 ) -> io::Result<usize> {
     match parse_restore_target(path)? {
-        RestoreTarget::Root(name) => optional_restore_target_size(root, name, MAX_RESTORE_SNAPSHOT_BYTES),
+        RestoreTarget::Root(name) => {
+            optional_restore_target_size(root, name, MAX_RESTORE_SNAPSHOT_BYTES)
+        }
         RestoreTarget::Keybox(name) => match keyboxes {
             Some(keyboxes) => {
                 optional_restore_target_size(keyboxes, name, MAX_RESTORE_SNAPSHOT_BYTES)
@@ -608,11 +610,13 @@ impl<'a> RestoreSnapshotLease<'a> {
         let mut transactions = restore_transactions()
             .lock()
             .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-        let global_used = transactions.values().try_fold(0usize, |total, transaction| {
-            total
-                .checked_add(transaction.snapshot_bytes)
-                .ok_or_else(|| invalid("global restore snapshot accounting overflow"))
-        })?;
+        let global_used = transactions
+            .values()
+            .try_fold(0usize, |total, transaction| {
+                total
+                    .checked_add(transaction.snapshot_bytes)
+                    .ok_or_else(|| invalid("global restore snapshot accounting overflow"))
+            })?;
         let transaction = transactions
             .get_mut(self.token)
             .ok_or_else(|| invalid("restore transaction is not active"))?;
@@ -1668,7 +1672,10 @@ mod tests {
 
         {
             let transactions = restore_transactions().lock().unwrap();
-            let total: usize = transactions.values().map(|transaction| transaction.snapshot_bytes).sum();
+            let total: usize = transactions
+                .values()
+                .map(|transaction| transaction.snapshot_bytes)
+                .sum();
             assert_eq!(total, 2);
         }
         drop(first_lease);
