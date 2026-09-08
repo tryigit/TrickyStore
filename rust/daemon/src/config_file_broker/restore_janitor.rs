@@ -1,5 +1,7 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../../NOTICE.
-use super::{export_transaction_to_root, restore_transactions, RestoreOriginal, RestoreTransaction};
+use super::{
+    export_transaction_to_root, restore_transactions, RestoreOriginal, RestoreTransaction,
+};
 use cleverestricky_service_core::secure_fs::TrustedDir;
 use std::collections::HashMap;
 use std::io;
@@ -62,7 +64,9 @@ fn run_restore_janitor(root: Arc<TrustedDir>) {
             transactions = match mutex.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => {
-                    eprintln!("cleverestrickyd: restore janitor recovered poisoned transaction state");
+                    eprintln!(
+                        "cleverestrickyd: restore janitor recovered poisoned transaction state"
+                    );
                     recover_poison(mutex, poisoned)
                 }
             };
