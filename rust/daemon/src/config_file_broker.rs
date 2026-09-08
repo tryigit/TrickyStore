@@ -155,8 +155,8 @@ pub(crate) fn handle_stream_from<R: Read>(
             ACTION_RESTORE_BEGIN => restore_begin(root, path),
             ACTION_RESTORE_SNAPSHOT => restore_snapshot(root, path),
             ACTION_RESTORE_ROLLBACK => restore_rollback(root, path),
-            ACTION_RESTORE_COMMIT => restore_commit(path),
-            ACTION_RESTORE_ABORT => restore_abort(path),
+            ACTION_RESTORE_COMMIT => restore_commit(root, path),
+            ACTION_RESTORE_ABORT => restore_abort(root, path),
             ACTION_DELETE => delete_allowed(root, path),
             ACTION_RESTORE_EXPORT => restore_export(root, path),
             _ => Err(invalid("unsupported config file action")),
@@ -739,6 +739,20 @@ fn prune_stale_restore_transactions(
     }
 }
 
+fn finalize_restore_transaction(
+    root: &TrustedDir,
+    transactions: &mut HashMap<String, RestoreTransaction>,
+    token: &str,
+) -> io::Result<()> {
+    prune_stale_restore_transactions(root, transactions);
+    let transaction = transactions
+        .get(token)
+        .ok_or_else(|| invalid("restore transaction is not active"))?;
+    ensure_transaction_idle(transaction)?;
+    transactions.remove(token);
+    Ok(())
+}
+
 fn restore_begin(root: &TrustedDir, request: &str) -> io::Result<()> {
     let (token, max_snapshot) = parse_restore_pair(request)?;
     let max_snapshot_bytes = max_snapshot
@@ -866,20 +880,16 @@ fn restore_rollback(root: &TrustedDir, token: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn restore_commit(token: &str) -> io::Result<()> {
+fn restore_commit(root: &TrustedDir, token: &str) -> io::Result<()> {
     parse_restore_token(token)?;
     let mut transactions = restore_transactions()
         .lock()
         .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-    if let Some(transaction) = transactions.get(token) {
-        ensure_transaction_idle(transaction)?;
-    }
-    transactions.remove(token);
-    Ok(())
+    finalize_restore_transaction(root, &mut transactions, token)
 }
 
-fn restore_abort(token: &str) -> io::Result<()> {
-    restore_commit(token)
+fn restore_abort(root: &TrustedDir, token: &str) -> io::Result<()> {
+    restore_commit(root, token)
 }
 
 fn restore_export(root: &TrustedDir, token: &str) -> io::Result<()> {
@@ -887,6 +897,7 @@ fn restore_export(root: &TrustedDir, token: &str) -> io::Result<()> {
     let mut transactions = restore_transactions()
         .lock()
         .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
+    prune_stale_restore_transactions(root, &mut transactions);
     let export_result = {
         let transaction = transactions
             .get(token)
@@ -1284,13 +1295,14 @@ mod tests {
 
     #[test]
     fn streamed_restore_write_releases_registry_lock_and_blocks_commit() {
-        struct LockObservingReader {
+        struct LockObservingReader<'a> {
             inner: io::Cursor<Vec<u8>>,
             token: &'static str,
+            root: &'a TrustedDir,
             observed: bool,
         }
 
-        impl std::io::Read for LockObservingReader {
+        impl std::io::Read for LockObservingReader<'_> {
             fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
                 if !self.observed {
                     self.observed = true;
@@ -1314,7 +1326,7 @@ mod tests {
                             }
                         }
                     }
-                    assert!(restore_commit(self.token).is_err());
+                    assert!(restore_commit(self.root, self.token).is_err());
                     let transactions = restore_transactions().lock().unwrap();
                     assert!(
                         transactions
@@ -1341,6 +1353,7 @@ mod tests {
         let mut reader = LockObservingReader {
             inner: io::Cursor::new(vec![b'n', b'e', b'w', WRITE_COMMIT_MARKER]),
             token,
+            root: &root,
             observed: false,
         };
         let mut scratch = [0u8; 8];
@@ -1552,6 +1565,42 @@ mod tests {
             fs::read(keyboxes.join("device.xml")).unwrap(),
             b"replacement"
         );
+    }
+
+    #[test]
+    fn terminal_restore_actions_reject_expired_and_inactive_transactions() {
+        let test = TestRoot::new();
+        let root = test.trusted();
+        let token = "38000000000000000000000000000008";
+        let mut transactions = HashMap::new();
+        transactions.insert(
+            token.to_string(),
+            RestoreTransaction {
+                keyboxes: None,
+                mutation_in_progress: false,
+                max_snapshot_bytes: 4096,
+                snapshot_bytes: 3,
+                originals: vec![RestoreOriginal {
+                    path: "state.txt".to_string(),
+                    bytes: Some(b"old".to_vec()),
+                }],
+                touched: Instant::now()
+                    .checked_sub(RESTORE_TRANSACTION_TTL + Duration::from_secs(1))
+                    .unwrap(),
+            },
+        );
+
+        assert!(finalize_restore_transaction(&root, &mut transactions, token).is_err());
+        assert!(transactions.is_empty());
+        assert_eq!(
+            fs::read(test.path.join(format!(".restore-recovery-{token}-0000.bak"))).unwrap(),
+            b"old"
+        );
+        assert!(test
+            .path
+            .join(format!(".restore-recovery-{token}.manifest"))
+            .is_file());
+        assert!(finalize_restore_transaction(&root, &mut transactions, token).is_err());
     }
 
     #[test]
