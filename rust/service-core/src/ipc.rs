@@ -42,6 +42,14 @@ pub fn read_header<R: Read>(reader: &mut R) -> io::Result<FrameHeader> {
 
 /// Reads an IPC frame header with a custom maximum payload size.
 pub fn read_header_bounded<R: Read>(reader: &mut R, max_payload: usize) -> io::Result<FrameHeader> {
+    read_header_bounded_or_eof(reader, max_payload)?.ok_or_else(truncated_frame_error)
+}
+
+/// Reads a bounded IPC header, returning `None` only when EOF occurs before any header byte.
+pub fn read_header_bounded_or_eof<R: Read>(
+    reader: &mut R,
+    max_payload: usize,
+) -> io::Result<Option<FrameHeader>> {
     if max_payload > u32::MAX as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -49,7 +57,9 @@ pub fn read_header_bounded<R: Read>(reader: &mut R, max_payload: usize) -> io::R
         ));
     }
     let mut header = [0u8; HEADER_BYTES];
-    read_exact_retry(reader, &mut header)?;
+    if !read_exact_retry_or_eof(reader, &mut header)? {
+        return Ok(None);
+    }
     if header[0..4] != PROTOCOL_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -79,11 +89,11 @@ pub fn read_header_bounded<R: Read>(reader: &mut R, max_payload: usize) -> io::R
             "IPC frame exceeds configured bound",
         ));
     }
-    Ok(FrameHeader {
+    Ok(Some(FrameHeader {
         opcode,
         flags,
         payload_len,
-    })
+    }))
 }
 
 /// Writes an IPC frame header with the default maximum payload size.
@@ -203,16 +213,26 @@ pub fn relay_exact_bounded<R: Read, W: Write>(
 }
 
 /// Reads exactly the required number of bytes, retrying on EINTR.
-fn read_exact_retry<R: Read>(reader: &mut R, mut output: &mut [u8]) -> io::Result<()> {
+fn read_exact_retry<R: Read>(reader: &mut R, output: &mut [u8]) -> io::Result<()> {
+    if read_exact_retry_or_eof(reader, output)? {
+        Ok(())
+    } else {
+        Err(truncated_frame_error())
+    }
+}
+
+/// Reads exactly the required bytes while preserving clean EOF before the first byte.
+fn read_exact_retry_or_eof<R: Read>(reader: &mut R, mut output: &mut [u8]) -> io::Result<bool> {
+    if output.is_empty() {
+        return Ok(true);
+    }
+    let mut read_any = false;
     while !output.is_empty() {
         match reader.read(output) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "truncated IPC frame",
-                ))
-            }
+            Ok(0) if !read_any => return Ok(false),
+            Ok(0) => return Err(truncated_frame_error()),
             Ok(read) => {
+                read_any = true;
                 let (_, rest) = output.split_at_mut(read);
                 output = rest;
             }
@@ -220,7 +240,11 @@ fn read_exact_retry<R: Read>(reader: &mut R, mut output: &mut [u8]) -> io::Resul
             Err(error) => return Err(error),
         }
     }
-    Ok(())
+    Ok(true)
+}
+
+fn truncated_frame_error() -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, "truncated IPC frame")
 }
 
 /// Writes all bytes from input, retrying on EINTR.
@@ -317,6 +341,22 @@ mod tests {
         let mut scratch = [0u8; 8];
         assert_eq!(
             read_frame_into(&mut reader, &mut scratch)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn optional_header_distinguishes_clean_eof_from_truncation() {
+        let mut empty = Cursor::new(Vec::<u8>::new());
+        assert!(read_header_bounded_or_eof(&mut empty, MAX_FRAME_BYTES)
+            .unwrap()
+            .is_none());
+
+        let mut partial = Cursor::new(PROTOCOL_MAGIC.to_vec());
+        assert_eq!(
+            read_header_bounded_or_eof(&mut partial, MAX_FRAME_BYTES)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::UnexpectedEof
