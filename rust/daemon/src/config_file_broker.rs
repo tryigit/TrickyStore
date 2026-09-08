@@ -393,6 +393,37 @@ fn read_restore_target(
     }
 }
 
+fn optional_restore_target_size(
+    directory: &TrustedDir,
+    name: &str,
+    max_bytes: usize,
+) -> io::Result<usize> {
+    match directory.open_file_bounded(name, max_bytes) {
+        Ok((file, size)) => {
+            drop(file);
+            Ok(size)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+fn restore_target_size(
+    root: &TrustedDir,
+    keyboxes: Option<&TrustedDir>,
+    path: &str,
+) -> io::Result<usize> {
+    match parse_restore_target(path)? {
+        RestoreTarget::Root(name) => optional_restore_target_size(root, name, MAX_RESTORE_SNAPSHOT_BYTES),
+        RestoreTarget::Keybox(name) => match keyboxes {
+            Some(keyboxes) => {
+                optional_restore_target_size(keyboxes, name, MAX_RESTORE_SNAPSHOT_BYTES)
+            }
+            None => Ok(0),
+        },
+    }
+}
+
 fn restore_target(root: &TrustedDir, path: &str, bytes: Option<&[u8]>) -> io::Result<()> {
     match (parse_restore_target(path)?, bytes) {
         (RestoreTarget::Root(name), Some(bytes)) => root.atomic_write(name, bytes, FILE_MODE),
@@ -555,6 +586,7 @@ struct RestoreSnapshotLease<'a> {
     token: &'a str,
     reserved_bytes: usize,
     keyboxes: Option<Arc<TrustedDir>>,
+    reservation_set: bool,
     active: bool,
 }
 
@@ -567,7 +599,56 @@ impl<'a> RestoreSnapshotLease<'a> {
         self.reserved_bytes
     }
 
+    fn reserve_exact(&mut self, reserved_bytes: usize) -> io::Result<()> {
+        if self.reservation_set {
+            return Err(io::Error::other(
+                "restore snapshot byte reservation was already established",
+            ));
+        }
+        let mut transactions = restore_transactions()
+            .lock()
+            .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
+        let global_used = transactions.values().try_fold(0usize, |total, transaction| {
+            total
+                .checked_add(transaction.snapshot_bytes)
+                .ok_or_else(|| invalid("global restore snapshot accounting overflow"))
+        })?;
+        let transaction = transactions
+            .get_mut(self.token)
+            .ok_or_else(|| invalid("restore transaction is not active"))?;
+        if !transaction.mutation_in_progress {
+            return Err(io::Error::other(
+                "restore snapshot reservation lease was not active",
+            ));
+        }
+        let own_remaining = transaction
+            .max_snapshot_bytes
+            .checked_sub(transaction.snapshot_bytes)
+            .ok_or_else(|| invalid("restore snapshot accounting underflow"))?;
+        let global_remaining = MAX_GLOBAL_RESTORE_SNAPSHOT_BYTES
+            .checked_sub(global_used)
+            .ok_or_else(|| invalid("global restore snapshot accounting overflow"))?;
+        if reserved_bytes > own_remaining || reserved_bytes > global_remaining {
+            return Err(invalid("restore snapshot exceeds available byte budget"));
+        }
+        transaction.snapshot_bytes = transaction
+            .snapshot_bytes
+            .checked_add(reserved_bytes)
+            .ok_or_else(|| invalid("restore snapshot reservation accounting overflow"))?;
+        refresh_restore_transaction(transaction);
+        self.reserved_bytes = reserved_bytes;
+        self.reservation_set = true;
+        drop(transactions);
+        restore_janitor::notify();
+        Ok(())
+    }
+
     fn finish(&mut self, path: &str, bytes: Option<Vec<u8>>) -> io::Result<()> {
+        if !self.reservation_set {
+            return Err(io::Error::other(
+                "restore snapshot byte reservation was not established",
+            ));
+        }
         let added = bytes.as_ref().map_or(0, Vec::len);
         if added > self.reserved_bytes {
             return Err(invalid("restore snapshot exceeded reserved byte budget"));
@@ -623,9 +704,12 @@ impl Drop for RestoreSnapshotLease<'_> {
         };
         if let Some(transaction) = transactions.get_mut(self.token) {
             if transaction.mutation_in_progress {
-                if let Some(retained) = transaction.snapshot_bytes.checked_sub(self.reserved_bytes)
-                {
-                    transaction.snapshot_bytes = retained;
+                if self.reservation_set {
+                    if let Some(retained) =
+                        transaction.snapshot_bytes.checked_sub(self.reserved_bytes)
+                    {
+                        transaction.snapshot_bytes = retained;
+                    }
                 }
                 transaction.mutation_in_progress = false;
                 refresh_restore_transaction(transaction);
@@ -758,10 +842,6 @@ fn begin_restore_snapshot<'a>(
     path: &str,
 ) -> io::Result<RestoreSnapshotLease<'a>> {
     let target = parse_restore_target(path)?;
-    let global_used: usize = transactions
-        .values()
-        .map(|transaction| transaction.snapshot_bytes)
-        .sum();
     let transaction = transactions
         .get_mut(token)
         .ok_or_else(|| invalid("restore transaction is not active"))?;
@@ -778,18 +858,6 @@ fn begin_restore_snapshot<'a>(
             "restore transaction target was already snapshotted",
         ));
     }
-    let own_remaining = transaction
-        .max_snapshot_bytes
-        .checked_sub(transaction.snapshot_bytes)
-        .ok_or_else(|| invalid("restore snapshot accounting underflow"))?;
-    let global_remaining = MAX_GLOBAL_RESTORE_SNAPSHOT_BYTES
-        .checked_sub(global_used)
-        .ok_or_else(|| invalid("global restore snapshot accounting overflow"))?;
-    let reserved_bytes = own_remaining.min(global_remaining);
-    transaction.snapshot_bytes = transaction
-        .snapshot_bytes
-        .checked_add(reserved_bytes)
-        .ok_or_else(|| invalid("restore snapshot reservation accounting overflow"))?;
     transaction.mutation_in_progress = true;
     refresh_restore_transaction(transaction);
     let keyboxes = match target {
@@ -798,8 +866,9 @@ fn begin_restore_snapshot<'a>(
     };
     Ok(RestoreSnapshotLease {
         token,
-        reserved_bytes,
+        reserved_bytes: 0,
         keyboxes,
+        reservation_set: false,
         active: true,
     })
 }
@@ -1006,13 +1075,14 @@ fn prune_stale_restore_transactions(
 fn finalize_restore_transaction(
     transactions: &mut HashMap<String, RestoreTransaction>,
     token: &str,
-) -> io::Result<()> {
+) -> io::Result<RestoreTransaction> {
     let transaction = transactions
         .get(token)
         .ok_or_else(|| invalid("restore transaction is not active"))?;
     ensure_transaction_idle(transaction)?;
-    transactions.remove(token);
-    Ok(())
+    transactions
+        .remove(token)
+        .ok_or_else(|| io::Error::other("restore transaction disappeared during finalization"))
 }
 
 fn restore_begin(root: &TrustedDir, request: &str) -> io::Result<()> {
@@ -1066,6 +1136,8 @@ where
             .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
         begin_restore_snapshot(&mut transactions, token, path)?
     };
+    let reserved_bytes = restore_target_size(root, snapshot_lease.keyboxes(), path)?;
+    snapshot_lease.reserve_exact(reserved_bytes)?;
     let bytes = read(
         root,
         snapshot_lease.keyboxes(),
@@ -1116,10 +1188,15 @@ fn restore_rollback(root: &TrustedDir, token: &str) -> io::Result<()> {
 fn restore_commit(root: &TrustedDir, token: &str) -> io::Result<()> {
     parse_restore_token(token)?;
     restore_janitor::collect_expired_now(root);
-    let mut transactions = restore_transactions()
-        .lock()
-        .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-    finalize_restore_transaction(&mut transactions, token)
+    let transaction = {
+        let mut transactions = restore_transactions()
+            .lock()
+            .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
+        finalize_restore_transaction(&mut transactions, token)?
+    };
+    drop(transaction);
+    restore_janitor::notify();
+    Ok(())
 }
 
 fn restore_abort(root: &TrustedDir, token: &str) -> io::Result<()> {
@@ -1518,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_io_releases_registry_lock_and_reserves_bytes_until_completion() {
+    fn snapshot_io_releases_registry_lock_and_reserves_exact_bytes_until_completion() {
         let test = TestRoot::new();
         let root = test.trusted();
         fs::write(test.path.join("state.txt"), b"old").unwrap();
@@ -1529,6 +1606,7 @@ mod tests {
             &root,
             &format!("{token}\0state.txt"),
             |read_root, keyboxes, path, max_bytes| {
+                assert_eq!(max_bytes, 3);
                 let transactions = restore_transactions()
                     .try_lock()
                     .expect("snapshot I/O must not hold restore registry lock");
@@ -1536,7 +1614,7 @@ mod tests {
                     .get(token)
                     .expect("snapshot transaction remains registered");
                 assert!(transaction.mutation_in_progress);
-                assert_eq!(transaction.snapshot_bytes, 4096);
+                assert_eq!(transaction.snapshot_bytes, 3);
                 drop(transactions);
                 read_restore_target(read_root, keyboxes, path, max_bytes)
             },
@@ -1550,6 +1628,53 @@ mod tests {
             assert_eq!(transaction.snapshot_bytes, 3);
         }
         handle_from(&root, &request(ACTION_RESTORE_ABORT, token, b"")).unwrap();
+    }
+
+    #[test]
+    fn concurrent_snapshot_reservations_charge_only_exact_bytes() {
+        let test = TestRoot::new();
+        let root = test.trusted();
+        let first_token = "06510000000000000000000000000006";
+        let second_token = "06520000000000000000000000000006";
+        handle_from(
+            &root,
+            &restore_pair(
+                ACTION_RESTORE_BEGIN,
+                first_token,
+                &MAX_RESTORE_SNAPSHOT_BYTES.to_string(),
+            ),
+        )
+        .unwrap();
+        handle_from(
+            &root,
+            &restore_pair(
+                ACTION_RESTORE_BEGIN,
+                second_token,
+                &MAX_RESTORE_SNAPSHOT_BYTES.to_string(),
+            ),
+        )
+        .unwrap();
+
+        let mut first_lease = {
+            let mut transactions = restore_transactions().lock().unwrap();
+            begin_restore_snapshot(&mut transactions, first_token, "first.txt").unwrap()
+        };
+        first_lease.reserve_exact(1).unwrap();
+        let mut second_lease = {
+            let mut transactions = restore_transactions().lock().unwrap();
+            begin_restore_snapshot(&mut transactions, second_token, "second.txt").unwrap()
+        };
+        second_lease.reserve_exact(1).unwrap();
+
+        {
+            let transactions = restore_transactions().lock().unwrap();
+            let total: usize = transactions.values().map(|transaction| transaction.snapshot_bytes).sum();
+            assert_eq!(total, 2);
+        }
+        drop(first_lease);
+        drop(second_lease);
+        handle_from(&root, &request(ACTION_RESTORE_ABORT, first_token, b"")).unwrap();
+        handle_from(&root, &request(ACTION_RESTORE_ABORT, second_token, b"")).unwrap();
     }
 
     #[test]
