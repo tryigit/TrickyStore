@@ -13,15 +13,36 @@ class JvmRestoreFatalCleanupTest {
     val tempFolder = TemporaryFolder()
 
     @Test
-    fun cleanupErrorEscapesAfterTransactionWasRemoved() {
+    fun checkedCleanupFailureEscapesAfterTransactionWasRemoved() {
+        val sentinel = IOException("synthetic cleanup exception")
+        val backend =
+            JvmSecureRestoreFileOperations(
+                enableExpiryJanitor = false,
+                transactionCleanupHookForTesting = { throw sentinel },
+            )
+        val configDir = tempFolder.newFolder("checked-cleanup-error")
+        val token = "abababababababababababababababab"
+
+        backend.begin(configDir, token, 0L)
+        val thrown = assertThrows(IOException::class.java) {
+            backend.commit(configDir, token)
+        }
+
+        assertSame(sentinel, thrown)
+        assertEquals(null, backend.pendingExpiryDelayNanosForTesting())
+        assertThrows(IOException::class.java) { backend.abort(configDir, token) }
+    }
+
+    @Test
+    fun fatalCleanupErrorEscapesAfterTransactionWasRemoved() {
         val sentinel = AssertionError("synthetic cleanup error")
         val backend =
             JvmSecureRestoreFileOperations(
                 enableExpiryJanitor = false,
                 transactionCleanupHookForTesting = { throw sentinel },
             )
-        val configDir = tempFolder.newFolder("cleanup-error")
-        val token = "abababababababababababababababab"
+        val configDir = tempFolder.newFolder("fatal-cleanup-error")
+        val token = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
 
         backend.begin(configDir, token, 0L)
         val thrown = assertThrows(AssertionError::class.java) {
