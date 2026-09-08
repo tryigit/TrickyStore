@@ -308,6 +308,8 @@ internal class JvmSecureRestoreFileOperations(
             withActiveTransaction(configDir, token) { transaction ->
                 val created = ArrayList<Path>()
                 val manifest = StringBuilder()
+                val manifestName = ".restore-recovery-$token.manifest"
+                val manifestPath = FileSystems.getDefault().getPath(manifestName)
                 try {
                     transaction.originals.forEachIndexed { index, original ->
                         val encodedPath = original.relativePath.toByteArray(Charsets.UTF_8).toHex()
@@ -328,20 +330,19 @@ internal class JvmSecureRestoreFileOperations(
                                 .append('\n')
                         }
                     }
-                    val manifestName = ".restore-recovery-$token.manifest"
-                    val manifestPath = FileSystems.getDefault().getPath(manifestName)
                     val manifestBytes = manifest.toString().toByteArray(Charsets.UTF_8)
                     try {
                         atomicWrite(transaction.root, manifestPath, manifestBytes)
                     } finally {
                         manifestBytes.fill(0)
                     }
-                    removeTransaction(token)
-                    transaction.rootPath.resolve(manifestName).toString()
                 } catch (error: Throwable) {
                     created.forEach { path -> runCatching { transaction.root.deleteFile(path) } }
                     throw IOException("Could not export restore recovery data", error)
                 }
+                val result = transaction.rootPath.resolve(manifestName).toString()
+                removeTransaction(token)
+                result
             }
         }
 
@@ -393,8 +394,14 @@ internal class JvmSecureRestoreFileOperations(
     }
 
     private fun removeTransaction(token: String) {
-        transactions.remove(token)?.let(::closeTransaction)
-        signalExpiryJanitorLocked()
+        val cleanupFailure = transactions.remove(token)?.let(::closeTransaction)
+        try {
+            signalExpiryJanitorLocked()
+        } catch (error: Throwable) {
+            cleanupFailure?.let(error::addSuppressed)
+            throw error
+        }
+        cleanupFailure?.let { throw it }
     }
 
     private fun closeTransaction(transaction: Transaction): Exception? {
