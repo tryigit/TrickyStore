@@ -277,11 +277,11 @@ fn atomic_write_relative_from<R: Read>(
     if path.contains('\0') {
         return restore_write_from(root, path, reader, body_len, scratch);
     }
+    restore_janitor::collect_expired_now(root);
     {
-        let mut transactions = restore_transactions()
+        let transactions = restore_transactions()
             .lock()
             .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-        prune_stale_restore_transactions(root, &mut transactions);
         if transactions.values().any(|transaction| {
             transaction
                 .originals
@@ -378,15 +378,15 @@ fn read_optional(dir: &TrustedDir, name: &str, max_bytes: usize) -> io::Result<O
     }
 }
 
-fn read_transaction_restore_target(
+fn read_restore_target(
     root: &TrustedDir,
-    transaction: &RestoreTransaction,
+    keyboxes: Option<&TrustedDir>,
     path: &str,
     max_bytes: usize,
 ) -> io::Result<Option<Vec<u8>>> {
     match parse_restore_target(path)? {
         RestoreTarget::Root(name) => read_optional(root, name, max_bytes),
-        RestoreTarget::Keybox(name) => match transaction.keyboxes.as_ref() {
+        RestoreTarget::Keybox(name) => match keyboxes {
             Some(keyboxes) => read_optional(keyboxes, name, max_bytes),
             None => Ok(None),
         },
@@ -409,9 +409,9 @@ fn restore_target(root: &TrustedDir, path: &str, bytes: Option<&[u8]>) -> io::Re
     }
 }
 
-fn restore_transaction_target(
+fn restore_pinned_target(
     root: &TrustedDir,
-    transaction: &RestoreTransaction,
+    keyboxes: Option<&TrustedDir>,
     path: &str,
     bytes: Option<&[u8]>,
 ) -> io::Result<()> {
@@ -419,7 +419,7 @@ fn restore_transaction_target(
         (RestoreTarget::Root(name), Some(bytes)) => root.atomic_write(name, bytes, FILE_MODE),
         (RestoreTarget::Root(name), None) => root.unlink_file(name).and_then(|_| root.sync()),
         (RestoreTarget::Keybox(name), Some(bytes)) => {
-            let keyboxes = transaction.keyboxes.as_ref().ok_or_else(|| {
+            let keyboxes = keyboxes.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
                     "pinned keybox restore directory is unavailable",
@@ -427,7 +427,7 @@ fn restore_transaction_target(
             })?;
             keyboxes.atomic_write(name, bytes, FILE_MODE)
         }
-        (RestoreTarget::Keybox(name), None) => match transaction.keyboxes.as_ref() {
+        (RestoreTarget::Keybox(name), None) => match keyboxes {
             Some(keyboxes) => keyboxes.unlink_file(name).and_then(|_| keyboxes.sync()),
             None => Ok(()),
         },
@@ -472,19 +472,21 @@ fn delete_allowed(root: &TrustedDir, path: &str) -> io::Result<()> {
     if path.contains('\0') {
         return restore_delete(root, path);
     }
-    let mut transactions = restore_transactions()
-        .lock()
-        .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-    prune_stale_restore_transactions(root, &mut transactions);
-    if transactions.values().any(|transaction| {
-        transaction
-            .originals
-            .iter()
-            .any(|original| original.path == path)
-    }) {
-        return Err(invalid(
-            "active restore target requires a transaction-scoped delete",
-        ));
+    restore_janitor::collect_expired_now(root);
+    {
+        let transactions = restore_transactions()
+            .lock()
+            .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
+        if transactions.values().any(|transaction| {
+            transaction
+                .originals
+                .iter()
+                .any(|original| original.path == path)
+        }) {
+            return Err(invalid(
+                "active restore target requires a transaction-scoped delete",
+            ));
+        }
     }
     restore_target(root, path, None)
 }
@@ -549,6 +551,153 @@ impl Drop for RestoreMutationLease<'_> {
     }
 }
 
+struct RestoreSnapshotLease<'a> {
+    token: &'a str,
+    reserved_bytes: usize,
+    keyboxes: Option<Arc<TrustedDir>>,
+    active: bool,
+}
+
+impl<'a> RestoreSnapshotLease<'a> {
+    fn keyboxes(&self) -> Option<&TrustedDir> {
+        self.keyboxes.as_deref()
+    }
+
+    fn reserved_bytes(&self) -> usize {
+        self.reserved_bytes
+    }
+
+    fn finish(&mut self, path: &str, bytes: Option<Vec<u8>>) -> io::Result<()> {
+        let added = bytes.as_ref().map_or(0, Vec::len);
+        if added > self.reserved_bytes {
+            return Err(invalid("restore snapshot exceeded reserved byte budget"));
+        }
+        let original = RestoreOriginal {
+            path: path.to_string(),
+            bytes,
+        };
+        let mut transactions = restore_transactions()
+            .lock()
+            .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
+        let transaction = transactions
+            .get_mut(self.token)
+            .ok_or_else(|| invalid("restore transaction is not active"))?;
+        if !transaction.mutation_in_progress {
+            return Err(io::Error::other(
+                "restore snapshot reservation lease was not active",
+            ));
+        }
+        let retained_before_reservation = transaction
+            .snapshot_bytes
+            .checked_sub(self.reserved_bytes)
+            .ok_or_else(|| invalid("restore snapshot reservation accounting underflow"))?;
+        transaction
+            .originals
+            .try_reserve(1)
+            .map_err(|_| io::Error::other("restore snapshot target allocation failed"))?;
+        transaction.snapshot_bytes = retained_before_reservation
+            .checked_add(added)
+            .ok_or_else(|| invalid("restore snapshot accounting overflow"))?;
+        transaction.originals.push(original);
+        transaction.mutation_in_progress = false;
+        refresh_restore_transaction(transaction);
+        self.active = false;
+        drop(transactions);
+        restore_janitor::notify();
+        Ok(())
+    }
+}
+
+impl Drop for RestoreSnapshotLease<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mutex = restore_transactions();
+        let mut transactions = match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                mutex.clear_poison();
+                poisoned.into_inner()
+            }
+        };
+        if let Some(transaction) = transactions.get_mut(self.token) {
+            if transaction.mutation_in_progress {
+                if let Some(retained) = transaction.snapshot_bytes.checked_sub(self.reserved_bytes)
+                {
+                    transaction.snapshot_bytes = retained;
+                }
+                transaction.mutation_in_progress = false;
+                refresh_restore_transaction(transaction);
+            }
+        }
+        drop(transactions);
+        restore_janitor::notify();
+    }
+}
+
+struct RestoreTerminalLease<'a> {
+    token: &'a str,
+    transaction: Option<RestoreTransaction>,
+}
+
+impl<'a> RestoreTerminalLease<'a> {
+    fn transaction(&self) -> &RestoreTransaction {
+        self.transaction
+            .as_ref()
+            .expect("terminal restore lease must own its transaction")
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        {
+            let mut transactions = restore_transactions()
+                .lock()
+                .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
+            let placeholder = transactions
+                .get(self.token)
+                .ok_or_else(|| invalid("restore transaction is not active"))?;
+            if !placeholder.mutation_in_progress {
+                return Err(io::Error::other(
+                    "terminal restore transaction lease was not active",
+                ));
+            }
+            transactions.remove(self.token);
+        }
+        let transaction = self
+            .transaction
+            .take()
+            .expect("terminal restore lease must own its transaction");
+        drop(transaction);
+        restore_janitor::notify();
+        Ok(())
+    }
+}
+
+impl Drop for RestoreTerminalLease<'_> {
+    fn drop(&mut self) {
+        let Some(mut transaction) = self.transaction.take() else {
+            return;
+        };
+        refresh_restore_transaction(&mut transaction);
+        let mutex = restore_transactions();
+        let mut transactions = match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                mutex.clear_poison();
+                poisoned.into_inner()
+            }
+        };
+        if transactions
+            .get(self.token)
+            .is_some_and(|placeholder| placeholder.mutation_in_progress)
+        {
+            transactions.insert(self.token.to_string(), transaction);
+        }
+        drop(transactions);
+        restore_janitor::notify();
+    }
+}
+
 fn transaction_for_snapshotted_target<'a>(
     transactions: &'a mut HashMap<String, RestoreTransaction>,
     token: &str,
@@ -592,6 +741,95 @@ fn begin_streaming_restore_mutation(
     Ok(keyboxes)
 }
 
+fn begin_restore_snapshot<'a>(
+    transactions: &mut HashMap<String, RestoreTransaction>,
+    token: &'a str,
+    path: &str,
+) -> io::Result<RestoreSnapshotLease<'a>> {
+    let target = parse_restore_target(path)?;
+    let global_used: usize = transactions
+        .values()
+        .map(|transaction| transaction.snapshot_bytes)
+        .sum();
+    let transaction = transactions
+        .get_mut(token)
+        .ok_or_else(|| invalid("restore transaction is not active"))?;
+    ensure_transaction_idle(transaction)?;
+    if transaction.originals.len() >= MAX_RESTORE_TARGETS {
+        return Err(invalid("restore transaction target count exceeds bound"));
+    }
+    if transaction
+        .originals
+        .iter()
+        .any(|original| original.path == path)
+    {
+        return Err(invalid(
+            "restore transaction target was already snapshotted",
+        ));
+    }
+    let own_remaining = transaction
+        .max_snapshot_bytes
+        .checked_sub(transaction.snapshot_bytes)
+        .ok_or_else(|| invalid("restore snapshot accounting underflow"))?;
+    let global_remaining = MAX_GLOBAL_RESTORE_SNAPSHOT_BYTES
+        .checked_sub(global_used)
+        .ok_or_else(|| invalid("global restore snapshot accounting overflow"))?;
+    let reserved_bytes = own_remaining.min(global_remaining);
+    transaction.snapshot_bytes = transaction
+        .snapshot_bytes
+        .checked_add(reserved_bytes)
+        .ok_or_else(|| invalid("restore snapshot reservation accounting overflow"))?;
+    transaction.mutation_in_progress = true;
+    refresh_restore_transaction(transaction);
+    let keyboxes = match target {
+        RestoreTarget::Root(_) => None,
+        RestoreTarget::Keybox(_) => transaction.keyboxes.clone(),
+    };
+    Ok(RestoreSnapshotLease {
+        token,
+        reserved_bytes,
+        keyboxes,
+        active: true,
+    })
+}
+
+fn placeholder_transaction(transaction: &RestoreTransaction) -> RestoreTransaction {
+    RestoreTransaction {
+        keyboxes: transaction.keyboxes.clone(),
+        mutation_in_progress: true,
+        max_snapshot_bytes: transaction.max_snapshot_bytes,
+        snapshot_bytes: transaction.snapshot_bytes,
+        originals: transaction
+            .originals
+            .iter()
+            .map(|original| RestoreOriginal {
+                path: original.path.clone(),
+                bytes: None,
+            })
+            .collect(),
+        touched: transaction.touched,
+    }
+}
+
+fn stage_terminal_restore_transaction<'a>(
+    transactions: &mut HashMap<String, RestoreTransaction>,
+    token: &'a str,
+) -> io::Result<RestoreTerminalLease<'a>> {
+    let transaction = transactions
+        .get(token)
+        .ok_or_else(|| invalid("restore transaction is not active"))?;
+    ensure_transaction_idle(transaction)?;
+    let placeholder = placeholder_transaction(transaction);
+    let transaction = transactions
+        .remove(token)
+        .expect("validated restore transaction must remain present while registry is locked");
+    transactions.insert(token.to_string(), placeholder);
+    Ok(RestoreTerminalLease {
+        token,
+        transaction: Some(transaction),
+    })
+}
+
 fn finish_streaming_restore_mutation(token: &str) -> io::Result<()> {
     let mut transactions = restore_transactions()
         .lock()
@@ -630,11 +868,11 @@ fn restore_write_from<R: Read>(
     scratch: &mut [u8],
 ) -> io::Result<()> {
     let (token, path) = parse_restore_pair(request)?;
+    restore_janitor::collect_expired_now(root);
     let keyboxes = {
         let mut transactions = restore_transactions()
             .lock()
             .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-        prune_stale_restore_transactions(root, &mut transactions);
         begin_streaming_restore_mutation(&mut transactions, token, path)?
     };
     let mut mutation_lease = RestoreMutationLease::new(token);
@@ -663,14 +901,27 @@ fn restore_write_from<R: Read>(
 
 fn restore_delete(root: &TrustedDir, request: &str) -> io::Result<()> {
     let (token, path) = parse_restore_pair(request)?;
-    let mut transactions = restore_transactions()
-        .lock()
-        .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-    prune_stale_restore_transactions(root, &mut transactions);
-    let transaction = transaction_for_snapshotted_target(&mut transactions, token, path)?;
-    let result = restore_transaction_target(root, transaction, path, None);
-    refresh_restore_transaction(transaction);
-    result
+    restore_janitor::collect_expired_now(root);
+    let keyboxes = {
+        let mut transactions = restore_transactions()
+            .lock()
+            .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
+        begin_streaming_restore_mutation(&mut transactions, token, path)?
+    };
+    let mut mutation_lease = RestoreMutationLease::new(token);
+    let delete_result = restore_pinned_target(root, keyboxes.as_deref(), path, None);
+    let finish_result = mutation_lease.finish();
+    match (delete_result, finish_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(finish_error)) => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; additionally failed to release restore mutation lease: {finish_error}"
+            ),
+        )),
+    }
 }
 
 fn encode_hex(value: &[u8]) -> String {
@@ -716,6 +967,7 @@ fn export_transaction_to_root(
     root.sync()
 }
 
+#[cfg(test)]
 fn prune_stale_restore_transactions(
     root: &TrustedDir,
     transactions: &mut HashMap<String, RestoreTransaction>,
@@ -736,18 +988,14 @@ fn prune_stale_restore_transactions(
         if let Some(transaction) = transactions.get(&token) {
             let _ = export_transaction_to_root(root, &token, transaction);
         }
-        // The TTL is a hard capacity bound. Best-effort recovery export must never let an expired
-        // transaction permanently consume one of the limited active slots.
         transactions.remove(&token);
     }
 }
 
 fn finalize_restore_transaction(
-    root: &TrustedDir,
     transactions: &mut HashMap<String, RestoreTransaction>,
     token: &str,
 ) -> io::Result<()> {
-    prune_stale_restore_transactions(root, transactions);
     let transaction = transactions
         .get(token)
         .ok_or_else(|| invalid("restore transaction is not active"))?;
@@ -764,21 +1012,21 @@ fn restore_begin(root: &TrustedDir, request: &str) -> io::Result<()> {
     if max_snapshot_bytes > MAX_RESTORE_SNAPSHOT_BYTES {
         return Err(invalid("restore snapshot limit exceeds broker bound"));
     }
+    restore_janitor::collect_expired_now(root);
+    let keyboxes = match root.open_child(KEYBOX_DIRECTORY) {
+        Ok(keyboxes) => Some(Arc::new(keyboxes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
     let mut transactions = restore_transactions()
         .lock()
         .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-    prune_stale_restore_transactions(root, &mut transactions);
     if transactions.contains_key(token) {
         return Err(invalid("restore transaction token already active"));
     }
     if transactions.len() >= MAX_ACTIVE_RESTORE_TRANSACTIONS {
         return Err(io::Error::other("restore transaction capacity exhausted"));
     }
-    let keyboxes = match root.open_child(KEYBOX_DIRECTORY) {
-        Ok(keyboxes) => Some(Arc::new(keyboxes)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
     transactions.insert(
         token.to_string(),
         RestoreTransaction {
@@ -795,100 +1043,72 @@ fn restore_begin(root: &TrustedDir, request: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn restore_snapshot(root: &TrustedDir, request: &str) -> io::Result<()> {
+fn restore_snapshot_with<F>(root: &TrustedDir, request: &str, read: F) -> io::Result<()>
+where
+    F: FnOnce(&TrustedDir, Option<&TrustedDir>, &str, usize) -> io::Result<Option<Vec<u8>>>,
+{
     let (token, path) = parse_restore_pair(request)?;
-    parse_restore_target(path)?;
-    let mut transactions = restore_transactions()
-        .lock()
-        .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-    prune_stale_restore_transactions(root, &mut transactions);
-    let global_used: usize = transactions
-        .values()
-        .map(|transaction| transaction.snapshot_bytes)
-        .sum();
-    let transaction = transactions
-        .get_mut(token)
-        .ok_or_else(|| invalid("restore transaction is not active"))?;
-    ensure_transaction_idle(transaction)?;
-    if transaction.originals.len() >= MAX_RESTORE_TARGETS {
-        return Err(invalid("restore transaction target count exceeds bound"));
-    }
-    if transaction
-        .originals
-        .iter()
-        .any(|original| original.path == path)
-    {
-        return Err(invalid(
-            "restore transaction target was already snapshotted",
-        ));
-    }
-    let own_remaining = transaction
-        .max_snapshot_bytes
-        .checked_sub(transaction.snapshot_bytes)
-        .ok_or_else(|| invalid("restore snapshot accounting underflow"))?;
-    let global_remaining = MAX_GLOBAL_RESTORE_SNAPSHOT_BYTES
-        .checked_sub(global_used)
-        .ok_or_else(|| invalid("global restore snapshot accounting overflow"))?;
-    let read_result = read_transaction_restore_target(
+    restore_janitor::collect_expired_now(root);
+    let mut snapshot_lease = {
+        let mut transactions = restore_transactions()
+            .lock()
+            .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
+        begin_restore_snapshot(&mut transactions, token, path)?
+    };
+    let bytes = read(
         root,
-        transaction,
+        snapshot_lease.keyboxes(),
         path,
-        own_remaining.min(global_remaining),
-    );
-    refresh_restore_transaction(transaction);
-    let bytes = read_result?;
-    let added = bytes.as_ref().map_or(0, Vec::len);
-    transaction.snapshot_bytes = transaction
-        .snapshot_bytes
-        .checked_add(added)
-        .ok_or_else(|| invalid("restore snapshot accounting overflow"))?;
-    transaction.originals.push(RestoreOriginal {
-        path: path.to_string(),
-        bytes,
-    });
-    Ok(())
+        snapshot_lease.reserved_bytes(),
+    )?;
+    snapshot_lease.finish(path, bytes)
+}
+
+fn restore_snapshot(root: &TrustedDir, request: &str) -> io::Result<()> {
+    restore_snapshot_with(root, request, read_restore_target)
 }
 
 fn restore_rollback(root: &TrustedDir, token: &str) -> io::Result<()> {
     parse_restore_token(token)?;
-    let mut transactions = restore_transactions()
-        .lock()
-        .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-    prune_stale_restore_transactions(root, &mut transactions);
-    let transaction = transactions
-        .get_mut(token)
-        .ok_or_else(|| invalid("restore transaction is not active"))?;
-    ensure_transaction_idle(transaction)?;
-    refresh_restore_transaction(transaction);
+    restore_janitor::collect_expired_now(root);
+    let terminal_lease = {
+        let mut transactions = restore_transactions()
+            .lock()
+            .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
+        stage_terminal_restore_transaction(&mut transactions, token)?
+    };
+    let transaction = terminal_lease.transaction();
     let mut first_error = None;
     let mut failure_count = 0usize;
     for original in transaction.originals.iter().rev() {
-        if let Err(error) =
-            restore_transaction_target(root, transaction, &original.path, original.bytes.as_deref())
-        {
+        if let Err(error) = restore_pinned_target(
+            root,
+            transaction.keyboxes.as_deref(),
+            &original.path,
+            original.bytes.as_deref(),
+        ) {
             failure_count += 1;
             if first_error.is_none() {
                 first_error = Some(error);
             }
         }
     }
-    refresh_restore_transaction(transaction);
     if let Some(error) = first_error {
         return Err(io::Error::new(
             error.kind(),
             format!("restore rollback failed for {failure_count} target(s): {error}"),
         ));
     }
-    transactions.remove(token);
-    Ok(())
+    terminal_lease.finish()
 }
 
 fn restore_commit(root: &TrustedDir, token: &str) -> io::Result<()> {
     parse_restore_token(token)?;
+    restore_janitor::collect_expired_now(root);
     let mut transactions = restore_transactions()
         .lock()
         .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-    finalize_restore_transaction(root, &mut transactions, token)
+    finalize_restore_transaction(&mut transactions, token)
 }
 
 fn restore_abort(root: &TrustedDir, token: &str) -> io::Result<()> {
@@ -897,25 +1117,15 @@ fn restore_abort(root: &TrustedDir, token: &str) -> io::Result<()> {
 
 fn restore_export(root: &TrustedDir, token: &str) -> io::Result<()> {
     parse_restore_token(token)?;
-    let mut transactions = restore_transactions()
-        .lock()
-        .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
-    prune_stale_restore_transactions(root, &mut transactions);
-    let export_result = {
-        let transaction = transactions
-            .get(token)
-            .ok_or_else(|| invalid("restore transaction is not active"))?;
-        ensure_transaction_idle(transaction)?;
-        export_transaction_to_root(root, token, transaction)
+    restore_janitor::collect_expired_now(root);
+    let terminal_lease = {
+        let mut transactions = restore_transactions()
+            .lock()
+            .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
+        stage_terminal_restore_transaction(&mut transactions, token)?
     };
-    if let Err(error) = export_result {
-        if let Some(transaction) = transactions.get_mut(token) {
-            refresh_restore_transaction(transaction);
-        }
-        return Err(error);
-    }
-    transactions.remove(token);
-    Ok(())
+    export_transaction_to_root(root, token, terminal_lease.transaction())?;
+    terminal_lease.finish()
 }
 
 fn validate_webui_download_name(value: &str) -> io::Result<()> {
@@ -1297,6 +1507,66 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_io_releases_registry_lock_and_reserves_bytes_until_completion() {
+        let test = TestRoot::new();
+        let root = test.trusted();
+        fs::write(test.path.join("state.txt"), b"old").unwrap();
+        let token = "06500000000000000000000000000006";
+        handle_from(&root, &restore_pair(ACTION_RESTORE_BEGIN, token, "4096")).unwrap();
+
+        restore_snapshot_with(
+            &root,
+            &format!("{token}\0state.txt"),
+            |read_root, keyboxes, path, max_bytes| {
+                let transactions = restore_transactions()
+                    .try_lock()
+                    .expect("snapshot I/O must not hold restore registry lock");
+                let transaction = transactions
+                    .get(token)
+                    .expect("snapshot transaction remains registered");
+                assert!(transaction.mutation_in_progress);
+                assert_eq!(transaction.snapshot_bytes, 4096);
+                drop(transactions);
+                read_restore_target(read_root, keyboxes, path, max_bytes)
+            },
+        )
+        .unwrap();
+
+        {
+            let transactions = restore_transactions().lock().unwrap();
+            let transaction = transactions.get(token).unwrap();
+            assert!(!transaction.mutation_in_progress);
+            assert_eq!(transaction.snapshot_bytes, 3);
+        }
+        handle_from(&root, &request(ACTION_RESTORE_ABORT, token, b"")).unwrap();
+    }
+
+    #[test]
+    fn failed_snapshot_io_releases_reservation_and_mutation_lease() {
+        let test = TestRoot::new();
+        let root = test.trusted();
+        let token = "06600000000000000000000000000006";
+        handle_from(&root, &restore_pair(ACTION_RESTORE_BEGIN, token, "4096")).unwrap();
+
+        let result = restore_snapshot_with(
+            &root,
+            &format!("{token}\0state.txt"),
+            |_read_root, _keyboxes, _path, _max_bytes| {
+                Err(io::Error::other("simulated snapshot read failure"))
+            },
+        );
+        assert!(result.is_err());
+        {
+            let transactions = restore_transactions().lock().unwrap();
+            let transaction = transactions.get(token).unwrap();
+            assert!(!transaction.mutation_in_progress);
+            assert_eq!(transaction.snapshot_bytes, 0);
+            assert!(transaction.originals.is_empty());
+        }
+        handle_from(&root, &request(ACTION_RESTORE_ABORT, token, b"")).unwrap();
+    }
+
+    #[test]
     fn streamed_restore_write_releases_registry_lock_and_blocks_commit() {
         struct LockObservingReader<'a> {
             inner: io::Cursor<Vec<u8>>,
@@ -1593,7 +1863,8 @@ mod tests {
             },
         );
 
-        assert!(finalize_restore_transaction(&root, &mut transactions, token).is_err());
+        prune_stale_restore_transactions(&root, &mut transactions);
+        assert!(finalize_restore_transaction(&mut transactions, token).is_err());
         assert!(transactions.is_empty());
         assert_eq!(
             fs::read(
@@ -1607,7 +1878,7 @@ mod tests {
             .path
             .join(format!(".restore-recovery-{token}.manifest"))
             .is_file());
-        assert!(finalize_restore_transaction(&root, &mut transactions, token).is_err());
+        assert!(finalize_restore_transaction(&mut transactions, token).is_err());
     }
 
     #[test]
