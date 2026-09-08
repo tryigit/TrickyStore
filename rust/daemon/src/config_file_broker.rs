@@ -526,7 +526,10 @@ struct RestoreMutationLease<'a> {
 
 impl<'a> RestoreMutationLease<'a> {
     fn new(token: &'a str) -> Self {
-        Self { token, active: true }
+        Self {
+            token,
+            active: true,
+        }
     }
 
     fn finish(&mut self) -> io::Result<()> {
@@ -1593,7 +1596,11 @@ mod tests {
         assert!(finalize_restore_transaction(&root, &mut transactions, token).is_err());
         assert!(transactions.is_empty());
         assert_eq!(
-            fs::read(test.path.join(format!(".restore-recovery-{token}-0000.bak"))).unwrap(),
+            fs::read(
+                test.path
+                    .join(format!(".restore-recovery-{token}-0000.bak"))
+            )
+            .unwrap(),
             b"old"
         );
         assert!(test
