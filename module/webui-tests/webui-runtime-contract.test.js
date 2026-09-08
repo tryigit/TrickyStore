@@ -225,8 +225,8 @@ async function testPolicyNormalizationRejectsMalformedAndOversizedState() {
     assert.strictEqual(normalized.securityPatch.system.mode, 'manual', 'valid patch modes must be retained');
     assert.strictEqual(normalized.securityPatch.system.value, '2026-08-27', 'manual dates must be bounded');
     assert.strictEqual(normalized.securityPatch.vendor.mode, 'device_default', 'unknown patch modes must fall back safely');
-    assert.strictEqual(normalized.profiles.length, 64, 'policy profiles must be capped to the backend contract');
-    assert.strictEqual(normalized.profiles[0].applications.length, 256, 'profile assignments must be capped to the backend contract');
+    assert.strictEqual(normalized.profiles.length, 300, 'normalization must preserve profiles for later limit validation');
+    assert.strictEqual(normalized.profiles[0].applications.length, 300, 'normalization must preserve assignments for later limit validation');
     assert.strictEqual(normalized.profiles[0].template, null, 'oversized profile template references must be rejected');
     assert.strictEqual(normalized.profiles[0].keybox, null, 'oversized profile keybox references must be rejected');
     assert.strictEqual(normalized.profiles[0].privacy, 'inherit', 'unknown privacy modes must fall back safely');
