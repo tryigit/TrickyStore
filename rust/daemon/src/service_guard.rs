@@ -13,6 +13,16 @@ where
     }
 }
 
+pub(crate) fn run_allow_clean_exit<F>(service: F) -> io::Result<()>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    match catch_unwind(AssertUnwindSafe(service)) {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::other("service thread panicked")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,5 +58,18 @@ mod tests {
         let error = result.expect_err("service error must propagate");
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         assert_eq!(error.to_string(), "transport failed");
+    }
+
+    #[test]
+    fn clean_exit_can_be_explicitly_allowed_for_bounded_services() {
+        assert!(run_allow_clean_exit(|| Ok(())).is_ok());
+        let error = run_allow_clean_exit(|| {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "transport failed",
+            ))
+        })
+        .expect_err("real service errors must still propagate");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 }
