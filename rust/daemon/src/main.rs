@@ -356,6 +356,8 @@ fn harden_process() -> io::Result<()> {
             "shell supervisor is unavailable",
         ));
     }
+    // SAFETY: `prctl(PR_SET_PDEATHSIG, SIGTERM)` has no pointer arguments. If the shell supervisor
+    // dies, the daemon must also terminate to avoid orphaning and socket port conflicts.
     if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -365,7 +367,11 @@ fn harden_process() -> io::Result<()> {
             "shell supervisor changed during hardening",
         ));
     }
+    // SAFETY: `umask` takes a value argument only, has process-global semantics intended for this
+    // single-purpose daemon, and retains no pointers or references.
     unsafe { libc::umask(0o077) };
+    // SAFETY: `prctl(PR_SET_DUMPABLE, 0)` has no pointer arguments. This daemon intentionally makes
+    // itself non-dumpable before it accepts privileged IPC or starts the Android adapter.
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -387,6 +393,10 @@ fn spawn_android_adapter(module_dir: &Path) -> io::Result<Child> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
+    // SAFETY: the pre-exec closure uses only async-signal-safe Linux syscalls (`prctl`, `getppid`)
+    // and constructs no shared Rust state after fork. It runs in the child immediately before exec.
+    // PR_SET_PDEATHSIG prevents an adapter orphan if the Rust supervisor is terminated, while the
+    // parent-PID check closes the race where the parent exits between fork and `prctl`.
     unsafe {
         command.pre_exec(|| {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0) != 0 {
@@ -419,6 +429,8 @@ fn spawn_backend(module_dir: &Path, adapter_pid: u32) -> io::Result<(Child, Unix
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    // SAFETY: the closure performs only async-signal-safe descriptor syscalls. `child_broker_fd` is
+    // live in the forked child and the target descriptor is a fixed value below RLIMIT_NOFILE.
     unsafe {
         command.pre_exec(move || inherit_broker_fd(child_broker_fd));
     }
@@ -429,10 +441,12 @@ fn spawn_backend(module_dir: &Path, adapter_pid: u32) -> io::Result<(Child, Unix
 
 /// Sets the close-on-exec flag for the given file descriptor.
 fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    // SAFETY: F_GETFD/F_SETFD are scalar descriptor operations and retain no pointers.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: fd remains live for this call; the flags value came from F_GETFD above.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -442,13 +456,17 @@ fn set_cloexec(fd: RawFd) -> io::Result<()> {
 /// Duplicates the source FD to the fixed backend broker FD slot and clears close-on-exec.
 fn inherit_broker_fd(source: RawFd) -> io::Result<()> {
     if source != BACKEND_BROKER_FD {
+        // SAFETY: both descriptors are scalar values. dup2 atomically replaces the target and
+        // clears close-on-exec on the inherited copy. The source is closed only after success.
         if unsafe { libc::dup2(source, BACKEND_BROKER_FD) } < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: source remains a distinct live descriptor after successful dup2.
         let _ = unsafe { libc::close(source) };
         return Ok(());
     }
 
+    // SAFETY: when source already equals the fixed target we only clear FD_CLOEXEC so exec keeps it.
     let flags = unsafe { libc::fcntl(source, libc::F_GETFD) };
     if flags < 0 || unsafe { libc::fcntl(source, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
         return Err(io::Error::last_os_error());
@@ -471,9 +489,9 @@ fn spawn_keybox_broker(
     thread::Builder::new()
         .name("ct-keybox-broker".to_string())
         .spawn(move || {
-            if let Err(error) = service_guard::run_allow_clean_exit(|| {
-                keybox_file_broker::serve(broker, &broker_root)
-            }) {
+            if let Err(error) =
+                service_guard::run(|| keybox_file_broker::serve(broker, &broker_root))
+            {
                 let _ = failure_tx.send(error);
             }
         })
@@ -542,6 +560,7 @@ struct BackendRetryPlan {
     circuit_open: bool,
 }
 
+/// Computes a retry plan for the backend with exponential backoff and circuit breaking.
 fn backend_retry_plan(previous_rapid_failures: u32, runtime: Duration) -> BackendRetryPlan {
     if runtime >= BACKEND_STABLE_INTERVAL {
         return BackendRetryPlan {
@@ -568,6 +587,7 @@ fn backend_retry_plan(previous_rapid_failures: u32, runtime: Duration) -> Backen
     }
 }
 
+/// Computes a retry plan for the adapter with exponential backoff and circuit breaking.
 fn adapter_retry_plan(previous_rapid_failures: u32, runtime: Duration) -> AdapterRetryPlan {
     if runtime >= ADAPTER_STABLE_INTERVAL {
         return AdapterRetryPlan {
@@ -592,6 +612,7 @@ fn adapter_retry_plan(previous_rapid_failures: u32, runtime: Duration) -> Adapte
     }
 }
 
+/// Supervises the backend process, restarting it with backoff on failures.
 fn supervise_backend(
     module_dir: PathBuf,
     adapter_identity: Arc<AdapterIdentity>,
@@ -626,6 +647,7 @@ fn supervise_backend(
     }
 }
 
+/// Spawns worker threads to handle file capability requests from the adapter.
 fn spawn_capability_workers(
     listener: UnixListener,
     adapter_identity: Arc<AdapterIdentity>,
@@ -649,6 +671,7 @@ fn spawn_capability_workers(
     Ok(())
 }
 
+/// Accepts and handles capability IPC requests from the adapter in a worker loop.
 fn serve_capability_worker(
     listener: UnixListener,
     adapter_identity: Arc<AdapterIdentity>,
@@ -698,6 +721,7 @@ fn serve_capability_worker(
     }
 }
 
+/// Handles a single capability request (ping or file write) from a client.
 fn handle_capability_request(
     client: &mut UnixStream,
     peer_is_adapter: bool,
@@ -732,6 +756,7 @@ struct CachedManifest {
     allow_unsigned: bool,
 }
 
+/// Serves WebUI IPC requests, relaying them to the registered adapter and handling integrity checks.
 fn serve_web(
     listener: UnixListener,
     adapter_identity: Arc<AdapterIdentity>,
@@ -875,6 +900,7 @@ fn serve_web(
     }
 }
 
+/// Handles a full integrity verification request by loading and verifying the manifest.
 fn handle_integrity_verify_full(
     client: &mut UnixStream,
     module_dir: &Path,
@@ -964,6 +990,7 @@ fn handle_integrity_verify_full(
     }
 }
 
+/// Handles a single-file integrity verification request using a cached or freshly loaded manifest.
 fn handle_integrity_verify_file(
     client: &mut UnixStream,
     module_dir: &Path,
@@ -1133,6 +1160,7 @@ fn handle_integrity_verify_file(
     }
 }
 
+/// Reads a manifest through a hard stream bound so a growing file cannot exhaust memory.
 fn read_manifest_bounded<R: Read>(reader: R) -> io::Result<String> {
     let mut manifest = String::new();
     reader
@@ -1147,10 +1175,12 @@ fn read_manifest_bounded<R: Read>(reader: R) -> io::Result<String> {
     Ok(manifest)
 }
 
+/// Returns a stable, non-reversible cache identity for a public key.
 fn public_key_fingerprint(public_key: &[u8; 32]) -> [u8; 32] {
     Sha256::digest(public_key).into()
 }
 
+/// Retrieves a cached manifest only when it was authenticated under the current verification policy.
 fn cached_manifest_for_key(
     cached_manifest: &std::sync::RwLock<Option<CachedManifest>>,
     public_key: &[u8; 32],
@@ -1168,6 +1198,7 @@ fn cached_manifest_for_key(
     })
 }
 
+/// Restricts destructive module deletion to the active adapter and an empty request frame.
 fn integrity_delete_request_authorized(
     header: FrameHeader,
     peer_lease: Option<AdapterLease>,
@@ -1175,6 +1206,7 @@ fn integrity_delete_request_authorized(
     peer_lease.is_some() && header.flags == 0 && header.payload_len == 0
 }
 
+/// Sends a confirmed integrity violation as a verdict rather than an operational error.
 fn write_integrity_violation(
     client: &mut UnixStream,
     opcode: u16,
@@ -1187,6 +1219,7 @@ fn write_integrity_violation(
     write_frame(client, opcode, 0, &payload)
 }
 
+/// Handles a module deletion request by wiping the module directory and rebooting.
 fn handle_integrity_delete_module(client: &mut UnixStream, module_dir: &Path) {
     if let Err(error) = delete_dir_contents_safe(module_dir) {
         let _ = reply_error(client, OP_INTEGRITY_DELETE_MODULE, &error);
@@ -1259,6 +1292,7 @@ fn delete_dir_contents_safe(dir: &Path) -> io::Result<()> {
     fs::remove_dir(dir)
 }
 
+/// Forwards a web request to the registered adapter and relays the response back to the client.
 fn forward_web_request_with_timeout(
     client: &mut UnixStream,
     request: FrameHeader,
@@ -1291,10 +1325,12 @@ fn forward_web_request_with_timeout(
     relay_exact(target, client, response.payload_len, scratch)
 }
 
+/// Replies to a request with an error frame derived from an IO error.
 fn reply_error(stream: &mut UnixStream, opcode: u16, error: &io::Error) -> io::Result<()> {
     reply_text_error(stream, opcode, &error.to_string())
 }
 
+/// Replies to a request with an error frame containing the given message.
 fn reply_text_error(stream: &mut UnixStream, opcode: u16, message: &str) -> io::Result<()> {
     let bytes = message.as_bytes();
     write_frame(
@@ -1317,6 +1353,7 @@ mod tests {
     }
 
     impl TestRoot {
+        /// Creates a new temporary test root directory.
         fn new() -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(1);
             let path = std::env::temp_dir().join(format!(
@@ -1328,6 +1365,7 @@ mod tests {
             Self { path }
         }
 
+        /// Opens the test root as a TrustedDir.
         fn trusted(&self) -> TrustedDir {
             TrustedDir::open(&self.path).unwrap()
         }
@@ -1339,6 +1377,7 @@ mod tests {
         }
     }
 
+    /// Constructs a configuration file write payload with path and body.
     fn config_payload(path: &str, body: &[u8]) -> Vec<u8> {
         let path = path.as_bytes();
         let body_len = u32::try_from(body.len()).unwrap();
@@ -1352,6 +1391,7 @@ mod tests {
         payload
     }
 
+    /// Reads a frame header and payload from the stream.
     fn read_payload(stream: &mut UnixStream, max: usize) -> (FrameHeader, Vec<u8>) {
         let header = read_header_bounded(stream, max).unwrap();
         let mut body = vec![0u8; header.payload_len];
@@ -1359,6 +1399,7 @@ mod tests {
         (header, body)
     }
 
+    /// Tests that a web request can trigger a file write without deadlock.
     fn exercise_reentrant_web_write(path: &str, body: Vec<u8>) {
         let test = TestRoot::new();
         let root = Arc::new(test.trusted());
@@ -1671,22 +1712,6 @@ mod tests {
             .expect("broker failure should reach the child-owning supervisor");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         handle.join().unwrap();
-    }
-
-    #[test]
-    fn keybox_broker_eof_is_clean_completion() {
-        let test = TestRoot::new();
-        let root = Arc::new(test.trusted());
-        let (client, broker) = UnixStream::pair().unwrap();
-        let (failure_tx, failure_rx) = mpsc::sync_channel(1);
-        let handle = spawn_keybox_broker(broker, root, failure_tx).unwrap();
-
-        drop(client);
-        handle.join().unwrap();
-        assert!(matches!(
-            failure_rx.try_recv(),
-            Err(mpsc::TryRecvError::Disconnected)
-        ));
     }
 
     #[test]
