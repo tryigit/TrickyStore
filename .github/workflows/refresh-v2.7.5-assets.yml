@@ -14,11 +14,19 @@ jobs:
   refresh:
     if: github.repository == 'tryigit/CleveresTricky'
     runs-on: ubuntu-latest
+    env:
+      SOURCE_RUN: '34265010949'
+      TAG: 'V2.7.5'
+      MODULE_ARTIFACT: 'CleveresTricky-V2.7.5-3938-f98d141d-release.zip'
+      NEW_ZIP: 'CleveresTricky-V2.7.5-3938-f98d141d-release.zip'
+      APK: 'encryptor-app-release.apk'
+      UPDATE_REPO: 'tryigit/cleverestricky-update'
+      UPDATE_FILE: 'update.json'
+
     steps:
       - name: Verify source build
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN: '34265010949'
         shell: bash
         run: |
           set -euo pipefail
@@ -28,35 +36,45 @@ jobs:
       - name: Download exact V2.7.5 artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN: '34265010949'
-          MODULE_ARTIFACT: 'CleveresTricky-V2.7.5-3938-f98d141d-release.zip'
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release-assets/module release-assets/app
-          gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --name "$MODULE_ARTIFACT" --dir release-assets/module
+          mkdir -p release-assets release-assets/app
+
+          artifact_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN}/artifacts?per_page=100")
+          module_id=$(jq -r --arg name "$MODULE_ARTIFACT" '.artifacts[] | select(.name == $name) | .id' <<<"$artifact_json" | head -n1)
+          module_digest=$(jq -r --arg name "$MODULE_ARTIFACT" '.artifacts[] | select(.name == $name) | .digest // empty' <<<"$artifact_json" | head -n1)
+          test -n "$module_id" && test "$module_id" != null || { echo '::error::Module artifact not found'; exit 1; }
+
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${module_id}/zip" \
+            -o "release-assets/$NEW_ZIP"
+          test -s "release-assets/$NEW_ZIP"
+          unzip -tq "release-assets/$NEW_ZIP" >/dev/null
+
+          if [[ "$module_digest" == sha256:* ]]; then
+            expected=${module_digest#sha256:}
+            actual=$(sha256sum "release-assets/$NEW_ZIP" | awk '{print $1}')
+            test "$actual" = "$expected" || { echo "::error::Module artifact digest mismatch"; exit 1; }
+          fi
+
           gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --name EncryptorApp --dir release-assets/app
+          apk_path=$(find release-assets/app -type f -name '*.apk' -print -quit)
+          test -n "$apk_path" && test -f "$apk_path" || { echo '::error::Expected signed APK was not downloaded'; exit 1; }
+          cp "$apk_path" "release-assets/$APK"
+          rm -rf release-assets/app
 
-          module_zip=$(find release-assets/module -type f -name 'CleveresTricky-V2.7.5-3938-f98d141d-release.zip' -print -quit)
-          apk=$(find release-assets/app -type f -name 'encryptor-app-release.apk' -print -quit)
-          test -n "$module_zip" && test -f "$module_zip" || { echo '::error::Expected module ZIP was not downloaded'; exit 1; }
-          test -n "$apk" && test -f "$apk" || { echo '::error::Expected signed APK was not downloaded'; exit 1; }
-          unzip -tq "$module_zip" >/dev/null
-
-          cp "$module_zip" release-assets/
-          cp "$apk" release-assets/
-          rm -rf release-assets/module release-assets/app
           (
             cd release-assets
-            sha256sum -- CleveresTricky-V2.7.5-3938-f98d141d-release.zip encryptor-app-release.apk | LC_ALL=C sort -k2 > SHA256SUMS
+            sha256sum -- "$NEW_ZIP" "$APK" | LC_ALL=C sort -k2 > SHA256SUMS
             sha256sum -c SHA256SUMS
           )
 
       - name: Replace assets on existing V2.7.5 release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: V2.7.5
-          NEW_ZIP: CleveresTricky-V2.7.5-3938-f98d141d-release.zip
         shell: bash
         run: |
           set -euo pipefail
@@ -65,7 +83,7 @@ jobs:
 
           gh release upload "$TAG" \
             "release-assets/$NEW_ZIP" \
-            release-assets/encryptor-app-release.apk \
+            "release-assets/$APK" \
             release-assets/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
@@ -80,11 +98,58 @@ jobs:
 
           names=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" --jq '.[].name')
           grep -Fx "$NEW_ZIP" <<<"$names" >/dev/null
-          grep -Fx 'encryptor-app-release.apk' <<<"$names" >/dev/null
+          grep -Fx "$APK" <<<"$names" >/dev/null
           grep -Fx 'SHA256SUMS' <<<"$names" >/dev/null
           if grep -E '^CleveresTricky-V2\.7\.5-.*-release\.zip$' <<<"$names" | grep -Fvx "$NEW_ZIP" >/dev/null; then
             echo '::error::A stale V2.7.5 module ZIP remains on the release'
             exit 1
+          fi
+
+      - name: Update update.json
+        env:
+          GH_TOKEN: ${{ secrets.UPDATE_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${GH_TOKEN:?UPDATE_REPO_TOKEN secret is required}"
+          tmpdir=$(mktemp -d)
+          gh repo clone "$UPDATE_REPO" "$tmpdir/update-repo" -- --depth 1
+          cd "$tmpdir/update-repo"
+
+          ZIP_SHA=$(sha256sum "$GITHUB_WORKSPACE/release-assets/$NEW_ZIP" | awk '{print $1}')
+          APK_SHA=$(sha256sum "$GITHUB_WORKSPACE/release-assets/$APK" | awk '{print $1}')
+          export ZIP_SHA APK_SHA NEW_ZIP APK TAG SOURCE_REPOSITORY="$GITHUB_REPOSITORY"
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import quote
+
+          path = Path(os.environ.get("UPDATE_FILE", "update.json"))
+          data = json.loads(path.read_text())
+          base = (
+              "https://github.com/"
+              + os.environ["SOURCE_REPOSITORY"]
+              + "/releases/download/"
+              + quote(os.environ["TAG"], safe="")
+              + "/"
+          )
+          data["moduleUrl"] = base + quote(os.environ["NEW_ZIP"], safe="")
+          data["moduleSha256"] = os.environ["ZIP_SHA"]
+          data["encryptorUrl"] = base + quote(os.environ["APK"], safe="")
+          data["encryptorSha256"] = os.environ["APK_SHA"]
+          path.write_text(json.dumps(data, ensure_ascii=False, indent=4) + "\n")
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$UPDATE_FILE"
+          if git diff --cached --quiet; then
+            echo 'update.json is already current.'
+          else
+            git commit -m 'chore: refresh V2.7.5 update manifest'
+            git push
           fi
 
       - name: Show published checksums
