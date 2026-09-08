@@ -11,9 +11,13 @@ import java.security.cert.Certificate;
 import java.util.Map;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -141,6 +145,85 @@ public class AttestationRequestContractTest {
             else cache.put(key, previous);
         }
     }
+
+    @Test
+    public void computeKeyDescriptorIdentityIsDeterministicAndDifferentiatesDistinctFields() {
+        int uid = 10001;
+        int domain = 1;
+        long nspace = 42L;
+        String alias = "my_key";
+        byte[] blob = new byte[] {1, 2, 3};
+
+        byte[] base = Utils.computeKeyDescriptorIdentity(uid, domain, nspace, alias, blob);
+        assertEquals(32, base.length);
+
+        // Deterministic
+        assertArrayEquals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, alias, blob));
+
+        // Different UID
+        assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid + 1, domain, nspace, alias, blob)));
+
+        // Different domain
+        assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain + 1, nspace, alias, blob)));
+
+        // Different nspace
+        assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace + 1, alias, blob)));
+
+        // Different alias
+        assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, "other_key", blob)));
+        assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, null, blob)));
+
+        // Different blob
+        assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, alias, new byte[] {1, 2, 4})));
+        assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, alias, null)));
+    }
+
+    @Test
+    public void parseGenerateKeyRequestExtractsIdentityAndRespectsAttestationKeyPresence() {
+        Parcel request = mock(Parcel.class);
+        java.util.concurrent.atomic.AtomicInteger pos = new java.util.concurrent.atomic.AtomicInteger(28);
+        when(request.dataPosition()).thenAnswer(inv -> pos.get());
+        org.mockito.Mockito.doAnswer(inv -> {
+            pos.set(inv.getArgument(0));
+            return null;
+        }).when(request).setDataPosition(anyInt());
+        when(request.dataAvail()).thenReturn(128);
+        when(request.dataSize()).thenReturn(128);
+
+        // 1. Request with default attestation key (presence = 0) and attestKey purpose
+        java.util.Iterator<Integer> defaultAttestInts = java.util.Arrays.asList(
+                1, 16, 0, // KeyDescriptor (presence, size, domain)
+                0,        // attestationKey (presence = 0, null/default)
+                1, 1, 20, 536870913, 7, 7 // params (count, presence, size, tag, unionTag, unionVal)
+        ).iterator();
+        when(request.readInt()).thenAnswer(inv -> defaultAttestInts.hasNext() ? defaultAttestInts.next() : 0);
+
+        Utils.GenerateKeyRequestInfo info = Utils.parseGenerateKeyRequest(request, 10001);
+        assertNotNull(info);
+        assertTrue(info.usesDefaultAttestationKey);
+        assertTrue(info.isAttestKeyPurpose);
+        assertNotNull(info.generatedKeyId);
+        assertEquals(32, info.generatedKeyId.length);
+        assertNull(info.parentKeyId);
+
+        // 2. Request with explicit parent attest key (presence = 1) and non-attest purpose
+        pos.set(28);
+        java.util.Iterator<Integer> explicitParentInts = java.util.Arrays.asList(
+                1, 16, 0, // Generated KeyDescriptor (presence, size, domain)
+                1, 16, 0, // Parent KeyDescriptor (presence, size, domain)
+                0         // params (count = 0)
+        ).iterator();
+        when(request.readInt()).thenAnswer(inv -> explicitParentInts.hasNext() ? explicitParentInts.next() : 0);
+
+        Utils.GenerateKeyRequestInfo childInfo = Utils.parseGenerateKeyRequest(request, 10001);
+        assertNotNull(childInfo);
+        assertFalse(childInfo.usesDefaultAttestationKey);
+        assertFalse(childInfo.isAttestKeyPurpose);
+        assertNotNull(childInfo.generatedKeyId);
+        assertNotNull(childInfo.parentKeyId);
+        assertEquals(32, childInfo.parentKeyId.length);
+    }
+
     static Parcel request(boolean explicitIssuer) {
         Parcel request = mock(Parcel.class);
         when(request.dataPosition()).thenReturn(28, 32);

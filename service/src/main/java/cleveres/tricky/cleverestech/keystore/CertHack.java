@@ -785,6 +785,7 @@ public final class CertHack {
             currentState.certificateCacheEpoch = new Object();
             currentState.certificateCache.clear();
         }
+        CertificateBackend.clearAttestKeyStore();
     }
 
     static Object captureCertificateCacheEpochForTesting() {
@@ -1075,11 +1076,21 @@ public final class CertHack {
     }
 
     public static Certificate[] hackAttestKeyCertificateChain(Certificate[] caList, int uid) {
-        return hackAttestKeyCertificateChain(caList, uid, false);
+        return hackAttestKeyCertificateChain(caList, uid, false, null);
     }
 
     public static Certificate[] hackAttestKeyCertificateChain(
             Certificate[] caList, int uid, boolean leafOnlySafe) {
+        return hackAttestKeyCertificateChain(caList, uid, leafOnlySafe, null);
+    }
+
+    public static Certificate[] hackAttestKeyCertificateChain(
+            Certificate[] caList, int uid, byte[] attestKeyId) {
+        return hackAttestKeyCertificateChain(caList, uid, false, attestKeyId);
+    }
+
+    public static Certificate[] hackAttestKeyCertificateChain(
+            Certificate[] caList, int uid, boolean leafOnlySafe, byte[] attestKeyId) {
         if (caList == null || caList.length == 0 || caList[0] == null) {
             throw new UnsupportedOperationException("Certificate chain is empty");
         }
@@ -1203,10 +1214,14 @@ public final class CertHack {
             byte[] moduleHash = attestInspection.getSupportsModuleHash()
                     ? Config.INSTANCE.getModuleHash()
                     : null;
+            if (attestKeyId == null || attestKeyId.length != 32) {
+                return caList;
+            }
             keyId = prepared.keyId.clone();
 
             byte[] rewrittenDer = CertificateBackend.rewriteAttestKey(
                     uid,
+                    attestKeyId,
                     leafEncoded,
                     keyId,
                     signingAlgorithm,
@@ -1255,11 +1270,21 @@ public final class CertHack {
 
     public static Certificate[] hackChildKeyCertificate(
             Certificate[] caList, int uid, boolean isAttestKey) {
-        return hackChildKeyCertificate(caList, uid, isAttestKey, false);
+        return hackChildKeyCertificate(caList, uid, isAttestKey, false, null, null);
     }
 
     public static Certificate[] hackChildKeyCertificate(
             Certificate[] caList, int uid, boolean isAttestKey, boolean leafOnlySafe) {
+        return hackChildKeyCertificate(caList, uid, isAttestKey, leafOnlySafe, null, null);
+    }
+
+    public static Certificate[] hackChildKeyCertificate(
+            Certificate[] caList, int uid, boolean isAttestKey, byte[] parentKeyId, byte[] childKeyId) {
+        return hackChildKeyCertificate(caList, uid, isAttestKey, false, parentKeyId, childKeyId);
+    }
+
+    public static Certificate[] hackChildKeyCertificate(
+            Certificate[] caList, int uid, boolean isAttestKey, boolean leafOnlySafe, byte[] parentKeyId, byte[] childKeyId) {
         if (caList == null || caList.length == 0 || caList[0] == null) {
             return caList;
         }
@@ -1341,8 +1366,17 @@ public final class CertHack {
                     ? Config.INSTANCE.getModuleHash()
                     : null;
 
+            if (parentKeyId == null || parentKeyId.length != 32) {
+                return caList;
+            }
+            if (isAttestKey && (childKeyId == null || childKeyId.length != 32)) {
+                return caList;
+            }
+
             byte[] rewrittenDer = CertificateBackend.rewriteChildKey(
                     uid,
+                    parentKeyId,
+                    childKeyId,
                     leafEncoded,
                     isAttestKey,
                     patchDisposition(patchLevels.getSystem()), patchLevels.getSystem().getValue(),

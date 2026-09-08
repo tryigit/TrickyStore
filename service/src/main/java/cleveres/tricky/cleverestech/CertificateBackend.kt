@@ -56,10 +56,13 @@ object CertificateBackend {
     internal var rewriteOverride: ((RewriteRequest) -> ByteArray?)? = null
 
     @VisibleForTesting
-    internal var rewriteAttestKeyOverride: ((Int, RewriteRequest) -> ByteArray?)? = null
+    internal var rewriteAttestKeyOverride: ((Int, ByteArray, RewriteRequest) -> ByteArray?)? = null
 
     @VisibleForTesting
-    internal var rewriteChildKeyOverride: ((Int, Boolean, ByteArray, ByteArray, ByteArray) -> ByteArray?)? = null
+    internal var rewriteChildKeyOverride: ((Int, ByteArray, ByteArray?, Boolean, ByteArray, ByteArray, ByteArray) -> ByteArray?)? = null
+
+    @VisibleForTesting
+    internal var clearAttestKeyStoreOverride: (() -> Boolean)? = null
 
     @VisibleForTesting
     internal var rewriteTransportOverride: ((Int, (OutputStream) -> Unit) -> ByteArray?)? = null
@@ -187,6 +190,7 @@ object CertificateBackend {
     @JvmStatic
     fun rewriteAttestKey(
         callingUid: Int,
+        attestKeyId: ByteArray,
         genuineLeafDer: ByteArray,
         keyId: ByteArray,
         signingAlgorithm: Int,
@@ -201,7 +205,10 @@ object CertificateBackend {
         verifiedBootKey: ByteArray,
         verifiedBootHash: ByteArray,
     ): ByteArray? {
-        if (callingUid < 0 || genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_CERTIFICATE_DER_BYTES ||
+        if (callingUid < 0 ||
+            attestKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES ||
+            attestKeyId.all { it == 0.toByte() } ||
+            genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_CERTIFICATE_DER_BYTES ||
             keyId.size != KEY_ID_BYTES || keyId.all { it == 0.toByte() } ||
             signingAlgorithm !in SIGNING_EC_P256_SHA256..SIGNING_RSA_PKCS1_SHA256 ||
             !validPatch(systemDisposition, systemValue) ||
@@ -238,6 +245,7 @@ object CertificateBackend {
             val result =
                 override(
                     callingUid,
+                    attestKeyId,
                     RewriteRequest(
                         genuineLeafDer = genuineLeafDer,
                         keyId = keyId,
@@ -268,6 +276,7 @@ object CertificateBackend {
             writeU16(output, moduleHash?.size ?: 0)
             writeI32(output, genuineLeafDer.size)
             output.write(keyId)
+            output.write(attestKeyId)
             output.write(verifiedBootKey)
             output.write(verifiedBootHash)
             for ((tag, value) in orderedIds) {
@@ -290,6 +299,8 @@ object CertificateBackend {
     @JvmStatic
     fun rewriteChildKey(
         callingUid: Int,
+        parentKeyId: ByteArray,
+        childKeyId: ByteArray?,
         genuineLeafDer: ByteArray,
         isAttestKey: Boolean,
         systemDisposition: Int,
@@ -303,7 +314,12 @@ object CertificateBackend {
         verifiedBootKey: ByteArray,
         verifiedBootHash: ByteArray,
     ): ByteArray? {
-        if (callingUid < 0 || genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_CERTIFICATE_DER_BYTES ||
+        if (callingUid < 0 ||
+            parentKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES ||
+            parentKeyId.all { it == 0.toByte() } ||
+            (isAttestKey && (childKeyId == null || childKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES || childKeyId.all { it == 0.toByte() })) ||
+            (!isAttestKey && childKeyId != null && childKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES) ||
+            genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_CERTIFICATE_DER_BYTES ||
             !validPatch(systemDisposition, systemValue) ||
             !validPatch(vendorDisposition, vendorValue) ||
             !validPatch(bootDisposition, bootValue) ||
@@ -338,6 +354,8 @@ object CertificateBackend {
             val result =
                 override(
                     callingUid,
+                    parentKeyId,
+                    childKeyId,
                     isAttestKey,
                     genuineLeafDer,
                     verifiedBootKey,
@@ -346,6 +364,7 @@ object CertificateBackend {
             return if (result != null && (result.isEmpty() || result.size > MAX_REWRITTEN_LEAF_BYTES)) null else result
         }
 
+        val zeroChildKey = ByteArray(ATTEST_DESCRIPTOR_KEY_ID_BYTES)
         val writePayload: (OutputStream) -> Unit = { output ->
             output.write(REWRITE_WIRE_VERSION)
             writeI32(output, callingUid)
@@ -356,6 +375,8 @@ object CertificateBackend {
             output.write(orderedIds.size)
             writeU16(output, moduleHash?.size ?: 0)
             writeI32(output, genuineLeafDer.size)
+            output.write(parentKeyId)
+            output.write(childKeyId ?: zeroChildKey)
             output.write(verifiedBootKey)
             output.write(verifiedBootHash)
             for ((tag, value) in orderedIds) {
@@ -375,6 +396,21 @@ object CertificateBackend {
         )
     }
 
+    @JvmStatic
+    fun clearAttestKeyStore(): Boolean {
+        clearAttestKeyStoreOverride?.let { return it() }
+        val response =
+            NativeBackend.transact(
+                OP_ATTEST_KEY_CLEAR,
+                ATTEST_KEY_CLEAR_REQUEST_BYTES,
+                ATTEST_KEY_CLEAR_RESPONSE_BYTES,
+                propagateTransportFailure = false,
+            ) { output ->
+                output.write(1)
+            } ?: return false
+        return response.size == ATTEST_KEY_CLEAR_RESPONSE_BYTES && response[0] == 0.toByte()
+    }
+
     @VisibleForTesting
     internal fun resetForTesting() {
         inspectionOverride = null
@@ -382,6 +418,7 @@ object CertificateBackend {
         rewriteTransportOverride = null
         rewriteAttestKeyOverride = null
         rewriteChildKeyOverride = null
+        clearAttestKeyStoreOverride = null
     }
 
     internal fun decodeInspection(response: ByteArray): Inspection {
@@ -546,15 +583,19 @@ object CertificateBackend {
     private const val OP_CERTIFICATE_REWRITE = 26
     private const val OP_ATTEST_KEY_REWRITE = 32
     private const val OP_CHILD_KEY_REWRITE = 33
+    private const val OP_ATTEST_KEY_CLEAR = 34
     private const val INSPECT_WIRE_VERSION = 2
     private const val REWRITE_WIRE_VERSION = 2
     private const val INSPECT_RESPONSE_BYTES = 85
+    private const val ATTEST_KEY_CLEAR_REQUEST_BYTES = 1
+    private const val ATTEST_KEY_CLEAR_RESPONSE_BYTES = 1
     private const val FLAG_MODULE_HASH_SUPPORTED = 1
     private const val FLAG_BOOT_KEY_PRESENT = 1 shl 1
     private const val FLAG_BOOT_HASH_PRESENT = 1 shl 2
     private const val INSPECT_RESERVED_FLAGS = 0xf8
     private const val PRESENT_ID_RESERVED_MASK = 0xfe00
     private const val KEY_ID_BYTES = 16
+    private const val ATTEST_DESCRIPTOR_KEY_ID_BYTES = 32
     private const val MAX_CERTIFICATE_DER_BYTES = 256 * 1024
     private const val MAX_REWRITTEN_LEAF_BYTES = 64 * 1024
     private const val MAX_ATTESTATION_ID_BYTES = 4 * 1024
@@ -563,8 +604,8 @@ object CertificateBackend {
     private const val BOOT_DIGEST_BYTES = 32
     private const val ID_HEADER_BYTES = 4
     private const val REWRITE_FIXED_BYTES = 104
-    private const val ATTEST_KEY_REWRITE_FIXED_BYTES = 108
-    private const val CHILD_KEY_REWRITE_FIXED_BYTES = 92
+    private const val ATTEST_KEY_REWRITE_FIXED_BYTES = 140
+    private const val CHILD_KEY_REWRITE_FIXED_BYTES = 156
     private const val MAX_ID_WIRE_BYTES = MAX_ID_OVERRIDES * (ID_HEADER_BYTES + MAX_ATTESTATION_ID_BYTES)
     private const val MAX_REWRITE_REQUEST_BYTES =
         REWRITE_FIXED_BYTES +

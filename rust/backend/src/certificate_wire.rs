@@ -17,8 +17,9 @@ const PATCH_OMIT: u8 = 1;
 const PATCH_REPLACE: u8 = 2;
 const MAX_ID_OVERRIDES: usize = 9;
 const REWRITE_FIXED_BYTES: usize = 1 + 1 + 3 * 5 + 1 + 2 + 4 + KEY_ID_BYTES + 2 * 32;
-const ATTEST_KEY_REWRITE_FIXED_BYTES: usize = 1 + 4 + 1 + 3 * 5 + 1 + 2 + 4 + KEY_ID_BYTES + 2 * 32;
-const CHILD_KEY_REWRITE_FIXED_BYTES: usize = 1 + 4 + 1 + 3 * 5 + 1 + 2 + 4 + 2 * 32;
+const ATTEST_KEY_REWRITE_FIXED_BYTES: usize =
+    1 + 4 + 1 + 3 * 5 + 1 + 2 + 4 + KEY_ID_BYTES + 32 + 2 * 32;
+const CHILD_KEY_REWRITE_FIXED_BYTES: usize = 1 + 4 + 1 + 3 * 5 + 1 + 2 + 4 + 32 + 32 + 2 * 32;
 const MAX_ID_WIRE_BYTES: usize = MAX_ID_OVERRIDES * (2 + 2 + MAX_ATTESTATION_ID_BYTES);
 
 pub const MAX_INSPECT_REQUEST_BYTES: usize = MAX_CERTIFICATE_DER_BYTES;
@@ -136,13 +137,19 @@ pub fn rewrite_attest_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'
             .map_err(|_| "attest key rewrite provenance rejected")?;
         validate_hardware_provenance(&provenance)?;
 
+        if !cleverestricky_certificate_core::is_ec_p256_certificate(parsed.genuine_leaf_der)
+            .map_err(|_| "invalid attest key certificate")?
+        {
+            return Err("attest key is not EC P-256");
+        }
+
         let (subject_der, _) = parse_certificate_subject_and_issuer(parsed.genuine_leaf_der)
             .map_err(|_| "invalid attest key certificate")?;
 
         let keypair =
             generate_ec_p256_keypair().map_err(|_| "failed to generate attest keypair")?;
         let prepared_for_children = PreparedIssuer::from_subject_and_key(
-            subject_der.clone(),
+            subject_der,
             &keypair.private_key_pkcs8_der,
             SigningAlgorithm::EcP256Sha256,
         )
@@ -169,8 +176,8 @@ pub fn rewrite_attest_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'
 
             attest_key_store::insert_attest_key(
                 parsed.calling_uid,
-                subject_der,
-                prepared_for_children,
+                parsed.attest_key_id,
+                std::sync::Arc::new(prepared_for_children),
             );
             Ok(rewritten)
         })
@@ -192,45 +199,53 @@ pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'s
             .map_err(|_| "child key rewrite provenance rejected")?;
         validate_hardware_provenance(&provenance)?;
 
-        let (subject_der, issuer_der) =
-            parse_certificate_subject_and_issuer(parsed.genuine_leaf_der)
-                .map_err(|_| "invalid child certificate")?;
+        let parent_issuer =
+            attest_key_store::get_attest_key(parsed.calling_uid, &parsed.parent_key_id)
+                .ok_or("attest issuer not found in managed store")?;
 
-        attest_key_store::with_attest_key(parsed.calling_uid, &issuer_der, |parent_issuer| {
-            let (spki_override, prepared_for_children) = if parsed.is_attest_key {
-                let keypair = generate_ec_p256_keypair()
-                    .map_err(|_| "failed to generate child attest keypair")?;
-                let prepared = PreparedIssuer::from_subject_and_key(
-                    subject_der.clone(),
-                    &keypair.private_key_pkcs8_der,
-                    SigningAlgorithm::EcP256Sha256,
-                )
-                .map_err(|_| "failed to prepare child attest issuer")?;
-                (Some(keypair.public_key_spki_der), Some(prepared))
-            } else {
-                (None, None)
-            };
-
-            let rewritten = rewrite_certificate_prepared(&PreparedCertificateRewriteRequest {
-                genuine_leaf_der: parsed.genuine_leaf_der,
-                issuer: parent_issuer,
-                patch_levels: parsed.patch_levels,
-                id_overrides: &parsed.id_overrides,
-                module_hash: parsed.module_hash,
-                verified_boot_key: parsed.verified_boot_key,
-                verified_boot_hash: parsed.verified_boot_hash,
-                subject_public_key_info: spki_override.as_deref(),
-            })
-            .map(|rewritten| rewritten.leaf_der)
-            .map_err(|_| "child certificate rewrite rejected")?;
-
-            if let Some(prepared) = prepared_for_children {
-                attest_key_store::insert_attest_key(parsed.calling_uid, subject_der, prepared);
+        let (spki_override, prepared_for_children) = if parsed.is_attest_key {
+            if !cleverestricky_certificate_core::is_ec_p256_certificate(parsed.genuine_leaf_der)
+                .map_err(|_| "invalid child certificate")?
+            {
+                return Err("child attest key is not EC P-256");
             }
+            let keypair = generate_ec_p256_keypair()
+                .map_err(|_| "failed to generate child attest keypair")?;
+            let (subject_der, _) = parse_certificate_subject_and_issuer(parsed.genuine_leaf_der)
+                .map_err(|_| "invalid child certificate")?;
+            let prepared = PreparedIssuer::from_subject_and_key(
+                subject_der,
+                &keypair.private_key_pkcs8_der,
+                SigningAlgorithm::EcP256Sha256,
+            )
+            .map_err(|_| "failed to prepare child attest issuer")?;
+            (Some(keypair.public_key_spki_der), Some(prepared))
+        } else {
+            (None, None)
+        };
 
-            Ok(rewritten)
+        let rewritten = rewrite_certificate_prepared(&PreparedCertificateRewriteRequest {
+            genuine_leaf_der: parsed.genuine_leaf_der,
+            issuer: parent_issuer.as_ref(),
+            patch_levels: parsed.patch_levels,
+            id_overrides: &parsed.id_overrides,
+            module_hash: parsed.module_hash,
+            verified_boot_key: parsed.verified_boot_key,
+            verified_boot_hash: parsed.verified_boot_hash,
+            subject_public_key_info: spki_override.as_deref(),
         })
-        .ok_or("attest issuer not found in managed store")?
+        .map(|rewritten| rewritten.leaf_der)
+        .map_err(|_| "child certificate rewrite rejected")?;
+
+        if let Some(prepared) = prepared_for_children {
+            attest_key_store::insert_attest_key(
+                parsed.calling_uid,
+                parsed.child_key_id,
+                std::sync::Arc::new(prepared),
+            );
+        }
+
+        Ok(rewritten)
     })();
     request.zeroize();
     result
@@ -346,6 +361,7 @@ struct ParsedAttestKeyRewrite<'a> {
     module_hash: Option<&'a [u8]>,
     genuine_leaf_der: &'a [u8],
     key_id: KeyId,
+    attest_key_id: [u8; 32],
     verified_boot_key: &'a [u8; 32],
     verified_boot_hash: &'a [u8; 32],
 }
@@ -386,6 +402,13 @@ fn parse_attest_key_rewrite_request(
         .map_err(|_| "invalid opaque key identifier")?;
     if key_id.iter().all(|byte| *byte == 0) {
         return Err("invalid opaque key identifier");
+    }
+    let attest_key_id: [u8; 32] = cursor
+        .read_exact(32)?
+        .try_into()
+        .map_err(|_| "invalid attest key identifier")?;
+    if attest_key_id.iter().all(|byte| *byte == 0) {
+        return Err("invalid attest key identifier");
     }
     let verified_boot_key: &[u8; 32] = cursor
         .read_exact(32)?
@@ -440,6 +463,7 @@ fn parse_attest_key_rewrite_request(
         module_hash,
         genuine_leaf_der,
         key_id,
+        attest_key_id,
         verified_boot_key,
         verified_boot_hash,
     })
@@ -452,6 +476,8 @@ struct ParsedChildKeyRewrite<'a> {
     id_overrides: Vec<AttestationIdOverride<'a>>,
     module_hash: Option<&'a [u8]>,
     genuine_leaf_der: &'a [u8],
+    parent_key_id: [u8; 32],
+    child_key_id: [u8; 32],
     verified_boot_key: &'a [u8; 32],
     verified_boot_hash: &'a [u8; 32],
 }
@@ -481,6 +507,20 @@ fn parse_child_key_rewrite_request(
     let genuine_leaf_len = cursor.read_u32_as_usize()?;
     if genuine_leaf_len == 0 || genuine_leaf_len > MAX_CERTIFICATE_DER_BYTES {
         return Err("certificate DER field exceeds wire bound");
+    }
+    let parent_key_id: [u8; 32] = cursor
+        .read_exact(32)?
+        .try_into()
+        .map_err(|_| "invalid parent attest key identifier")?;
+    if parent_key_id.iter().all(|byte| *byte == 0) {
+        return Err("invalid parent attest key identifier");
+    }
+    let child_key_id: [u8; 32] = cursor
+        .read_exact(32)?
+        .try_into()
+        .map_err(|_| "invalid child attest key identifier")?;
+    if is_attest_key && child_key_id.iter().all(|byte| *byte == 0) {
+        return Err("invalid child attest key identifier");
     }
     let verified_boot_key: &[u8; 32] = cursor
         .read_exact(32)?
@@ -534,6 +574,8 @@ fn parse_child_key_rewrite_request(
         id_overrides,
         module_hash,
         genuine_leaf_der,
+        parent_key_id,
+        child_key_id,
         verified_boot_key,
         verified_boot_hash,
     })

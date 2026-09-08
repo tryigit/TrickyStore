@@ -112,13 +112,24 @@ public class AttestationInterceptorContractTest {
             Certificate[] rewrittenChain = new Certificate[] {replacementCert};
             backend.when(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean()))
                     .thenReturn(rewrittenChain);
+            backend.when(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()))
+                    .thenReturn(rewrittenChain);
 
             Parcel request = mock(Parcel.class);
-            when(request.dataPosition()).thenReturn(28, 32, 28, 32, 40, 44);
+            java.util.concurrent.atomic.AtomicInteger pos = new java.util.concurrent.atomic.AtomicInteger(28);
+            when(request.dataPosition()).thenAnswer(inv -> pos.get());
+            org.mockito.Mockito.doAnswer(inv -> {
+                pos.set(inv.getArgument(0));
+                return null;
+            }).when(request).setDataPosition(anyInt());
             when(request.dataAvail()).thenReturn(128);
-            // 3 ints for usesDefaultAttestationKey (1, 16, 0), then 9 ints for hasAttestKeyPurpose
-            when(request.readInt()).thenReturn(1, 16, 0, 1, 16, 0, 1, 1, 20, 536870913, 7, 7);
             when(request.dataSize()).thenReturn(128);
+            java.util.Iterator<Integer> ints = java.util.Arrays.asList(
+                    1, 16, 0,
+                    0,
+                    1, 1, 20, 536870913, 7, 7
+            ).iterator();
+            when(request.readInt()).thenAnswer(inv -> ints.hasNext() ? ints.next() : 0);
 
             BinderInterceptor.Result preResult = new SecurityLevelInterceptor().onPreTransact(
                     target, code, 0, 10_001, 42, request);
@@ -128,7 +139,7 @@ public class AttestationInterceptorContractTest {
             BinderInterceptor.Result postResult = generate(request, reply);
             assertTrue(postResult instanceof BinderInterceptor.OverrideReply);
 
-            backend.verify(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean()),
+            backend.verify(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()),
                     org.mockito.Mockito.times(1));
             backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()), never());
             backend.verify(() -> CertHack.hackChildKeyCertificate(any(), anyInt(), anyBoolean(), anyBoolean()), never());

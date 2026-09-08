@@ -63,6 +63,9 @@ const OP_KEYBOX_BROKER_OPEN: u16 = 30;
 const OP_CBOX_RECOVER: u16 = 31;
 const OP_ATTEST_KEY_REWRITE: u16 = 32;
 const OP_CHILD_KEY_REWRITE: u16 = 33;
+const OP_ATTEST_KEY_CLEAR: u16 = 34;
+const ATTEST_KEY_CLEAR_REQUEST_BYTES: usize = 1;
+const ATTEST_KEY_CLEAR_RESPONSE_BYTES: usize = 1;
 const SCOPE_CONFIG_ROOT: u8 = 0;
 const SCOPE_KEYBOX_DIRECTORY: u8 = 1;
 
@@ -373,6 +376,7 @@ fn opcode_request_limit(opcode: u16) -> Option<usize> {
         OP_CERTIFICATE_REWRITE => Some(certificate_wire::MAX_REWRITE_REQUEST_BYTES),
         OP_ATTEST_KEY_REWRITE => Some(certificate_wire::MAX_ATTEST_KEY_REWRITE_REQUEST_BYTES),
         OP_CHILD_KEY_REWRITE => Some(certificate_wire::MAX_CHILD_KEY_REWRITE_REQUEST_BYTES),
+        OP_ATTEST_KEY_CLEAR => Some(ATTEST_KEY_CLEAR_REQUEST_BYTES),
         OP_CRL_CHECK_BATCH => Some(crl_wire::MAX_REQUEST_BYTES),
         backend_instance::OP_BACKEND_PING => Some(backend_instance::REQUEST_BYTES),
         _ => None,
@@ -389,6 +393,7 @@ fn opcode_response_limit(opcode: u16) -> Option<usize> {
         OP_CERTIFICATE_REWRITE | OP_ATTEST_KEY_REWRITE | OP_CHILD_KEY_REWRITE => {
             Some(certificate_wire::MAX_REWRITE_RESPONSE_BYTES)
         }
+        OP_ATTEST_KEY_CLEAR => Some(ATTEST_KEY_CLEAR_RESPONSE_BYTES),
         OP_CRL_CHECK_BATCH => Some(crl_wire::MAX_RESPONSE_BYTES),
         backend_instance::OP_BACKEND_PING => Some(backend_instance::RESPONSE_BYTES),
         _ => None,
@@ -476,6 +481,13 @@ fn handle_request(opcode: u16, mut request: Vec<u8>) -> Result<Vec<u8>, &'static
         OP_CERTIFICATE_REWRITE => certificate_wire::rewrite_and_encode(request),
         OP_ATTEST_KEY_REWRITE => certificate_wire::rewrite_attest_key_and_encode(request),
         OP_CHILD_KEY_REWRITE => certificate_wire::rewrite_child_key_and_encode(request),
+        OP_ATTEST_KEY_CLEAR => {
+            if request.len() != ATTEST_KEY_CLEAR_REQUEST_BYTES || request[0] != 1 {
+                return Err("invalid attest key clear request");
+            }
+            attest_key_store::clear();
+            Ok(vec![0])
+        }
         OP_CRL_CHECK_BATCH => crl_wire::handle(request),
         backend_instance::OP_BACKEND_PING => backend_instance::handle(request),
         _ => {

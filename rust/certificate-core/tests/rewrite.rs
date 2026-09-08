@@ -540,3 +540,27 @@ fn encode_sequence<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Vec<u8> {
     let any = attestation_der::asn1::Any::new(attestation_der::Tag::Sequence, value).unwrap();
     attestation_der::Encode::to_der(&any).unwrap()
 }
+
+#[test]
+fn is_ec_p256_certificate_distinguishes_ec_from_rsa() {
+    let ec_doc = parse_keybox_xml_bytes(VALID_EC).expect("EC fixture XML");
+    let ec_pem = ec_doc.keys[0].certificates_pem[0].clone();
+    let ec_cert = Certificate::from_pem(normalized_pem(&ec_pem).as_bytes()).unwrap();
+    let ec_der = ec_cert.to_der().unwrap();
+
+    let rsa_doc = parse_keybox_xml_bytes(VALID_RSA).expect("RSA fixture XML");
+    let rsa_pem = rsa_doc.keys[0].certificates_pem[0].clone();
+    let rsa_cert = Certificate::from_pem(normalized_pem(&rsa_pem).as_bytes()).unwrap();
+    let rsa_der = rsa_cert.to_der().unwrap();
+
+    assert_eq!(
+        cleverestricky_certificate_core::is_ec_p256_certificate(&ec_der),
+        Ok(true)
+    );
+    assert_eq!(
+        cleverestricky_certificate_core::is_ec_p256_certificate(&rsa_der),
+        Ok(false)
+    );
+    assert!(cleverestricky_certificate_core::is_ec_p256_certificate(&[]).is_err());
+    assert!(cleverestricky_certificate_core::is_ec_p256_certificate(&[1, 2, 3]).is_err());
+}

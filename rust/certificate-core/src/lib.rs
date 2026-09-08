@@ -520,6 +520,36 @@ pub fn parse_certificate_subject_and_issuer(
     Ok((subject.to_vec(), issuer.to_vec()))
 }
 
+pub fn is_ec_p256_certificate(certificate_der: &[u8]) -> Result<bool, Error> {
+    if certificate_der.is_empty() || certificate_der.len() > MAX_CERTIFICATE_DER_BYTES {
+        return Err(Error::Bounds);
+    }
+    let cert_seq = parse_any(certificate_der)?;
+    if cert_seq.tag() != Tag::Sequence {
+        return Err(Error::InvalidCertificate);
+    }
+    let mut cert_iter = TlvIterator::new(cert_seq.value());
+    let tbs_der = next_required_tlv(&mut cert_iter)?;
+    let tbs_seq = parse_any(tbs_der)?;
+    if tbs_seq.tag() != Tag::Sequence {
+        return Err(Error::InvalidCertificate);
+    }
+    let mut tbs_iter = TlvIterator::new(tbs_seq.value());
+    let version = next_required_tlv(&mut tbs_iter)?;
+    validate_v3_version(version)?;
+    let _serial = next_required_tlv(&mut tbs_iter)?;
+    let _algorithm = next_required_tlv(&mut tbs_iter)?;
+    let _issuer = next_required_tlv(&mut tbs_iter)?;
+    let _validity = next_required_tlv(&mut tbs_iter)?;
+    let _subject = next_required_tlv(&mut tbs_iter)?;
+    let spki = next_required_tlv(&mut tbs_iter)?;
+    Ok(is_ec_p256_spki(spki))
+}
+
+pub fn is_ec_p256_spki(spki_der: &[u8]) -> bool {
+    EcVerifyingKey::from_public_key_der(spki_der).is_ok()
+}
+
 pub(crate) fn parse_any(encoded: &[u8]) -> Result<AnyRef<'_>, Error> {
     X509Decode::from_der(encoded).map_err(|_| Error::InvalidCertificate)
 }
