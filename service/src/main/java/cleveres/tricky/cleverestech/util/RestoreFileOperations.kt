@@ -78,6 +78,7 @@ internal class JvmSecureRestoreFileOperations(
     private val nowNanos: () -> Long = System::nanoTime,
     private val enableExpiryJanitor: Boolean = true,
     private val operationCompletionHookForTesting: (() -> Unit)? = null,
+    private val transactionCleanupHookForTesting: (() -> Unit)? = null,
 ) : RestoreFileOperations {
     private data class Original(
         val relativePath: String,
@@ -95,7 +96,7 @@ internal class JvmSecureRestoreFileOperations(
         var keyboxesVerified: Boolean = false
         val originals = ArrayList<Original>()
 
-        fun closeAndWipe() {
+        fun closeAndWipe(): Throwable? {
             originals.forEach { original -> original.bytes?.fill(0) }
             originals.clear()
             var closeFailure: Throwable? = null
@@ -114,7 +115,9 @@ internal class JvmSecureRestoreFileOperations(
                     first.addSuppressed(error)
                 }
             }
-            closeFailure?.let { throw IOException("Could not close secure restore directory capabilities", it) }
+            return closeFailure?.let {
+                IOException("Could not close secure restore directory capabilities", it)
+            }
         }
     }
 
@@ -177,11 +180,7 @@ internal class JvmSecureRestoreFileOperations(
                 signalExpiryJanitorLocked()
             } catch (error: Throwable) {
                 transactions.remove(token)?.let { transaction ->
-                    try {
-                        transaction.closeAndWipe()
-                    } catch (closeError: Throwable) {
-                        error.addSuppressed(closeError)
-                    }
+                    closeTransaction(transaction)?.let(error::addSuppressed)
                 }
                 throw error
             }
@@ -389,13 +388,28 @@ internal class JvmSecureRestoreFileOperations(
                 .toList()
         expired.forEach { token ->
             val transaction = transactions.remove(token) ?: return@forEach
-            runCatching { transaction.closeAndWipe() }
+            closeTransaction(transaction)
         }
     }
 
     private fun removeTransaction(token: String) {
-        transactions.remove(token)?.closeAndWipe()
+        transactions.remove(token)?.let(::closeTransaction)
         signalExpiryJanitorLocked()
+    }
+
+    private fun closeTransaction(transaction: Transaction): Throwable? {
+        var failure = transaction.closeAndWipe()
+        try {
+            transactionCleanupHookForTesting?.invoke()
+        } catch (error: Throwable) {
+            val first = failure
+            if (first == null) {
+                failure = error
+            } else {
+                first.addSuppressed(error)
+            }
+        }
+        return failure
     }
 
     private fun signalExpiryJanitorLocked() {
