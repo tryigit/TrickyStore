@@ -2,10 +2,10 @@
 
 ## V2.7.5
 
-Doğrulama ve anahtar işlemlerinde güvenilirlik artırıldı.
+Improved reliability for device verification and key operations.
 
-Keybox seçimi daha anlaşılır hale getirildi ve uyumlu cihazlarda kullanım deneyimi iyileştirildi.
+Made keybox selection clearer and improved the experience on compatible devices.
 
-Kurulum, ayarların geri yüklenmesi ve günlük kullanımda kararlılık geliştirildi.
+Improved installation, settings recovery, and day to day stability.
 
-Genel kullanımda daha hızlı ve daha tutarlı bir deneyim sunuldu.
+Delivered a faster and more consistent overall experience.
