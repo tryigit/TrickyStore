@@ -96,18 +96,18 @@ internal class JvmSecureRestoreFileOperations(
         var keyboxesVerified: Boolean = false
         val originals = ArrayList<Original>()
 
-        fun closeAndWipe(): Throwable? {
+        fun closeAndWipe(): Exception? {
             originals.forEach { original -> original.bytes?.fill(0) }
             originals.clear()
-            var closeFailure: Throwable? = null
+            var closeFailure: Exception? = null
             try {
                 keyboxes?.close()
-            } catch (error: Throwable) {
+            } catch (error: Exception) {
                 closeFailure = error
             }
             try {
                 root.close()
-            } catch (error: Throwable) {
+            } catch (error: Exception) {
                 val first = closeFailure
                 if (first == null) {
                     closeFailure = error
@@ -397,11 +397,11 @@ internal class JvmSecureRestoreFileOperations(
         signalExpiryJanitorLocked()
     }
 
-    private fun closeTransaction(transaction: Transaction): Throwable? {
+    private fun closeTransaction(transaction: Transaction): Exception? {
         var failure = transaction.closeAndWipe()
         try {
             transactionCleanupHookForTesting?.invoke()
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
             val first = failure
             if (first == null) {
                 failure = error
