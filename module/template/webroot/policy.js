@@ -63,8 +63,9 @@ const REBOOT_POLICY_FEATURES = new Set(['buildIdentity', 'regionIdentity', 'iden
 const MAX_REFERENCE_PACKAGES = 10000;
 const MAX_REFERENCE_KEYBOXES = 4096;
 const MAX_REFERENCE_TEMPLATES = 256;
-const MAX_POLICY_PROFILES = 256;
-const MAX_PROFILE_APPLICATIONS = 64;
+const MAX_POLICY_PROFILES = 64;
+const MAX_PROFILE_APPLICATIONS = 256;
+const MAX_TOTAL_ASSIGNMENTS = 2048;
 const MAX_PROFILE_VALUE_LENGTH = 256;
 
 function onReady(fn) {
@@ -140,7 +141,7 @@ function normalizeProfile(profile) {
     }
   });
   const applications = Array.isArray(source.applications)
-    ? [...new Set(source.applications.map(value => String(value).trim()).filter(value => value && value.length <= MAX_PROFILE_VALUE_LENGTH))].slice(0, MAX_PROFILE_APPLICATIONS)
+    ? [...new Set(source.applications.map(value => String(value).trim()).filter(value => value && value.length <= MAX_PROFILE_VALUE_LENGTH))]
     : [];
   const template = typeof source.template === 'string' && source.template.length <= MAX_PROFILE_VALUE_LENGTH ? source.template : null;
   const keybox = typeof source.keybox === 'string' && source.keybox.length <= MAX_PROFILE_VALUE_LENGTH ? source.keybox : null;
@@ -171,21 +172,40 @@ function normalizeSecurityPatch(value) {
   return normalized;
 }
 
+function validatePolicyLimits(source) {
+  const profiles = Array.isArray(source && source.profiles) ? source.profiles : [];
+  if (profiles.length > MAX_POLICY_PROFILES) {
+    throw new Error(`Policy supports at most ${MAX_POLICY_PROFILES} profiles`);
+  }
+  let totalAssignments = 0;
+  profiles.forEach(profile => {
+    const applications = Array.isArray(profile && profile.applications) ? profile.applications : [];
+    if (applications.length > MAX_PROFILE_APPLICATIONS) {
+      throw new Error(`A profile supports at most ${MAX_PROFILE_APPLICATIONS} application assignments`);
+    }
+    totalAssignments += applications.length;
+    if (totalAssignments > MAX_TOTAL_ASSIGNMENTS) {
+      throw new Error(`Policy supports at most ${MAX_TOTAL_ASSIGNMENTS} total application assignments`);
+    }
+  });
+}
+
 function stateForSave(source) {
-  const normalizedPatch = normalizeSecurityPatch(source.securityPatch);
-  return {
+  const normalized = {
     version: Number(source.version) || 2,
     features: normalizePolicyFeatures(source.features),
-    securityPatch: normalizedPatch,
-    profiles: Array.isArray(source.profiles) ? source.profiles.slice(0, MAX_POLICY_PROFILES).map(normalizeProfile) : [],
+    securityPatch: normalizeSecurityPatch(source.securityPatch),
+    profiles: Array.isArray(source.profiles) ? source.profiles.map(normalizeProfile) : [],
     activeProfile: typeof source.activeProfile === 'string' ? source.activeProfile.slice(0, MAX_PROFILE_VALUE_LENGTH) : null
   };
+  validatePolicyLimits(normalized);
+  return normalized;
 }
 
 function normalizePolicyState(value) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? safeClone(value) : {};
   source.features = normalizePolicyFeatures(source.features);
-  source.profiles = Array.isArray(source.profiles) ? source.profiles.slice(0, MAX_POLICY_PROFILES).map(normalizeProfile) : [];
+  source.profiles = Array.isArray(source.profiles) ? source.profiles.map(normalizeProfile) : [];
   source.securityPatch = normalizeSecurityPatch(source.securityPatch);
   source.activeProfile = typeof source.activeProfile === 'string' ? source.activeProfile.slice(0, MAX_PROFILE_VALUE_LENGTH) : null;
   return source;
@@ -1079,7 +1099,7 @@ function fillSelect(select, values, selected, emptyLabel) {
 
 function profileAppsFromEditor() {
   const source = document.getElementById('ct_profile_apps');
-  return source ? [...new Set(source.value.split(/\r?\n/).map(value => value.trim()).filter(value => value && value.length <= MAX_PROFILE_VALUE_LENGTH))].slice(0, MAX_PROFILE_APPLICATIONS) : [];
+  return source ? [...new Set(source.value.split(/\r?\n/).map(value => value.trim()).filter(value => value && value.length <= MAX_PROFILE_VALUE_LENGTH))] : [];
 }
 
 function renderAppChips() {
@@ -1101,7 +1121,13 @@ function addProfileApp() {
   const value = picker.value.trim();
   if (!value) return;
   const apps = profileAppsFromEditor();
-  if (!apps.includes(value)) apps.push(value);
+  if (!apps.includes(value)) {
+    if (apps.length >= MAX_PROFILE_APPLICATIONS) {
+      notify(`A profile supports at most ${MAX_PROFILE_APPLICATIONS} application assignments`, 'error');
+      return;
+    }
+    apps.push(value);
+  }
   document.getElementById('ct_profile_apps').value = apps.join('\n');
   picker.value = '';
   renderAppChips();
@@ -1154,6 +1180,10 @@ function collectProfile() {
   const existing = selectedProfileIndex >= 0 ? normalizeProfile(policyState.profiles[selectedProfileIndex]) : emptyProfile();
   const name = document.getElementById('ct_profile_name').value.trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/.test(name)) throw new Error('Profile name is invalid');
+  const applications = profileAppsFromEditor();
+  if (applications.length > MAX_PROFILE_APPLICATIONS) {
+    throw new Error(`A profile supports at most ${MAX_PROFILE_APPLICATIONS} application assignments`);
+  }
   const features = {};
   FEATURE_KEYS.forEach(([key]) => {
     const value = boolOrInherit(`ct_pf_${key}`);
@@ -1168,7 +1198,7 @@ function collectProfile() {
   });
   return {
     name,
-    applications: profileAppsFromEditor(),
+    applications,
     template: document.getElementById('ct_profile_template').value || null,
     keybox: document.getElementById('ct_profile_keybox').value || null,
     privacy: document.getElementById('ct_profile_privacy').value,
@@ -1183,6 +1213,10 @@ function saveProfile() {
   let profile;
   try { profile = collectProfile(); } catch (error) { notify(error.message,'error'); return; }
   const index = selectedProfileIndex;
+  if (index < 0 && Array.isArray(policyState.profiles) && policyState.profiles.length >= MAX_POLICY_PROFILES) {
+    notify(`Policy supports at most ${MAX_POLICY_PROFILES} profiles`, 'error');
+    return;
+  }
   savePolicy(next => {
     const profiles = Array.isArray(next.profiles) ? next.profiles : (next.profiles = []);
     const conflict = profiles.findIndex((item,itemIndex) => itemIndex !== index && String(item.name).toLowerCase() === profile.name.toLowerCase());
@@ -1200,6 +1234,10 @@ function saveProfile() {
 function cloneProfile() {
   let profile;
   try { profile = collectProfile(); } catch (error) { notify(error.message,'error'); return; }
+  if (Array.isArray(policyState.profiles) && policyState.profiles.length >= MAX_POLICY_PROFILES) {
+    notify(`Policy supports at most ${MAX_POLICY_PROFILES} profiles`, 'error');
+    return;
+  }
   const base = profile.name || 'Profile';
   let name = `${base} Copy`;
   let number = 2;
