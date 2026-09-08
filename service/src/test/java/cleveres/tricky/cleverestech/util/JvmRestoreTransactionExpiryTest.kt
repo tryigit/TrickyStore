@@ -96,7 +96,7 @@ class JvmRestoreTransactionExpiryTest {
         backend.begin(configDir, token, 4096L)
         backend.snapshot(configDir, token, target)
         backend.replace(configDir, token, target, "after".toByteArray())
-        backend.commit(configDir, token)
+        assertThrows(IOException::class.java) { backend.commit(configDir, token) }
 
         assertEquals("after", target.readText())
         assertEquals(null, backend.pendingExpiryDelayNanosForTesting())
@@ -114,7 +114,7 @@ class JvmRestoreTransactionExpiryTest {
         backend.begin(configDir, token, 4096L)
         backend.snapshot(configDir, token, target)
         backend.replace(configDir, token, target, "after".toByteArray())
-        backend.rollback(configDir, token)
+        assertThrows(IOException::class.java) { backend.rollback(configDir, token) }
 
         assertEquals("before", target.readText())
         assertEquals(null, backend.pendingExpiryDelayNanosForTesting())
@@ -131,9 +131,9 @@ class JvmRestoreTransactionExpiryTest {
 
         backend.begin(configDir, token, 4096L)
         backend.snapshot(configDir, token, target)
-        val manifestPath = backend.exportRecovery(configDir, token)
+        val manifest = configDir.resolve(".restore-recovery-$token.manifest")
+        assertThrows(IOException::class.java) { backend.exportRecovery(configDir, token) }
 
-        val manifest = java.io.File(manifestPath)
         val backup = configDir.resolve(".restore-recovery-$token-0000.bak")
         assertTrue(manifest.isFile)
         assertTrue(backup.isFile)
