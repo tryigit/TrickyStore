@@ -1,4 +1,5 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
+mod attest_key_store;
 mod backend_instance;
 mod certificate_wire;
 mod crl_wire;
@@ -60,6 +61,8 @@ const OP_CRL_CHECK_BATCH: u16 = 27;
 const OP_CBOX_UNLOCK: u16 = 29;
 const OP_KEYBOX_BROKER_OPEN: u16 = 30;
 const OP_CBOX_RECOVER: u16 = 31;
+const OP_ATTEST_KEY_REWRITE: u16 = 32;
+const OP_CHILD_KEY_REWRITE: u16 = 33;
 const SCOPE_CONFIG_ROOT: u8 = 0;
 const SCOPE_KEYBOX_DIRECTORY: u8 = 1;
 
@@ -368,6 +371,8 @@ fn opcode_request_limit(opcode: u16) -> Option<usize> {
         OP_KEYBOX_FILE_PARSE => Some(MAX_KEYBOX_FILE_REQUEST_BYTES),
         OP_CERTIFICATE_INSPECT => Some(certificate_wire::MAX_INSPECT_REQUEST_BYTES),
         OP_CERTIFICATE_REWRITE => Some(certificate_wire::MAX_REWRITE_REQUEST_BYTES),
+        OP_ATTEST_KEY_REWRITE => Some(certificate_wire::MAX_ATTEST_KEY_REWRITE_REQUEST_BYTES),
+        OP_CHILD_KEY_REWRITE => Some(certificate_wire::MAX_CHILD_KEY_REWRITE_REQUEST_BYTES),
         OP_CRL_CHECK_BATCH => Some(crl_wire::MAX_REQUEST_BYTES),
         backend_instance::OP_BACKEND_PING => Some(backend_instance::REQUEST_BYTES),
         _ => None,
@@ -381,7 +386,9 @@ fn opcode_response_limit(opcode: u16) -> Option<usize> {
         OP_CRYPTO_BACKUP_ENCRYPT | OP_CRYPTO_BACKUP_DECRYPT => Some(MAX_BACKUP_RESPONSE_BYTES),
         OP_KEYBOX_PARSE | OP_KEYBOX_FILE_PARSE => Some(MAX_KEYBOX_RESPONSE_BYTES),
         OP_CERTIFICATE_INSPECT => Some(certificate_wire::INSPECT_RESPONSE_BYTES),
-        OP_CERTIFICATE_REWRITE => Some(certificate_wire::MAX_REWRITE_RESPONSE_BYTES),
+        OP_CERTIFICATE_REWRITE | OP_ATTEST_KEY_REWRITE | OP_CHILD_KEY_REWRITE => {
+            Some(certificate_wire::MAX_REWRITE_RESPONSE_BYTES)
+        }
         OP_CRL_CHECK_BATCH => Some(crl_wire::MAX_RESPONSE_BYTES),
         backend_instance::OP_BACKEND_PING => Some(backend_instance::RESPONSE_BYTES),
         _ => None,
@@ -467,6 +474,8 @@ fn handle_request(opcode: u16, mut request: Vec<u8>) -> Result<Vec<u8>, &'static
         OP_KEYBOX_PARSE => keybox_wire::parse_and_encode(request),
         OP_CERTIFICATE_INSPECT => certificate_wire::inspect_and_encode(request),
         OP_CERTIFICATE_REWRITE => certificate_wire::rewrite_and_encode(request),
+        OP_ATTEST_KEY_REWRITE => certificate_wire::rewrite_attest_key_and_encode(request),
+        OP_CHILD_KEY_REWRITE => certificate_wire::rewrite_child_key_and_encode(request),
         OP_CRL_CHECK_BATCH => crl_wire::handle(request),
         backend_instance::OP_BACKEND_PING => backend_instance::handle(request),
         _ => {
@@ -1006,8 +1015,26 @@ mod tests {
             opcode_response_limit(OP_CERTIFICATE_REWRITE),
             Some(certificate_wire::MAX_REWRITE_RESPONSE_BYTES)
         );
+        assert_eq!(
+            opcode_request_limit(OP_ATTEST_KEY_REWRITE),
+            Some(certificate_wire::MAX_ATTEST_KEY_REWRITE_REQUEST_BYTES)
+        );
+        assert_eq!(
+            opcode_response_limit(OP_ATTEST_KEY_REWRITE),
+            Some(certificate_wire::MAX_REWRITE_RESPONSE_BYTES)
+        );
+        assert_eq!(
+            opcode_request_limit(OP_CHILD_KEY_REWRITE),
+            Some(certificate_wire::MAX_CHILD_KEY_REWRITE_REQUEST_BYTES)
+        );
+        assert_eq!(
+            opcode_response_limit(OP_CHILD_KEY_REWRITE),
+            Some(certificate_wire::MAX_REWRITE_RESPONSE_BYTES)
+        );
         assert!(handle_request(OP_CERTIFICATE_INSPECT, vec![1]).is_err());
         assert!(handle_request(OP_CERTIFICATE_REWRITE, vec![1]).is_err());
+        assert!(handle_request(OP_ATTEST_KEY_REWRITE, vec![1]).is_err());
+        assert!(handle_request(OP_CHILD_KEY_REWRITE, vec![1]).is_err());
     }
 
     #[test]

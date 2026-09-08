@@ -9,7 +9,10 @@ use cleverestricky_attestation_core::{
 use p256::ecdsa::{
     Signature as EcSignature, SigningKey as EcSigningKey, VerifyingKey as EcVerifyingKey,
 };
-use p256::pkcs8::{DecodePrivateKey as _, DecodePublicKey as _};
+use p256::pkcs8::{
+    DecodePrivateKey as _, DecodePublicKey as _, EncodePrivateKey as _, EncodePublicKey as _,
+};
+use p256::SecretKey as P256SecretKey;
 use rsa::pkcs1v15::{
     Signature as RsaSignature, SigningKey as RsaSigningKey, VerifyingKey as RsaVerifyingKey,
 };
@@ -20,6 +23,7 @@ use signature::{Signer as _, Verifier as _};
 use std::fmt;
 use x509_cert::spki::ObjectIdentifier;
 use x509_cert::Certificate;
+use zeroize::Zeroizing;
 
 pub const MAX_CERTIFICATE_DER_BYTES: usize = 256 * 1024;
 pub const MAX_PRIVATE_KEY_DER_BYTES: usize = 3 * MAX_CERTIFICATE_DER_BYTES;
@@ -43,6 +47,11 @@ pub enum SigningAlgorithm {
     RsaPkcs1Sha256,
 }
 
+pub struct GeneratedEcKeypair {
+    pub public_key_spki_der: Vec<u8>,
+    pub private_key_pkcs8_der: Zeroizing<Vec<u8>>,
+}
+
 pub struct CertificateRewriteRequest<'a> {
     pub genuine_leaf_der: &'a [u8],
     pub issuer_certificate_der: &'a [u8],
@@ -53,6 +62,7 @@ pub struct CertificateRewriteRequest<'a> {
     pub module_hash: Option<&'a [u8]>,
     pub verified_boot_key: &'a [u8; 32],
     pub verified_boot_hash: &'a [u8; 32],
+    pub subject_public_key_info: Option<&'a [u8]>,
 }
 
 pub struct PreparedCertificateRewriteRequest<'a> {
@@ -63,6 +73,7 @@ pub struct PreparedCertificateRewriteRequest<'a> {
     pub module_hash: Option<&'a [u8]>,
     pub verified_boot_key: &'a [u8; 32],
     pub verified_boot_hash: &'a [u8; 32],
+    pub subject_public_key_info: Option<&'a [u8]>,
 }
 
 enum PreparedSigner {
@@ -146,8 +157,45 @@ impl PreparedIssuer {
         })
     }
 
+    pub fn from_subject_and_key(
+        issuer_name_der: Vec<u8>,
+        issuer_private_key_pkcs8: &[u8],
+        signing_algorithm: SigningAlgorithm,
+    ) -> Result<Self, Error> {
+        if issuer_name_der.is_empty()
+            || issuer_name_der.len() > MAX_CERTIFICATE_DER_BYTES
+            || issuer_private_key_pkcs8.is_empty()
+            || issuer_private_key_pkcs8.len() > MAX_PRIVATE_KEY_DER_BYTES
+        {
+            return Err(Error::Bounds);
+        }
+
+        let signer = match signing_algorithm {
+            SigningAlgorithm::EcP256Sha256 => {
+                let signer = EcSigningKey::from_pkcs8_der(issuer_private_key_pkcs8)
+                    .map_err(|_| Error::InvalidPrivateKey)?;
+                PreparedSigner::Ec(signer)
+            }
+            SigningAlgorithm::RsaPkcs1Sha256 => {
+                let signer = RsaSigningKey::<RsaSha256>::from_pkcs8_der(issuer_private_key_pkcs8)
+                    .map_err(|_| Error::InvalidPrivateKey)?;
+                PreparedSigner::Rsa(Box::new(signer))
+            }
+        };
+
+        Ok(Self {
+            algorithm: signing_algorithm,
+            issuer_name_der,
+            signer,
+        })
+    }
+
     pub fn algorithm(&self) -> SigningAlgorithm {
         self.algorithm
+    }
+
+    pub fn issuer_name_der(&self) -> &[u8] {
+        &self.issuer_name_der
     }
 
     fn sign_certificate(&self, tbs_der: &[u8], algorithm_der: &[u8]) -> Result<Vec<u8>, Error> {
@@ -222,6 +270,7 @@ pub fn rewrite_certificate(
         module_hash: request.module_hash,
         verified_boot_key: request.verified_boot_key,
         verified_boot_hash: request.verified_boot_hash,
+        subject_public_key_info: request.subject_public_key_info,
     })
 }
 
@@ -380,7 +429,7 @@ pub fn rewrite_certificate_prepared(
     tbs_len += 1;
     tbs_out[tbs_len] = subject;
     tbs_len += 1;
-    tbs_out[tbs_len] = spki;
+    tbs_out[tbs_len] = request.subject_public_key_info.unwrap_or(spki);
     tbs_len += 1;
     if let Some(uid) = issuer_unique_id {
         tbs_out[tbs_len] = uid;
@@ -423,6 +472,52 @@ fn signature_algorithm_der(algorithm: SigningAlgorithm) -> &'static [u8] {
         SigningAlgorithm::EcP256Sha256 => ECDSA_SHA256_ALGORITHM_DER,
         SigningAlgorithm::RsaPkcs1Sha256 => RSA_SHA256_ALGORITHM_DER,
     }
+}
+
+pub fn generate_ec_p256_keypair() -> Result<GeneratedEcKeypair, Error> {
+    let mut scalar = [0u8; 32];
+    for _ in 0..8 {
+        getrandom::fill(&mut scalar).map_err(|_| Error::Signature)?;
+        if let Ok(secret_key) = P256SecretKey::from_slice(&scalar) {
+            let pkcs8 = secret_key.to_pkcs8_der().map_err(|_| Error::Encoding)?;
+            let spki = secret_key
+                .public_key()
+                .to_public_key_der()
+                .map_err(|_| Error::Encoding)?;
+            return Ok(GeneratedEcKeypair {
+                public_key_spki_der: spki.as_bytes().to_vec(),
+                private_key_pkcs8_der: Zeroizing::new(pkcs8.as_bytes().to_vec()),
+            });
+        }
+    }
+    Err(Error::Signature)
+}
+
+pub fn parse_certificate_subject_and_issuer(
+    certificate_der: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    if certificate_der.is_empty() || certificate_der.len() > MAX_CERTIFICATE_DER_BYTES {
+        return Err(Error::Bounds);
+    }
+    let cert_seq = parse_any(certificate_der)?;
+    if cert_seq.tag() != Tag::Sequence {
+        return Err(Error::InvalidCertificate);
+    }
+    let mut cert_iter = TlvIterator::new(cert_seq.value());
+    let tbs_der = next_required_tlv(&mut cert_iter)?;
+    let tbs_seq = parse_any(tbs_der)?;
+    if tbs_seq.tag() != Tag::Sequence {
+        return Err(Error::InvalidCertificate);
+    }
+    let mut tbs_iter = TlvIterator::new(tbs_seq.value());
+    let version = next_required_tlv(&mut tbs_iter)?;
+    validate_v3_version(version)?;
+    let _serial = next_required_tlv(&mut tbs_iter)?;
+    let _algorithm = next_required_tlv(&mut tbs_iter)?;
+    let issuer = next_required_tlv(&mut tbs_iter)?;
+    let _validity = next_required_tlv(&mut tbs_iter)?;
+    let subject = next_required_tlv(&mut tbs_iter)?;
+    Ok((subject.to_vec(), issuer.to_vec()))
 }
 
 pub(crate) fn parse_any(encoded: &[u8]) -> Result<AnyRef<'_>, Error> {

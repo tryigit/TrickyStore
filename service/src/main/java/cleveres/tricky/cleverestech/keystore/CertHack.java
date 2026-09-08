@@ -136,7 +136,7 @@ public final class CertHack {
         ) {
             this.certificates = certificates.clone();
             this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded");
-            this.issuerChainEncoded = Objects.requireNonNull(issuerChainEncoded, "issuerChainEncoded");
+            this.issuerChainEncoded = issuerChainEncoded;
             this.passthrough = false;
             this.leafOnlySafe = leafOnlySafe;
             this.accountIssuerChainBytes = accountIssuerChainBytes;
@@ -1070,6 +1070,328 @@ public final class CertHack {
         } finally {
             if (keyId != null) Arrays.fill(keyId, (byte) 0);
             if (inspection != null) inspection.wipe();
+            KeyboxActivation.unlockPublishedSnapshot();
+        }
+    }
+
+    public static Certificate[] hackAttestKeyCertificateChain(Certificate[] caList, int uid) {
+        return hackAttestKeyCertificateChain(caList, uid, false);
+    }
+
+    public static Certificate[] hackAttestKeyCertificateChain(
+            Certificate[] caList, int uid, boolean leafOnlySafe) {
+        if (caList == null || caList.length == 0 || caList[0] == null) {
+            throw new UnsupportedOperationException("Certificate chain is empty");
+        }
+        KeyboxActivation.lockPublishedSnapshot();
+        CertificateBackend.Inspection attestInspection = null;
+        byte[] keyId = null;
+        try {
+            State currentState = state;
+            byte[] leafEncoded = caList[0].getEncoded();
+            if (leafEncoded.length == 0 || leafEncoded.length > MAX_LEAF_CERTIFICATE_BYTES) {
+                return caList;
+            }
+            CacheKey cacheKey = new CacheKey(leafEncoded);
+            State.CertificateCache cache = currentState.certificateCache;
+            Object cacheEpoch;
+            synchronized (cache) {
+                CachedCertificateChain cached = cache.get(cacheKey);
+                if (cached != null) {
+                    Certificate[] replacement = cached.certificateCopy();
+                    return replacement == null ? caList : replacement;
+                }
+                cacheEpoch = currentState.certificateCacheEpoch;
+            }
+
+            if (!Utils.hasAndroidAttestationExtension(caList[0])) return caList;
+
+            attestInspection = CertificateBackend.inspect(leafEncoded);
+            if (attestInspection == null) return caList;
+            int attLevel = attestInspection.getAttestationSecurityLevel();
+            int kmLevel = attestInspection.getKeymintSecurityLevel();
+            boolean isTee = attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                    && kmLevel == CertificateBackend.SECURITY_LEVEL_TEE;
+            boolean isStrongbox =
+                    (attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX)
+                    || (attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
+                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX);
+            boolean isTeeOrStrongbox = isTee || isStrongbox;
+            if (!isTeeOrStrongbox) {
+                synchronized (cache) {
+                    if (state == currentState && currentState.certificateCacheEpoch == cacheEpoch) {
+                        cache.putIfAbsent(cacheKey, CachedCertificateChain.passthrough());
+                    }
+                }
+                return caList;
+            }
+
+            boolean needsCapturedPatchLevels = PolicyState.INSTANCE.isFeatureEnabled(
+                    PolicyState.Feature.SECURITY_PATCH, uid);
+            byte[] originalBootKey = usableBootDigest(attestInspection.getOriginalBootKey());
+            if (originalBootKey != null) {
+                capturedHardwareBootKey = originalBootKey.clone();
+            }
+            byte[] originalBootHash = usableBootDigest(attestInspection.getOriginalBootHash());
+            if (originalBootHash != null) {
+                capturedHardwareBootHash = originalBootHash.clone();
+            }
+            byte[] verifiedBootKey = selectVerifiedBootDigest(
+                    UtilKt.getBootKey(),
+                    originalBootKey != null ? originalBootKey : capturedHardwareBootKey,
+                    UtilKt.getPersistentBootKey());
+            byte[] verifiedBootHash = selectVerifiedBootDigest(
+                    UtilKt.getBootHash(),
+                    originalBootHash != null ? originalBootHash : capturedHardwareBootHash,
+                    UtilKt.getPersistentBootHash());
+            Config.AttestationPatchLevels patchLevels = needsCapturedPatchLevels
+                    ? PolicyState.INSTANCE.resolveAttestationPatchLevels(
+                            uid,
+                            attestInspection.getSystemPatch(),
+                            attestInspection.getVendorPatch(),
+                            attestInspection.getBootPatch())
+                    : keepPatchLevels();
+
+            List<KeyBox> list;
+            var appConfig = Config.INSTANCE.getAppConfig(uid);
+            if (appConfig != null && appConfig.getKeyboxFilename() != null) {
+                List<KeyBox> candidates = currentState.keyboxFiles.get(appConfig.getKeyboxFilename());
+                List<KeyBox> matchingLevel = filterKeyboxesBySecurityLevel(candidates, isStrongbox);
+                if (!matchingLevel.isEmpty()) {
+                    candidates = matchingLevel;
+                } else if (isStrongbox) {
+                    candidates = filterKeyboxesBySecurityLevel(candidates, false);
+                } else {
+                    candidates = Collections.emptyList();
+                }
+                list = selectKeyboxPool(candidates, KeyProperties.KEY_ALGORITHM_EC);
+            } else {
+                if (isStrongbox) {
+                    if (!currentState.globalStrongBoxEc.isEmpty()) {
+                        list = currentState.globalStrongBoxEc;
+                    } else if (!currentState.globalStrongBoxRsa.isEmpty()) {
+                        list = currentState.globalStrongBoxRsa;
+                    } else if (!currentState.globalTeeEc.isEmpty()) {
+                        list = currentState.globalTeeEc;
+                    } else {
+                        list = currentState.globalTeeRsa;
+                    }
+                } else {
+                    if (!currentState.globalTeeEc.isEmpty()) {
+                        list = currentState.globalTeeEc;
+                    } else {
+                        list = currentState.globalTeeRsa;
+                    }
+                }
+            }
+            if (list.isEmpty()) {
+                return caList;
+            }
+
+            KeyBox keybox = list.get(cacheKey.indexForPool(list.size()));
+            PreparedKeyBox prepared = currentState.preparedKeyboxes.get(keybox);
+            if (prepared == null) throw new UnsupportedOperationException("Keybox metadata is unavailable");
+            int signingAlgorithm = signingWireAlgorithm(prepared.signatureAlgorithm);
+            if (signingAlgorithm == 0) return caList;
+
+            if (verifiedBootKey == null || verifiedBootHash == null) {
+                return caList;
+            }
+
+            Map<Integer, byte[]> idOverrides = presentIdOverrides(uid, attestInspection.getPresentIdMask());
+            byte[] moduleHash = attestInspection.getSupportsModuleHash()
+                    ? Config.INSTANCE.getModuleHash()
+                    : null;
+            keyId = prepared.keyId.clone();
+
+            byte[] rewrittenDer = CertificateBackend.rewriteAttestKey(
+                    uid,
+                    leafEncoded,
+                    keyId,
+                    signingAlgorithm,
+                    patchDisposition(patchLevels.getSystem()), patchLevels.getSystem().getValue(),
+                    patchDisposition(patchLevels.getVendor()), patchLevels.getVendor().getValue(),
+                    patchDisposition(patchLevels.getBoot()), patchLevels.getBoot().getValue(),
+                    idOverrides,
+                    moduleHash,
+                    verifiedBootKey,
+                    verifiedBootHash);
+            if (rewrittenDer == null || rewrittenDer.length == 0 || rewrittenDer.length > MAX_LEAF_CERTIFICATE_BYTES) {
+                return caList;
+            }
+            byte[] encodedIssuerChain = currentState.encodedIssuerChain(prepared);
+            Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer, false);
+            Certificate[] result = new Certificate[prepared.issuerChain.length + 1];
+            result[0] = rewrittenLeaf;
+            System.arraycopy(prepared.issuerChain, 0, result, 1, prepared.issuerChain.length);
+            CachedCertificateChain completed = new CachedCertificateChain(
+                    result,
+                    rewrittenDer,
+                    encodedIssuerChain,
+                    leafOnlySafe,
+                    true
+            );
+            synchronized (cache) {
+                if (state != currentState || currentState.certificateCacheEpoch != cacheEpoch) {
+                    return result;
+                }
+                CachedCertificateChain raced = cache.get(cacheKey);
+                if (raced != null) {
+                    Certificate[] replacement = raced.certificateCopy();
+                    return replacement == null ? caList : replacement;
+                }
+                cache.put(cacheKey, completed);
+            }
+            return result;
+        } catch (Throwable t) {
+            return caList;
+        } finally {
+            if (keyId != null) Arrays.fill(keyId, (byte) 0);
+            if (attestInspection != null) attestInspection.wipe();
+            KeyboxActivation.unlockPublishedSnapshot();
+        }
+    }
+
+    public static Certificate[] hackChildKeyCertificate(
+            Certificate[] caList, int uid, boolean isAttestKey) {
+        return hackChildKeyCertificate(caList, uid, isAttestKey, false);
+    }
+
+    public static Certificate[] hackChildKeyCertificate(
+            Certificate[] caList, int uid, boolean isAttestKey, boolean leafOnlySafe) {
+        if (caList == null || caList.length == 0 || caList[0] == null) {
+            return caList;
+        }
+        KeyboxActivation.lockPublishedSnapshot();
+        CertificateBackend.Inspection childInspection = null;
+        try {
+            State currentState = state;
+            byte[] leafEncoded = caList[0].getEncoded();
+            if (leafEncoded.length == 0 || leafEncoded.length > MAX_LEAF_CERTIFICATE_BYTES) {
+                return caList;
+            }
+            CacheKey cacheKey = new CacheKey(leafEncoded);
+            State.CertificateCache cache = currentState.certificateCache;
+            Object cacheEpoch;
+            synchronized (cache) {
+                CachedCertificateChain cached = cache.get(cacheKey);
+                if (cached != null) {
+                    Certificate[] replacement = cached.certificateCopy();
+                    return replacement == null ? caList : replacement;
+                }
+                cacheEpoch = currentState.certificateCacheEpoch;
+            }
+
+            if (!Utils.hasAndroidAttestationExtension(caList[0])) return caList;
+
+            childInspection = CertificateBackend.inspect(leafEncoded);
+            if (childInspection == null) return caList;
+            int attLevel = childInspection.getAttestationSecurityLevel();
+            int kmLevel = childInspection.getKeymintSecurityLevel();
+            boolean isTee = attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                    && kmLevel == CertificateBackend.SECURITY_LEVEL_TEE;
+            boolean isStrongbox =
+                    (attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX)
+                    || (attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
+                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX);
+            boolean isTeeOrStrongbox = isTee || isStrongbox;
+            if (!isTeeOrStrongbox) {
+                synchronized (cache) {
+                    if (state == currentState && currentState.certificateCacheEpoch == cacheEpoch) {
+                        cache.putIfAbsent(cacheKey, CachedCertificateChain.passthrough());
+                    }
+                }
+                return caList;
+            }
+
+            boolean needsCapturedPatchLevels = PolicyState.INSTANCE.isFeatureEnabled(
+                    PolicyState.Feature.SECURITY_PATCH, uid);
+            byte[] originalBootKey = usableBootDigest(childInspection.getOriginalBootKey());
+            if (originalBootKey != null) {
+                capturedHardwareBootKey = originalBootKey.clone();
+            }
+            byte[] originalBootHash = usableBootDigest(childInspection.getOriginalBootHash());
+            if (originalBootHash != null) {
+                capturedHardwareBootHash = originalBootHash.clone();
+            }
+            byte[] verifiedBootKey = selectVerifiedBootDigest(
+                    UtilKt.getBootKey(),
+                    originalBootKey != null ? originalBootKey : capturedHardwareBootKey,
+                    UtilKt.getPersistentBootKey());
+            byte[] verifiedBootHash = selectVerifiedBootDigest(
+                    UtilKt.getBootHash(),
+                    originalBootHash != null ? originalBootHash : capturedHardwareBootHash,
+                    UtilKt.getPersistentBootHash());
+            if (verifiedBootKey == null || verifiedBootHash == null) {
+                return caList;
+            }
+
+            Config.AttestationPatchLevels patchLevels = needsCapturedPatchLevels
+                    ? PolicyState.INSTANCE.resolveAttestationPatchLevels(
+                            uid,
+                            childInspection.getSystemPatch(),
+                            childInspection.getVendorPatch(),
+                            childInspection.getBootPatch())
+                    : keepPatchLevels();
+
+            Map<Integer, byte[]> idOverrides = presentIdOverrides(uid, childInspection.getPresentIdMask());
+            byte[] moduleHash = childInspection.getSupportsModuleHash()
+                    ? Config.INSTANCE.getModuleHash()
+                    : null;
+
+            byte[] rewrittenDer = CertificateBackend.rewriteChildKey(
+                    uid,
+                    leafEncoded,
+                    isAttestKey,
+                    patchDisposition(patchLevels.getSystem()), patchLevels.getSystem().getValue(),
+                    patchDisposition(patchLevels.getVendor()), patchLevels.getVendor().getValue(),
+                    patchDisposition(patchLevels.getBoot()), patchLevels.getBoot().getValue(),
+                    idOverrides,
+                    moduleHash,
+                    verifiedBootKey,
+                    verifiedBootHash);
+            if (rewrittenDer == null || rewrittenDer.length == 0 || rewrittenDer.length > MAX_LEAF_CERTIFICATE_BYTES) {
+                return caList;
+            }
+
+            Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer, false);
+            Certificate[] result = new Certificate[caList.length];
+            result[0] = rewrittenLeaf;
+            if (caList.length > 1) {
+                System.arraycopy(caList, 1, result, 1, caList.length - 1);
+            }
+            byte[] encodedIssuerChain = null;
+            if (caList.length > 1) {
+                try {
+                    encodedIssuerChain = Utils.encodeIssuerChain(caList);
+                } catch (Throwable ignored) {
+                }
+            }
+            CachedCertificateChain completed = new CachedCertificateChain(
+                    result,
+                    rewrittenDer,
+                    encodedIssuerChain,
+                    leafOnlySafe,
+                    false
+            );
+            synchronized (cache) {
+                if (state != currentState || currentState.certificateCacheEpoch != cacheEpoch) {
+                    return result;
+                }
+                CachedCertificateChain raced = cache.get(cacheKey);
+                if (raced != null) {
+                    Certificate[] replacement = raced.certificateCopy();
+                    return replacement == null ? caList : replacement;
+                }
+                cache.put(cacheKey, completed);
+            }
+            return result;
+        } catch (Throwable t) {
+            return caList;
+        } finally {
+            if (childInspection != null) childInspection.wipe();
             KeyboxActivation.unlockPublishedSnapshot();
         }
     }

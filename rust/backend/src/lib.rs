@@ -1,6 +1,7 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
 #![forbid(unsafe_code)]
 
+mod attest_key_store;
 mod certificate_wire;
 mod crl_wire;
 mod keybox_wire;
@@ -23,4 +24,10 @@ pub fn fuzz_keybox_wire(input: &[u8]) {
     if let Ok(response) = keybox_wire::parse_and_encode(input.to_vec()) {
         assert!(response.len() <= keybox_wire::MAX_KEYBOX_RESPONSE_BYTES);
     }
+}
+
+/// Fuzz-only entry point for the real attest-key and child-key rewrite wire parsers.
+pub fn fuzz_attest_key_wire(input: &[u8]) {
+    let _ = certificate_wire::rewrite_attest_key_and_encode(input.to_vec());
+    let _ = certificate_wire::rewrite_child_key_and_encode(input.to_vec());
 }

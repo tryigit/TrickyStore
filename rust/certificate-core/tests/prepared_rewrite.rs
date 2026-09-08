@@ -40,6 +40,7 @@ mod fixture {
                 module_hash: Some(b"new-module-hash"),
                 verified_boot_key: &BOOT_KEY,
                 verified_boot_hash: &BOOT_HASH,
+                subject_public_key_info: None,
             },
         )
         .expect("prepared Rust certificate rewrite");
@@ -152,6 +153,7 @@ mod fixture {
                 module_hash: None,
                 verified_boot_key: &BOOT_KEY,
                 verified_boot_hash: &BOOT_HASH,
+                subject_public_key_info: None,
             },
         )
         .expect("rewrite critical attestation extension");
@@ -227,6 +229,7 @@ mod fixture {
                 module_hash: None,
                 verified_boot_key: &BOOT_KEY,
                 verified_boot_hash: &BOOT_HASH,
+                subject_public_key_info: None,
             },
         );
         assert!(matches!(
@@ -275,6 +278,7 @@ mod fixture {
                 module_hash: None,
                 verified_boot_key: &BOOT_KEY,
                 verified_boot_hash: &BOOT_HASH,
+                subject_public_key_info: None,
             },
         );
         assert!(matches!(

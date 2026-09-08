@@ -45,6 +45,7 @@ mod fixture {
                 module_hash: None,
                 verified_boot_key: &BOOT_KEY,
                 verified_boot_hash: &BOOT_HASH,
+                subject_public_key_info: None,
             },
         );
         assert!(matches!(
