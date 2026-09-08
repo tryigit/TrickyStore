@@ -642,14 +642,18 @@ struct RestoreTerminalLease<'a> {
 }
 
 impl<'a> RestoreTerminalLease<'a> {
-    fn transaction(&self) -> &RestoreTransaction {
+    fn transaction(&self) -> io::Result<&RestoreTransaction> {
         self.transaction
             .as_ref()
-            .expect("terminal restore lease must own its transaction")
+            .ok_or_else(|| io::Error::other("terminal restore lease lost its transaction"))
     }
 
     fn finish(mut self) -> io::Result<()> {
-        {
+        let transaction = self
+            .transaction
+            .take()
+            .ok_or_else(|| io::Error::other("terminal restore lease lost its transaction"))?;
+        let result = (|| {
             let mut transactions = restore_transactions()
                 .lock()
                 .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
@@ -661,15 +665,22 @@ impl<'a> RestoreTerminalLease<'a> {
                     "terminal restore transaction lease was not active",
                 ));
             }
-            transactions.remove(self.token);
+            transactions
+                .remove(self.token)
+                .ok_or_else(|| io::Error::other("terminal restore transaction disappeared during finalization"))?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                drop(transaction);
+                restore_janitor::notify();
+                Ok(())
+            }
+            Err(error) => {
+                self.transaction = Some(transaction);
+                Err(error)
+            }
         }
-        let transaction = self
-            .transaction
-            .take()
-            .expect("terminal restore lease must own its transaction");
-        drop(transaction);
-        restore_janitor::notify();
-        Ok(())
     }
 }
 
@@ -822,7 +833,7 @@ fn stage_terminal_restore_transaction<'a>(
     let placeholder = placeholder_transaction(transaction);
     let transaction = transactions
         .remove(token)
-        .expect("validated restore transaction must remain present while registry is locked");
+        .ok_or_else(|| io::Error::other("restore transaction disappeared while registry was locked"))?;
     transactions.insert(token.to_string(), placeholder);
     Ok(RestoreTerminalLease {
         token,
@@ -1077,7 +1088,7 @@ fn restore_rollback(root: &TrustedDir, token: &str) -> io::Result<()> {
             .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
         stage_terminal_restore_transaction(&mut transactions, token)?
     };
-    let transaction = terminal_lease.transaction();
+    let transaction = terminal_lease.transaction()?;
     let mut first_error = None;
     let mut failure_count = 0usize;
     for original in transaction.originals.iter().rev() {
@@ -1124,7 +1135,7 @@ fn restore_export(root: &TrustedDir, token: &str) -> io::Result<()> {
             .map_err(|_| io::Error::other("restore transaction state poisoned"))?;
         stage_terminal_restore_transaction(&mut transactions, token)?
     };
-    export_transaction_to_root(root, token, terminal_lease.transaction())?;
+    export_transaction_to_root(root, token, terminal_lease.transaction()?)?;
     terminal_lease.finish()
 }
 
@@ -1651,6 +1662,22 @@ mod tests {
         }
         handle_from(&root, &request(ACTION_RESTORE_ROLLBACK, token, b"")).unwrap();
         assert_eq!(fs::read(test.path.join("state.txt")).unwrap(), b"old");
+    }
+
+    #[test]
+    fn terminal_restore_lease_missing_transaction_fails_closed() {
+        let token = "07500000000000000000000000000007";
+        let lease = RestoreTerminalLease {
+            token,
+            transaction: None,
+        };
+        assert!(lease.transaction().is_err());
+
+        let lease = RestoreTerminalLease {
+            token,
+            transaction: None,
+        };
+        assert!(lease.finish().is_err());
     }
 
     #[test]
