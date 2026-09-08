@@ -141,7 +141,7 @@ function normalizeProfile(profile) {
     }
   });
   const applications = Array.isArray(source.applications)
-    ? [...new Set(source.applications.map(value => String(value).trim()).filter(value => value && value.length <= MAX_PROFILE_VALUE_LENGTH))].slice(0, MAX_PROFILE_APPLICATIONS)
+    ? [...new Set(source.applications.map(value => String(value).trim()).filter(value => value && value.length <= MAX_PROFILE_VALUE_LENGTH))]
     : [];
   const template = typeof source.template === 'string' && source.template.length <= MAX_PROFILE_VALUE_LENGTH ? source.template : null;
   const keybox = typeof source.keybox === 'string' && source.keybox.length <= MAX_PROFILE_VALUE_LENGTH ? source.keybox : null;
@@ -191,21 +191,21 @@ function validatePolicyLimits(source) {
 }
 
 function stateForSave(source) {
-  validatePolicyLimits(source);
-  const normalizedPatch = normalizeSecurityPatch(source.securityPatch);
-  return {
+  const normalized = {
     version: Number(source.version) || 2,
     features: normalizePolicyFeatures(source.features),
-    securityPatch: normalizedPatch,
+    securityPatch: normalizeSecurityPatch(source.securityPatch),
     profiles: Array.isArray(source.profiles) ? source.profiles.map(normalizeProfile) : [],
     activeProfile: typeof source.activeProfile === 'string' ? source.activeProfile.slice(0, MAX_PROFILE_VALUE_LENGTH) : null
   };
+  validatePolicyLimits(normalized);
+  return normalized;
 }
 
 function normalizePolicyState(value) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? safeClone(value) : {};
   source.features = normalizePolicyFeatures(source.features);
-  source.profiles = Array.isArray(source.profiles) ? source.profiles.slice(0, MAX_POLICY_PROFILES).map(normalizeProfile) : [];
+  source.profiles = Array.isArray(source.profiles) ? source.profiles.map(normalizeProfile) : [];
   source.securityPatch = normalizeSecurityPatch(source.securityPatch);
   source.activeProfile = typeof source.activeProfile === 'string' ? source.activeProfile.slice(0, MAX_PROFILE_VALUE_LENGTH) : null;
   return source;
