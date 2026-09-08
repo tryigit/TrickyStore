@@ -159,6 +159,7 @@ dependencies = [
  "cleverestricky-keybox-core",
  "cleverestricky-xml-core",
  "der 0.8.1",
+ "getrandom 0.4.3",
  "p256",
  "rsa",
  "sha2 0.10.9",

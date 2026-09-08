@@ -26,6 +26,9 @@ public final class Utils {
     private static final int MAX_AUTHORIZATIONS = 256;
     private static final int MAX_REWRITTEN_PARCEL_BYTES = 8 * 1024 * 1024;
     private static final int MAX_RETAINED_SCRATCH_PARCEL_BYTES = 64 * 1024;
+    private static final int TAG_PURPOSE = 0x20000001; // TagType.ENUM_REP | 1
+    private static final int KEY_PARAMETER_VALUE_KEY_PURPOSE = 7;
+    private static final int KEY_PURPOSE_ATTEST_KEY = 7;
 
     private static final ThreadLocal<CertificateFactory> CERTIFICATE_FACTORY =
             new ThreadLocal<CertificateFactory>() {
@@ -56,6 +59,58 @@ public final class Utils {
             // We only need to distinguish the optional attestationKey, so do not instantiate its
             // hidden platform class or depend on a generated CREATOR field that may change by API.
             return request.readInt() == 0;
+        } catch (RuntimeException invalidRequest) {
+            return false;
+        } finally {
+            request.setDataPosition(position);
+        }
+    }
+
+    /**
+     * Inspects the generateKey KeyParameter array to determine if Tag.PURPOSE includes KeyPurpose.ATTEST_KEY.
+     */
+    public static boolean hasAttestKeyPurpose(Parcel request) {
+        if (request == null) return false;
+        int position = request.dataPosition();
+        try {
+            request.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR);
+            // 1. Skip key: KeyDescriptor
+            if (!skipStableTypedParcelable(request)) return false;
+            // 2. Skip optional attestationKey: KeyDescriptor
+            if (request.dataAvail() < Integer.BYTES) return false;
+            int attestationKeyPresence = request.readInt();
+            if (attestationKeyPresence == 1) {
+                if (!skipStableParcelableBody(request)) return false;
+            } else if (attestationKeyPresence != 0) {
+                return false;
+            }
+            // 3. Inspect params: KeyParameter[]
+            if (request.dataAvail() < Integer.BYTES) return false;
+            int paramCount = request.readInt();
+            if (paramCount <= 0 || paramCount > MAX_AUTHORIZATIONS) return false;
+            for (int i = 0; i < paramCount; i++) {
+                if (request.dataAvail() < Integer.BYTES) return false;
+                int paramPresence = request.readInt();
+                if (paramPresence == 0) continue;
+                if (paramPresence != 1) return false;
+
+                int parcelableStart = request.dataPosition();
+                int parcelableEnd = readStableParcelableEnd(request, request.dataSize());
+                if (parcelableEnd < 0) return false;
+
+                if (hasBytes(request, parcelableEnd, 3 * Integer.BYTES)) {
+                    int tag = request.readInt();
+                    int unionTag = request.readInt();
+                    int unionValue = request.readInt();
+                    if (tag == TAG_PURPOSE &&
+                            unionTag == KEY_PARAMETER_VALUE_KEY_PURPOSE &&
+                            unionValue == KEY_PURPOSE_ATTEST_KEY) {
+                        return true;
+                    }
+                }
+                request.setDataPosition(parcelableEnd);
+            }
+            return false;
         } catch (RuntimeException invalidRequest) {
             return false;
         } finally {
@@ -342,9 +397,9 @@ public final class Utils {
             byte[] newLeaf,
             byte[] newChain
     ) {
-        if (reply == null || parsed == null || newLeaf == null || newChain == null ||
+        if (reply == null || parsed == null || newLeaf == null ||
                 newLeaf.length == 0 || newLeaf.length > MAX_CERTIFICATE_BYTES ||
-                newChain.length > MAX_CHAIN_BYTES ||
+                (newChain != null && newChain.length > MAX_CHAIN_BYTES) ||
                 reply.dataSize() != parsed.sourceDataSize ||
                 parsed.metadataStart < 0 || parsed.certOffset < parsed.metadataStart ||
                 parsed.chainOffset < parsed.certOffset ||
@@ -354,7 +409,7 @@ public final class Utils {
         }
 
         int newCertPaddedLen = Integer.BYTES + paddedByteCount(newLeaf.length);
-        int newChainPaddedLen = Integer.BYTES + paddedByteCount(newChain.length);
+        int newChainPaddedLen = Integer.BYTES + (newChain == null ? 0 : paddedByteCount(newChain.length));
         long sizeDiff = (long) newCertPaddedLen + newChainPaddedLen -
                 parsed.oldCertPaddedLen - parsed.oldChainPaddedLen;
         long newMetadataSize = (long) parsed.metadataSize + sizeDiff;
