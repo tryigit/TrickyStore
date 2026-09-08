@@ -7,7 +7,7 @@ const source = fs.readFileSync('module/template/webroot/policy.js', 'utf8');
 assert.match(source, /const MAX_POLICY_PROFILES = 64;/, 'WebUI profile limit must match PolicyState');
 assert.match(source, /const MAX_PROFILE_APPLICATIONS = 256;/, 'WebUI per-profile assignment limit must match PolicyState');
 assert.match(source, /const MAX_TOTAL_ASSIGNMENTS = 2048;/, 'WebUI total assignment limit must match PolicyState');
-assert.match(source, /validatePolicyLimits\(source\);/, 'policy saves must reject over-limit state before normalization');
+assert.match(source, /validatePolicyLimits\(normalized\);/, 'policy saves must validate the complete normalized state');
 
 const start = source.indexOf('function safeClone(value)');
 const end = source.indexOf('function transitionRequiresReboot', start);
@@ -88,15 +88,28 @@ assert.equal(saved.profiles[0].applications.length, 256, 'canonical 256-assignme
 assert.equal(saved.profiles[0].applications.join('\n'), assignments.join('\n'), 'policy round-trip must not drop assignments 65-256');
 
 assert.doesNotThrow(() => context.stateForSave(policy(Array.from({ length: 64 }, (_, index) => profile(`p${index}`, 0)))));
+
+const normalized65Profiles = context.normalizePolicyState(policy(Array.from({ length: 65 }, (_, index) => profile(`p${index}`, 0))));
+assert.equal(normalized65Profiles.profiles.length, 65, 'normalization must preserve the 65th profile for limit validation');
 assert.throws(
-  () => context.stateForSave(policy(Array.from({ length: 65 }, (_, index) => profile(`p${index}`, 0)))),
+  () => context.stateForSave(normalized65Profiles),
   /at most 64 profiles/,
   '65th profile must be rejected instead of silently discarded'
 );
+
+const normalized257Assignments = context.normalizePolicyState(policy([profile('too-many-apps', 257)]));
+assert.equal(normalized257Assignments.profiles[0].applications.length, 257, 'normalization must preserve the 257th application assignment for limit validation');
 assert.throws(
-  () => context.stateForSave(policy([profile('too-many-apps', 257)])),
+  () => context.stateForSave(normalized257Assignments),
   /at most 256 application assignments/,
   '257th application assignment must be rejected instead of silently discarded'
+);
+
+const filteredBeforeValidation = profile('filtered', 256);
+filteredBeforeValidation.applications.push(filteredBeforeValidation.applications[0], 'x'.repeat(257));
+assert.doesNotThrow(
+  () => context.stateForSave(policy([filteredBeforeValidation])),
+  'save validation must run after assignment deduplication and value filtering'
 );
 
 const totalLimitProfiles = Array.from({ length: 8 }, (_, index) => profile(`full${index}`, 256));
