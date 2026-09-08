@@ -1,6 +1,7 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
 mod config_file_broker;
 mod keybox_file_broker;
+mod service_guard;
 
 use cleverestricky_service_core::backend_auth::{BACKEND_AUTH_ENV, BACKEND_AUTH_HEX_BYTES};
 use cleverestricky_service_core::ipc::{
@@ -215,7 +216,9 @@ fn run() -> io::Result<()> {
     thread::Builder::new()
         .name("ct-web-ipc".to_string())
         .spawn(move || {
-            if let Err(error) = serve_web(web_listener, web_identity, web_module_dir) {
+            if let Err(error) =
+                service_guard::run(|| serve_web(web_listener, web_identity, web_module_dir))
+            {
                 eprintln!("cleverestrickyd: WebUI IPC service failed: {error}");
                 process::exit(1);
             }
@@ -232,7 +235,15 @@ fn run() -> io::Result<()> {
     let backend_identity = Arc::clone(&adapter_identity);
     thread::Builder::new()
         .name("ct-backend".to_string())
-        .spawn(move || supervise_backend(backend_dir, backend_identity, backend_root))?;
+        .spawn(move || {
+            if let Err(error) = service_guard::run(|| {
+                supervise_backend(backend_dir, backend_identity, backend_root);
+                Ok(())
+            }) {
+                eprintln!("cleverestrickyd: backend supervisor failed: {error}");
+                process::exit(1);
+            }
+        })?;
 
     let mut rapid_failures = 0u32;
     loop {
@@ -478,7 +489,9 @@ fn spawn_keybox_broker(
     thread::Builder::new()
         .name("ct-keybox-broker".to_string())
         .spawn(move || {
-            if let Err(error) = keybox_file_broker::serve(broker, &broker_root) {
+            if let Err(error) =
+                service_guard::run(|| keybox_file_broker::serve(broker, &broker_root))
+            {
                 let _ = failure_tx.send(error);
             }
         })
@@ -647,9 +660,9 @@ fn spawn_capability_workers(
         thread::Builder::new()
             .name(format!("ct-file-ipc-{index}"))
             .spawn(move || {
-                if let Err(error) =
+                if let Err(error) = service_guard::run(|| {
                     serve_capability_worker(worker_listener, worker_identity, worker_root)
-                {
+                }) {
                     eprintln!("cleverestrickyd: file IPC worker failed: {error}");
                     process::exit(1);
                 }
