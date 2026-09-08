@@ -60,6 +60,7 @@ public final class CertHack {
     private static final class PreparedKeyBox {
         final String signatureAlgorithm;
         final Certificate[] issuerChain;
+        final byte[] keyId;
 
         PreparedKeyBox(KeyBox keybox) throws Exception {
             if (keybox.certificates.isEmpty()) throw new IOException("Keybox has no certificates");
@@ -70,16 +71,17 @@ public final class CertHack {
                 throw new IOException("Production keybox does not use an opaque backend key handle");
             }
             byte[] encoded = keybox.keyPair.getPrivate().getEncoded();
-            try {
-                if (encoded == null || encoded.length != BACKEND_KEY_ID_BYTES) {
-                    throw new IOException("Opaque backend key identifier is invalid");
-                }
-                int aggregate = 0;
-                for (byte value : encoded) aggregate |= value & 0xFF;
-                if (aggregate == 0) throw new IOException("Opaque backend key identifier is zero");
-            } finally {
+            if (encoded == null || encoded.length != BACKEND_KEY_ID_BYTES) {
                 if (encoded != null) Arrays.fill(encoded, (byte) 0);
+                throw new IOException("Opaque backend key identifier is invalid");
             }
+            int aggregate = 0;
+            for (byte value : encoded) aggregate |= value & 0xFF;
+            if (aggregate == 0) {
+                Arrays.fill(encoded, (byte) 0);
+                throw new IOException("Opaque backend key identifier is zero");
+            }
+            this.keyId = encoded;
         }
 
         private static byte[] encodeKeyboxIssuers(Certificate[] issuers) throws CertificateException {
@@ -1023,8 +1025,7 @@ public final class CertHack {
             byte[] moduleHash = inspection.getSupportsModuleHash()
                     ? Config.INSTANCE.getModuleHash()
                     : null;
-            keyId = keybox.keyPair.getPrivate().getEncoded();
-            if (keyId == null || keyId.length != BACKEND_KEY_ID_BYTES) return caList;
+            keyId = prepared.keyId.clone();
 
             byte[] rewrittenDer = CertificateBackend.rewrite(
                     leafEncoded,
@@ -1073,21 +1074,28 @@ public final class CertHack {
         }
     }
 
+    private static final Config.AttestationPatchLevels KEEP_PATCH_LEVELS =
+            new Config.AttestationPatchLevels(
+                    new Config.AttestationPatchComponent(Config.PatchDisposition.KEEP, 0),
+                    new Config.AttestationPatchComponent(Config.PatchDisposition.KEEP, 0),
+                    new Config.AttestationPatchComponent(Config.PatchDisposition.KEEP, 0));
+
     private static Config.AttestationPatchLevels keepPatchLevels() {
-        Config.AttestationPatchComponent keep =
-                new Config.AttestationPatchComponent(Config.PatchDisposition.KEEP, 0);
-        return new Config.AttestationPatchLevels(keep, keep, keep);
+        return KEEP_PATCH_LEVELS;
     }
 
     private static Map<Integer, byte[]> presentIdOverrides(int uid, int mask) {
         if (mask == 0) return Collections.emptyMap();
-        Map<Integer, byte[]> overrides = new HashMap<>();
+        Map<Integer, byte[]> overrides = null;
         for (int index = 0; index < ATTESTATION_ID_TAGS.length; index++) {
             if ((mask & (1 << index)) == 0) continue;
             byte[] value = Config.INSTANCE.getAttestationId(ATTESTATION_ID_NAMES[index], uid);
-            if (value != null) overrides.put(ATTESTATION_ID_TAGS[index], value);
+            if (value != null) {
+                if (overrides == null) overrides = new HashMap<>();
+                overrides.put(ATTESTATION_ID_TAGS[index], value);
+            }
         }
-        return overrides;
+        return overrides == null ? Collections.emptyMap() : overrides;
     }
 
     private static int patchDisposition(Config.AttestationPatchComponent component) {

@@ -106,7 +106,7 @@ object CertificateBackend {
             return null
         }
 
-        val orderedIds = idOverrides.entries.sortedBy { it.key }
+        val orderedIds = if (idOverrides.isEmpty()) emptyList() else idOverrides.entries.sortedBy { it.key }
         var idWireBytes = 0
         for ((tag, value) in orderedIds) {
             if (tag !in ATTESTATION_ID_TAGS || value.isEmpty() || value.size > MAX_ATTESTATION_ID_BYTES) {

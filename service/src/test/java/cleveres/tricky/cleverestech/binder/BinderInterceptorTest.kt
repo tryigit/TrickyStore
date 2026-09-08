@@ -99,4 +99,39 @@ class BinderInterceptorTest {
         assertTrue(BinderInterceptor.clearAndParkBinderHook(control))
         assertEquals(listOf(2, 3, 4), seenCodes)
     }
+
+    @Test
+    fun testRegisterBinderInterceptorWithCapabilities() {
+        var writtenCapabilities = -1
+        val control =
+            object : Binder() {
+                override fun onTransact(
+                    code: Int,
+                    data: Parcel,
+                    reply: Parcel?,
+                    flags: Int,
+                ): Boolean {
+                    data.readStrongBinder()
+                    data.readStrongBinder()
+                    val count = data.readInt()
+                    for (i in 0 until count) data.readInt()
+                    if (data.dataAvail() >= Int.SIZE_BYTES) {
+                        writtenCapabilities = data.readInt()
+                    }
+                    reply?.writeInt(0)
+                    return true
+                }
+            }
+        val interceptor = BinderInterceptor()
+        val ok =
+            BinderInterceptor.registerBinderInterceptor(
+                control,
+                Binder(),
+                interceptor,
+                intArrayOf(1, 2),
+                BinderInterceptor.CAP_OMIT_POST_REQUEST_PAYLOAD,
+            )
+        assertTrue(ok)
+        assertEquals(BinderInterceptor.CAP_OMIT_POST_REQUEST_PAYLOAD, writtenCapabilities)
+    }
 }

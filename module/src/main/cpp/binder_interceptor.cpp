@@ -218,11 +218,16 @@ private:
     OVERRIDE_REPLY,
     OVERRIDE_DATA,
   };
+  enum Capabilities : uint32_t {
+    CAP_NONE = 0,
+    CAP_OMIT_POST_REQUEST_PAYLOAD = 1 << 0,
+  };
 
   struct InterceptItem {
     wp<IBinder> target{};
     sp<IBinder> interceptor;
     std::vector<uint32_t> filtered_codes;
+    uint32_t capabilities = 0;
   };
 
   using RwLock = std::shared_mutex;
@@ -771,6 +776,12 @@ status_t BinderInterceptor::onTransact(uint32_t code,
       }
       codes.push_back(filtered_code);
     }
+    uint32_t capabilities = 0;
+    if (data.dataAvail() >= sizeof(uint32_t)) {
+      if (data.readUint32(&capabilities) != OK) {
+        return BAD_VALUE;
+      }
+    }
     if (data.dataAvail() != 0)
       return BAD_VALUE;
     std::sort(codes.begin(), codes.end());
@@ -798,6 +809,7 @@ status_t BinderInterceptor::onTransact(uint32_t code,
       }
       it->second.interceptor = interceptor;
       it->second.filtered_codes = std::move(codes);
+      it->second.capabilities = capabilities;
     }
     if (replaced_interceptor != nullptr) {
       Parcel notification;
@@ -893,6 +905,7 @@ bool BinderInterceptor::handleIntercept(sp<BBinder> target, uint32_t code,
     }                                                                          \
   })
   sp<IBinder> interceptor;
+  uint32_t capabilities = 0;
   {
     ReadGuard rg{lock};
     auto it = items.find(target);
@@ -901,6 +914,7 @@ bool BinderInterceptor::handleIntercept(sp<BBinder> target, uint32_t code,
       return false;
     }
     interceptor = it->second.interceptor;
+    capabilities = it->second.capabilities;
   }
   if (interceptor == nullptr)
     return false;
@@ -984,10 +998,13 @@ bool BinderInterceptor::handleIntercept(sp<BBinder> target, uint32_t code,
   CHECK_POST(tmpData.writeInt32(static_cast<int32_t>(calling_uid)));
   CHECK_POST(tmpData.writeInt32(static_cast<int32_t>(calling_pid)));
   CHECK_POST(tmpData.writeInt32(result));
-  CHECK_POST(tmpData.writeUint64(data.dataSize()));
-  CHECK_POST(tmpData.appendFrom(&data, 0, data.dataSize()));
+  const bool omit_request = (capabilities & CAP_OMIT_POST_REQUEST_PAYLOAD) != 0;
+  CHECK_POST(tmpData.writeUint64(omit_request ? 0 : data.dataSize()));
+  if (!omit_request) {
+    CHECK_POST(tmpData.appendFrom(&data, 0, data.dataSize()));
+  }
   CHECK_POST(tmpData.writeUint64(reply == nullptr ? 0 : reply->dataSize()));
-  LOGD("data size %zu reply size %zu", data.dataSize(),
+  LOGD("data size %zu reply size %zu", omit_request ? 0 : data.dataSize(),
        reply == nullptr ? 0 : reply->dataSize());
   if (reply) {
     CHECK_POST(tmpData.appendFrom(reply, 0, reply->dataSize()));

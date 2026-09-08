@@ -394,7 +394,14 @@ object KeystoreInterceptor : BinderInterceptor() {
 
         val expectedEpoch = synchronized(this) { lifecycleEpoch }
 
-        val registeredHook = registerBinderInterceptor(bd, b, this, interceptedCodes)
+        val registeredHook =
+            registerBinderInterceptor(
+                bd,
+                b,
+                this,
+                interceptedCodes,
+                CAP_OMIT_POST_REQUEST_PAYLOAD,
+            )
         if (!registeredHook) {
             Logger.e("Failed to register the Keystore Binder interceptor")
             parkBinderHook(bd)
@@ -426,6 +433,7 @@ object KeystoreInterceptor : BinderInterceptor() {
                     tee.asBinder(),
                     interceptor,
                     SecurityLevelInterceptor.INTERCEPTED_CODES,
+                    CAP_OMIT_POST_REQUEST_PAYLOAD,
                 )
             ) {
                 Logger.e("Failed to register the TEE SecurityLevel interceptor")
@@ -473,6 +481,7 @@ object KeystoreInterceptor : BinderInterceptor() {
                     strongbox.asBinder(),
                     interceptor,
                     SecurityLevelInterceptor.INTERCEPTED_CODES,
+                    CAP_OMIT_POST_REQUEST_PAYLOAD,
                 )
             ) {
                 Logger.e("Failed to register the StrongBox SecurityLevel interceptor")

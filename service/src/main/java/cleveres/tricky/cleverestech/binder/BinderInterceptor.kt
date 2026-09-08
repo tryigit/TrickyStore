@@ -28,6 +28,8 @@ open class BinderInterceptor : Binder() {
         private const val MAX_FILTERED_CODES = 1024
         private const val MAX_INTERCEPT_PARCEL_BYTES = 8L * 1024 * 1024
 
+        const val CAP_OMIT_POST_REQUEST_PAYLOAD = 1
+
         fun getBinderControlEndpoint(remote: IBinder): IBinder? {
             val data = Parcel.obtain()
             val reply = Parcel.obtain()
@@ -52,6 +54,7 @@ open class BinderInterceptor : Binder() {
             target: IBinder,
             interceptor: BinderInterceptor,
             filteredCodes: IntArray,
+            capabilities: Int = 0,
         ): Boolean {
             val codes = filteredCodes.filter { it > 0 }.distinct()
             if (codes.isEmpty() || codes.size > MAX_FILTERED_CODES) {
@@ -66,6 +69,9 @@ open class BinderInterceptor : Binder() {
                 data.writeStrongBinder(interceptor)
                 data.writeInt(codes.size)
                 codes.forEach(data::writeInt)
+                if (capabilities != 0) {
+                    data.writeInt(capabilities)
+                }
                 val handled = controlEndpoint.transact(REGISTER_INTERCEPTOR, data, reply, 0)
                 val status = if (reply.dataAvail() >= Int.SIZE_BYTES) reply.readInt() else -1
                 handled && status == 0
@@ -241,9 +247,11 @@ open class BinderInterceptor : Binder() {
         val result =
             try {
                 val requestSize = requireNotNull(readBoundedSize(data)) { "Invalid request size" }
-                request.appendFrom(data, data.dataPosition(), requestSize)
-                request.setDataPosition(0)
-                data.setDataPosition(data.dataPosition() + requestSize)
+                if (requestSize > 0) {
+                    request.appendFrom(data, data.dataPosition(), requestSize)
+                    request.setDataPosition(0)
+                    data.setDataPosition(data.dataPosition() + requestSize)
+                }
 
                 val responseSize = requireNotNull(readBoundedSize(data)) { "Invalid response size" }
                 require(responseSize == data.dataAvail()) { "Trailing response data" }
