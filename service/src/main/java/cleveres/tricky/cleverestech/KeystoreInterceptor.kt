@@ -139,7 +139,10 @@ object KeystoreInterceptor : BinderInterceptor() {
         }
         val forceManagedAttestRefresh =
             if (requestedKeyId != null && ManagedAttestKeyRegistry.isKnown(callingUid, requestedKeyId)) {
-                when (CertificateBackend.touchAttestKey(callingUid, requestedKeyId)) {
+                val touchResult =
+                    runCatching { CertificateBackend.touchAttestKey(callingUid, requestedKeyId) }
+                        .getOrElse { return Skip }
+                when (touchResult) {
                     CertificateBackend.AttestKeyTouchResult.PRESENT -> false
                     CertificateBackend.AttestKeyTouchResult.ABSENT -> true
                     CertificateBackend.AttestKeyTouchResult.UNAVAILABLE -> return Skip
