@@ -50,7 +50,7 @@ internal object ManagedAttestKeyRegistry {
     @Synchronized
     fun isKnown(callingUid: Int, keyId: ByteArray?): Boolean {
         if (!isValid(callingUid, keyId)) return false
-        return entries.containsKey(Identity.lookup(callingUid, requireNotNull(keyId)))
+        return entries[Identity.lookup(callingUid, requireNotNull(keyId))] != null
     }
 
     private fun isValid(callingUid: Int, keyId: ByteArray?): Boolean =
