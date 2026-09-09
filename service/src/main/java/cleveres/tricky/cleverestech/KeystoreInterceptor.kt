@@ -144,7 +144,8 @@ object KeystoreInterceptor : BinderInterceptor() {
                         .getOrElse { return Skip }
                 when (touchResult) {
                     CertificateBackend.AttestKeyTouchResult.PRESENT -> false
-                    CertificateBackend.AttestKeyTouchResult.ABSENT -> true
+                    CertificateBackend.AttestKeyTouchResult.ABSENT ->
+                        !ManagedAttestKeyRehydrator.restore(callingUid, requestedKeyId)
                     CertificateBackend.AttestKeyTouchResult.UNAVAILABLE -> return Skip
                 }
             } else {
@@ -258,7 +259,12 @@ object KeystoreInterceptor : BinderInterceptor() {
                 }
             if (newChain != null) {
                 if (attestKeyId != null) {
-                    ManagedAttestKeyRegistry.remember(callingUid, attestKeyId)
+                    ManagedAttestKeyRegistry.remember(
+                        callingUid,
+                        attestKeyId,
+                        null,
+                        metadata.certificate,
+                    )
                 }
                 if (!CertHack.applyCachedCertificateChain(metadata)) {
                     Utils.putCertificateChain(response, newChain)
