@@ -93,6 +93,124 @@ public class AttestationInterceptorContractTest {
     }
 
     @Test
+    public void getKeyEntryPostReparsesRetainedRequestWithoutPreThreadLocal() throws Exception {
+        Binder target = new Binder();
+        Field keystore = field(KeystoreInterceptor.class, "keystore");
+        Object previous = keystore.get(null);
+        keystore.set(null, target);
+        Field globalModeField = field(Config.class, "isGlobalMode");
+        boolean prevGlobalMode = (boolean) globalModeField.get(Config.INSTANCE);
+        globalModeField.set(Config.INSTANCE, true);
+        Config.INSTANCE.setPackagesForTesting(44_501, new String[] {"com.test.postreparse"});
+        byte[] expectedKeyId = Utils.computeKeyDescriptorIdentity(44_501, 0, -1L, "post-reparse-k1", null);
+        KeyPair parent = keyPair("EC");
+        KeyPair subject = keyPair("EC");
+        X509Certificate leaf = certificate(subject, parent, "postreparse", "parent");
+        X509Certificate replacement = certificate(subject, parent, "replacement", "parent");
+        Certificate[] rewrittenChain = new Certificate[] {replacement, replacement};
+        java.util.concurrent.atomic.AtomicReference<byte[]> touchedKeyId =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        cleveres.tricky.cleverestech.CertificateBackend.setTouchAttestKeyOverrideForTesting((uid, id) -> {
+            touchedKeyId.set(id.clone());
+            return cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.PRESENT;
+        });
+        cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.INSTANCE.remember(
+                44_501, expectedKeyId, null, leaf.getEncoded());
+        try (MockedStatic<CertHack> backend = mockStatic(CertHack.class);
+             MockedStatic<Parcel> parcels = mockStatic(Parcel.class)) {
+            backend.when(CertHack::canHack).thenReturn(true);
+            backend.when(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()))
+                    .thenReturn(rewrittenChain);
+            Parcel obtained = mock(Parcel.class);
+            parcels.when(Parcel::obtain).thenReturn(obtained);
+
+            KeyMetadata metadata = metadata(leaf, leaf.getEncoded());
+            KeyEntryResponse response = new KeyEntryResponse();
+            response.metadata = metadata;
+            Parcel reply = mock(Parcel.class);
+            when(reply.readTypedObject(KeyEntryResponse.CREATOR)).thenReturn(response);
+
+            // No PRE call happens on any thread: POST must re-parse the retained request
+            // by itself instead of relying on a PRE-populated ThreadLocal.
+            BinderInterceptor.Result result = KeystoreInterceptor.INSTANCE.onPostTransact(target,
+                    field(KeystoreInterceptor.class, "getKeyEntryTransaction").getInt(null),
+                    0, 44_501, 42, descriptorRequest("post-reparse-k1"), reply, 0);
+            assertTrue(result instanceof BinderInterceptor.OverrideReply);
+            assertNotNull(touchedKeyId.get());
+            assertArrayEquals(expectedKeyId, touchedKeyId.get());
+        } finally {
+            // Registry entries use a test-unique UID (44_501), so no reset is needed.
+            cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            keystore.set(null, previous);
+            globalModeField.set(Config.INSTANCE, prevGlobalMode);
+        }
+    }
+
+    @Test
+    public void leafOnlyManagedChildReadbackRewritesAgainstRegistryParent() throws Exception {
+        Binder target = new Binder();
+        Field keystore = field(KeystoreInterceptor.class, "keystore");
+        Object previous = keystore.get(null);
+        keystore.set(null, target);
+        Field globalModeField = field(Config.class, "isGlobalMode");
+        boolean prevGlobalMode = (boolean) globalModeField.get(Config.INSTANCE);
+        globalModeField.set(Config.INSTANCE, true);
+        Config.INSTANCE.setPackagesForTesting(44_502, new String[] {"com.test.managedchild"});
+        byte[] parentId = new byte[32];
+        parentId[0] = 3;
+        parentId[1] = 7;
+        byte[] childId = Utils.computeKeyDescriptorIdentity(44_502, 0, -1L, "managed-child", null);
+        KeyPair parent = keyPair("EC");
+        KeyPair subject = keyPair("EC");
+        X509Certificate childLeaf = certificate(subject, parent, "managed-child", "parent");
+        X509Certificate replacement = certificate(subject, parent, "replacement", "parent");
+        cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.INSTANCE.remember(
+                44_502, childId, parentId, null);
+        cleveres.tricky.cleverestech.CertificateBackend.setTouchAttestKeyOverrideForTesting(
+                (uid, id) -> cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.PRESENT);
+        try (MockedStatic<CertHack> backend = mockStatic(CertHack.class);
+             MockedStatic<Parcel> parcels = mockStatic(Parcel.class)) {
+            backend.when(CertHack::canHack).thenReturn(true);
+            backend.when(() -> CertHack.hackChildKeyCertificate(
+                    any(), anyInt(), anyBoolean(), anyBoolean(), any(), any()))
+                    .thenReturn(new Certificate[] {replacement});
+            Parcel obtained = mock(Parcel.class);
+            parcels.when(Parcel::obtain).thenReturn(obtained);
+
+            // Managed child with a cache-miss leaf-only readback must still be rewritten
+            // so it stays consistent with its rewritten parent. No PRE call happens.
+            KeyMetadata metadata = metadata(childLeaf, null);
+            KeyEntryResponse response = new KeyEntryResponse();
+            response.metadata = metadata;
+            Parcel reply = mock(Parcel.class);
+            when(reply.readTypedObject(KeyEntryResponse.CREATOR)).thenReturn(response);
+            BinderInterceptor.Result result = KeystoreInterceptor.INSTANCE.onPostTransact(target,
+                    field(KeystoreInterceptor.class, "getKeyEntryTransaction").getInt(null),
+                    0, 44_502, 42, descriptorRequest("managed-child"), reply, 0);
+            assertTrue(result instanceof BinderInterceptor.OverrideReply);
+            assertArrayEquals(replacement.getEncoded(), metadata.certificate);
+
+            // Unknown leaf-only key: no registry parent, genuine leaf preserved.
+            KeyMetadata ordinaryMetadata = metadata(childLeaf, null);
+            KeyEntryResponse ordinaryResponse = new KeyEntryResponse();
+            ordinaryResponse.metadata = ordinaryMetadata;
+            Parcel ordinaryReply = mock(Parcel.class);
+            when(ordinaryReply.readTypedObject(KeyEntryResponse.CREATOR)).thenReturn(ordinaryResponse);
+            byte[] before = ordinaryMetadata.certificate;
+            BinderInterceptor.Result ordinaryResult = KeystoreInterceptor.INSTANCE.onPostTransact(target,
+                    field(KeystoreInterceptor.class, "getKeyEntryTransaction").getInt(null),
+                    0, 44_502, 42, descriptorRequest("unknown-child"), ordinaryReply, 0);
+            assertSame(BinderInterceptor.Skip.INSTANCE, ordinaryResult);
+            assertSame(before, ordinaryMetadata.certificate);
+        } finally {
+            // Registry entries use a test-unique UID (44_502), so no reset is needed.
+            cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            keystore.set(null, previous);
+            globalModeField.set(Config.INSTANCE, prevGlobalMode);
+        }
+    }
+
+    @Test
     public void attestKeyGenerationWithDefaultAttestationKeyRoutesToHackAttestKeyCertificateChain() throws Exception {
         Binder target = new Binder();
         int code = field(SecurityLevelInterceptor.class, "generateKeyTransaction").getInt(null);
@@ -370,6 +488,23 @@ public class AttestationInterceptorContractTest {
         return new SecurityLevelInterceptor().onPostTransact(new Binder(),
                 field(SecurityLevelInterceptor.class, "generateKeyTransaction").getInt(null),
                 0, 10_001, 42, request, reply, 0);
+    }
+
+    /**
+     * Builds a getKeyEntry request mock carrying one KeyDescriptor that
+     * {@link Utils#extractKeyDescriptorIdentity} can parse into
+     * {@link Utils#computeKeyDescriptorIdentity(int, int, long, String, byte[])}.
+     */
+    private static Parcel descriptorRequest(String alias) {
+        Parcel request = mock(Parcel.class);
+        when(request.dataPosition()).thenReturn(28);
+        when(request.dataAvail()).thenReturn(128);
+        when(request.dataSize()).thenReturn(128);
+        when(request.readInt()).thenReturn(1, 64, 0);
+        when(request.readLong()).thenReturn(-1L);
+        when(request.readString()).thenReturn(alias);
+        when(request.createByteArray()).thenReturn(null);
+        return request;
     }
 
     private static Parcel generatedReply(KeyMetadata metadata) {

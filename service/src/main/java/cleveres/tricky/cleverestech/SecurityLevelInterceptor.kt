@@ -126,6 +126,14 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 null,
             )
         } else {
+            // Fail closed to the genuine chain, but leave a trace: a persistent divergence
+            // between the RKP and ATTEST_KEY paths on device is diagnosed from logcat.
+            Logger.w(
+                "generateKey POST dropped: unparseable request " +
+                    "(size=" + data.dataSize() +
+                    ", pos=" + data.dataPosition() +
+                    ", uid=" + callingUid + ")",
+            )
             return Skip
         }
 
@@ -144,6 +152,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 val rewritten =
                     if (!context.usesDefaultAttestationKey) {
                         val parentId = context.parentKeyId
+                        // The child helper serves its leaf cache before validating the
+                        // parent descriptor, so a missing descriptor must fail closed
+                        // here instead of reaching the helper without its required parent.
+                        if (context.isAttestKeyPurpose && parentId == null) {
+                            return Skip
+                        }
                         if (parentId == null) {
                             CertHack.hackChildKeyCertificate(
                                 originalLeafOnly,
@@ -232,6 +246,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             val rewritten =
                 if (!context.usesDefaultAttestationKey) {
                     val parentId = context.parentKeyId
+                    // The child helper serves its leaf cache before validating the
+                    // parent descriptor, so a missing descriptor must fail closed
+                    // here instead of reaching the helper without its required parent.
+                    if (context.isAttestKeyPurpose && parentId == null) {
+                        return Skip
+                    }
                     if (parentId == null) {
                         CertHack.hackChildKeyCertificate(
                             originalLeafOnly,

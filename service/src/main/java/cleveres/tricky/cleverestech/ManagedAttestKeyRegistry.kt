@@ -114,6 +114,19 @@ internal object ManagedAttestKeyRegistry {
         return conservativeMode || entries[Identity.lookup(callingUid, requireNotNull(keyId))] != null
     }
 
+    /**
+     * Returns a defensive copy of the recorded parent identity for a managed graph member, or
+     * null when the child is unknown, the registry is in conservative mode, or the entry is a
+     * graph root. Readback paths use this to re-derive a leaf-only child rewrite without
+     * trusting any caller-supplied parent reference.
+     */
+    @Synchronized
+    fun getParentKeyId(callingUid: Int, keyId: ByteArray?): ByteArray? {
+        if (!isValid(callingUid, keyId)) return null
+        if (conservativeMode) return null
+        return entries[Identity.lookup(callingUid, requireNotNull(keyId))]?.parentKeyId?.clone()
+    }
+
     @Synchronized
     fun rehydrationPath(callingUid: Int, keyId: ByteArray?): List<RehydrationEntry>? {
         if (!isValid(callingUid, keyId)) return null

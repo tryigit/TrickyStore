@@ -16,6 +16,7 @@ import android.system.keystore2.KeyMetadata
 import cleveres.tricky.cleverestech.binder.BinderInterceptor
 import cleveres.tricky.cleverestech.keystore.CertHack
 import cleveres.tricky.cleverestech.keystore.Utils
+import java.security.cert.Certificate
 import kotlin.system.exitProcess
 
 @SuppressLint("BlockedPrivateApi")
@@ -44,12 +45,13 @@ object KeystoreInterceptor : BinderInterceptor() {
     @Volatile private var lifecycleEpoch = 0L
 
     /**
-     * POST request payloads are intentionally omitted by the native hook. Capture only the bounded,
-     * canonical descriptor identity needed to distinguish a persistent ATTEST_KEY readback from an
-     * ordinary full-chain key. The value is removed on every POST/skip path to avoid cross-request
-     * reuse on Binder pool threads.
+     * PRE and POST are separate Binder callbacks and may execute on different Binder worker
+     * threads: cross-process Binder calls land on arbitrary pool threads. POST therefore
+     * re-parses the retained original request instead of relying on a ThreadLocal populated by
+     * PRE. Registration enforces retention via requiresPostRequestPayload even though
+     * CAP_OMIT_POST_REQUEST_PAYLOAD is requested below.
      */
-    private val getKeyEntryIdentity = ThreadLocal<ByteArray?>()
+    override val requiresPostRequestPayload: Boolean = true
 
     private fun captureGetKeyEntryIdentity(data: Parcel, callingUid: Int): ByteArray? {
         val position = data.dataPosition()
@@ -76,6 +78,83 @@ object KeystoreInterceptor : BinderInterceptor() {
         return false
     }
 
+    /**
+     * Rewrites a managed leaf-only child readback (a key attested by an app ATTEST_KEY, whose
+     * issuer chain belongs to the caller) against its registry-recorded parent. Returns the
+     * rewritten leaf DER, or null to preserve the genuine leaf. Ordinary leaf-only keys have
+     * no registry parent and always return null here, as do non-attested leaves.
+     */
+    private fun tryRewriteManagedLeafOnlyChild(
+        callingUid: Int,
+        requestedKeyId: ByteArray?,
+        metadata: KeyMetadata,
+    ): ByteArray? {
+        if (requestedKeyId == null) return null
+        val parentKeyId =
+            ManagedAttestKeyRegistry.getParentKeyId(callingUid, requestedKeyId) ?: return null
+        val originalLeaf = Utils.getLeafCertificate(metadata) ?: return null
+        if (!Utils.hasAndroidAttestationExtension(originalLeaf)) return null
+        val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
+        val rewritten =
+            rewriteManagedChildWithParentRecovery(
+                originalLeafOnly,
+                callingUid,
+                isAttestKeyEntry(metadata),
+                parentKeyId,
+                requestedKeyId,
+            )
+        if (rewritten === originalLeafOnly || rewritten.isEmpty()) return null
+        return try {
+            rewritten[0].encoded
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Mirrors the generateKey child rewrite with rehydration: if the recorded parent went
+     * stale (e.g. Rust-only backend restart), rebuild the ancestry once and retry instead
+     * of serving a genuine leaf against a rewritten parent.
+     */
+    private fun rewriteManagedChildWithParentRecovery(
+        original: Array<Certificate>,
+        callingUid: Int,
+        isAttestKey: Boolean,
+        parentKeyId: ByteArray,
+        childKeyId: ByteArray?,
+    ): Array<Certificate> {
+        KeyboxActivation.lockPublishedSnapshot()
+        return try {
+            val first =
+                CertHack.hackChildKeyCertificate(
+                    original,
+                    callingUid,
+                    isAttestKey,
+                    true,
+                    parentKeyId,
+                    childKeyId,
+                )
+            if (first !== original || !ManagedAttestKeyRegistry.isKnown(callingUid, parentKeyId)) {
+                return first
+            }
+            val presence =
+                runCatching { CertificateBackend.touchAttestKey(callingUid, parentKeyId) }
+                    .getOrElse { return first }
+            if (presence != CertificateBackend.AttestKeyTouchResult.ABSENT) return first
+            if (!ManagedAttestKeyRehydrator.restore(callingUid, parentKeyId)) return first
+            CertHack.hackChildKeyCertificate(
+                original,
+                callingUid,
+                isAttestKey,
+                true,
+                parentKeyId,
+                childKeyId,
+            )
+        } finally {
+            KeyboxActivation.unlockPublishedSnapshot()
+        }
+    }
+
     override fun onPreTransact(
         target: IBinder,
         code: Int,
@@ -85,7 +164,6 @@ object KeystoreInterceptor : BinderInterceptor() {
         data: Parcel,
     ): Result {
         if (target != keystore) {
-            getKeyEntryIdentity.remove()
             return Skip
         }
 
@@ -94,22 +172,17 @@ object KeystoreInterceptor : BinderInterceptor() {
         // binder when the device provides one. Never substitute TEE and never manufacture an
         // unavailable result for hardware that is actually present.
         if (!CertHack.canHack()) {
-            getKeyEntryIdentity.remove()
             return Skip
         }
         if (code == getKeyEntryTransaction) {
+            // Request classification is deferred to POST, which re-parses the retained
+            // request. Granted-chain reads are still admitted so unrelated callers can hit
+            // the cache.
             val targeted = Config.needHack(callingUid)
-            if (targeted) {
-                captureGetKeyEntryIdentity(data, callingUid)?.let(getKeyEntryIdentity::set)
-                    ?: getKeyEntryIdentity.remove()
-            } else {
-                getKeyEntryIdentity.remove()
-            }
             val mayReadGrantedChain =
                 callingUid >= FIRST_APPLICATION_UID && CertHack.hasCachedCertificateChains()
             return if (targeted || mayReadGrantedChain) Continue else Skip
         }
-        getKeyEntryIdentity.remove()
         return Skip
     }
 
@@ -124,11 +197,11 @@ object KeystoreInterceptor : BinderInterceptor() {
         resultCode: Int,
     ): Result {
         if (target != keystore || code != getKeyEntryTransaction) {
-            getKeyEntryIdentity.remove()
             return Skip
         }
-        val requestedKeyId = getKeyEntryIdentity.get()
-        getKeyEntryIdentity.remove()
+        // Re-parse the retained request: POST may run on a different Binder worker than PRE,
+        // so a PRE-populated ThreadLocal would be lost here.
+        val requestedKeyId = captureGetKeyEntryIdentity(data, callingUid)
 
         if (reply == null || resultCode != 0 || !CertHack.canHack()) return Skip
 
@@ -174,10 +247,20 @@ object KeystoreInterceptor : BinderInterceptor() {
                     }
                 }
 
-                // Leaf-only entries must preserve their caller-selected issuer contract. A full
-                // chain cache miss may still need the compatibility fallback below, but only for a
-                // targeted caller. POST is emitted only after PRE accepted this transaction.
-                if (parsed.hasLeafOnlyCertificate() || !Config.needHack(callingUid)) {
+                if (!Config.needHack(callingUid)) {
+                    return Skip
+                }
+                // Leaf-only entries have no issuer chain to replace in place, so ordinary
+                // leaf-only keys skip here on the allocation-free fast path. A managed
+                // attest-graph child (a leaf-only key attested by an app ATTEST_KEY) still
+                // needs its leaf rewritten to match its rewritten parent, so fall through
+                // to the compatibility path only when its parent is known. The registry
+                // probe is a cheap map lookup that keeps repeated ordinary reads fast.
+                // POST is emitted only after PRE accepted this transaction.
+                if (parsed.hasLeafOnlyCertificate() &&
+                    (requestedKeyId == null ||
+                        ManagedAttestKeyRegistry.getParentKeyId(callingUid, requestedKeyId) == null)
+                ) {
                     return Skip
                 }
             }
@@ -222,12 +305,30 @@ object KeystoreInterceptor : BinderInterceptor() {
                 }
             }
 
-            if (!targeted || isLeafOnly || !isFullChain) {
+            if (!targeted || !isFullChain) {
+                // Targeted leaf-only managed children are rewritten against their
+                // registry-recorded parent so the served leaf stays consistent with the
+                // rewritten parent certificate. Anything else keeps the genuine leaf.
+                if (targeted && isLeafOnly) {
+                    val rewrittenLeaf =
+                        tryRewriteManagedLeafOnlyChild(callingUid, requestedKeyId, metadata)
+                    if (rewrittenLeaf != null) {
+                        metadata.certificate = rewrittenLeaf
+                        val p = Parcel.obtain()
+                        try {
+                            p.writeNoException()
+                            p.writeTypedObject(response, 0)
+                            return OverrideReply(0, p)
+                        } catch (t: Throwable) {
+                            p.recycle()
+                            throw t
+                        }
+                    }
+                }
                 return Skip
             }
 
             // Cache miss fallback for full chains: verify attestation extension before invoking CertHack.
-            // Leaf-only entries (including caller-selected AttestKey children) are skipped above.
             val originalLeaf = Utils.getLeafCertificate(metadata)
             if (
                 originalLeaf == null ||
@@ -706,7 +807,6 @@ object KeystoreInterceptor : BinderInterceptor() {
     }
 
     override fun onInterceptorReplaced() {
-        getKeyEntryIdentity.remove()
         synchronized(this) {
             lifecycleEpoch++
             if (deathRecipientLinked && ::keystore.isInitialized) {
