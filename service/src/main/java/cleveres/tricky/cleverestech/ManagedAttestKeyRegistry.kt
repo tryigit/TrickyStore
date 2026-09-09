@@ -9,11 +9,14 @@ import java.util.LinkedHashMap
  * synthetic ATTEST_KEY graph. This survives a Rust-only backend restart while the Java service is
  * still alive, which lets getKeyEntry distinguish a stale managed cache hit from an ordinary key.
  *
- * This registry is exact eligibility metadata, not a heuristic. It is deliberately larger than the
- * 64-entry certificate cache that can contain stale synthetic parents. Access ordering keeps entries
- * that are actively read hot. A bounded copy of the original genuine leaf and parent identity is
- * retained when available so a nested managed graph can be reconstructed parent-first after a
- * Rust-only restart without ever inferring eligibility from an arbitrary descriptor.
+ * This is bounded eligibility metadata, not authority: presence in the live Rust graph is always
+ * revalidated with touchAttestKey before a cached managed parent is reused. A bounded copy of the
+ * original genuine leaf and parent identity is retained when available so a nested managed graph can
+ * be reconstructed parent-first after a Rust-only restart. The registry must never create a false
+ * negative while Java may still hold a synthetic cache entry. If the exact identity bound is
+ * exhausted, it therefore switches to conservative mode and treats valid descriptors as potentially
+ * managed so authoritative KeyMetadata is re-read before cache reuse. Unsupported RSA/non-P256
+ * parents remain fail-closed passthrough in the certificate rewrite path.
  */
 internal object ManagedAttestKeyRegistry {
     private const val KEY_ID_BYTES = 32
@@ -59,6 +62,7 @@ internal object ManagedAttestKeyRegistry {
 
     private val entries = LinkedHashMap<Identity, Entry>(64, 0.75f, true)
     private var retainedProofBytes = 0
+    private var conservativeMode = false
 
     @Synchronized
     fun remember(callingUid: Int, keyId: ByteArray?) {
@@ -66,11 +70,15 @@ internal object ManagedAttestKeyRegistry {
         val nonNullKeyId = requireNotNull(keyId)
         val lookup = Identity.lookup(callingUid, nonNullKeyId)
         val old = entries.remove(lookup)
+        if (old == null && entries.size >= MAX_ENTRIES) {
+            conservativeMode = true
+            return
+        }
         if (old != null) retainedProofBytes -= old.proofBytes()
         val stored = old ?: Entry(null, null)
         entries[Identity.stored(callingUid, nonNullKeyId)] = stored
         retainedProofBytes += stored.proofBytes()
-        trimLocked()
+        trimProofBytesLocked()
     }
 
     @Synchronized
@@ -88,18 +96,22 @@ internal object ManagedAttestKeyRegistry {
         val nonNullKeyId = requireNotNull(keyId)
         val lookup = Identity.lookup(callingUid, nonNullKeyId)
         val old = entries.remove(lookup)
+        if (old == null && entries.size >= MAX_ENTRIES) {
+            conservativeMode = true
+            return
+        }
         if (old != null) retainedProofBytes -= old.proofBytes()
 
         val stored = Entry(parentKeyId, genuineLeafDer ?: old?.genuineLeafDer)
         entries[Identity.stored(callingUid, nonNullKeyId)] = stored
         retainedProofBytes += stored.proofBytes()
-        trimLocked()
+        trimProofBytesLocked()
     }
 
     @Synchronized
     fun isKnown(callingUid: Int, keyId: ByteArray?): Boolean {
         if (!isValid(callingUid, keyId)) return false
-        return entries[Identity.lookup(callingUid, requireNotNull(keyId))] != null
+        return conservativeMode || entries[Identity.lookup(callingUid, requireNotNull(keyId))] != null
     }
 
     @Synchronized
@@ -130,13 +142,7 @@ internal object ManagedAttestKeyRegistry {
         return reversed
     }
 
-    private fun trimLocked() {
-        val iterator = entries.entries.iterator()
-        while (entries.size > MAX_ENTRIES && iterator.hasNext()) {
-            val removed = iterator.next().value
-            retainedProofBytes -= removed.proofBytes()
-            iterator.remove()
-        }
+    private fun trimProofBytesLocked() {
         if (retainedProofBytes <= MAX_PROOF_BYTES) return
         for (entry in entries.values) {
             if (retainedProofBytes <= MAX_PROOF_BYTES) break
@@ -158,5 +164,6 @@ internal object ManagedAttestKeyRegistry {
     internal fun resetForTesting() {
         entries.clear()
         retainedProofBytes = 0
+        conservativeMode = false
     }
 }
