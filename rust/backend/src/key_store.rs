@@ -2,7 +2,8 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use cleverestricky_certificate_core::{
-    PreparedIssuer, SigningAlgorithm, MAX_CERTIFICATE_DER_BYTES,
+    derive_ec_p256_keypair, GeneratedEcKeypair, PreparedIssuer, SigningAlgorithm,
+    MAX_CERTIFICATE_DER_BYTES,
 };
 use cleverestricky_keybox_core::{normalize_private_key_pkcs8, public_key_spki_from_pkcs8};
 use cleverestricky_xml_core::{KeyboxDocument, MAX_KEYBOXES_PER_FILE, MAX_KEYS_PER_KEYBOX};
@@ -11,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use x509_cert::Certificate;
 use x509_der::{Decode as X509Decode, Encode as X509Encode};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const KEY_ID_BYTES: usize = 16;
 pub const MAX_STORED_KEYS: usize = MAX_KEYBOXES_PER_FILE * MAX_KEYS_PER_KEYBOX;
@@ -141,6 +142,52 @@ pub fn with_prepared_key<T>(
         .as_ref()
         .ok_or("registered key has no prepared issuer")?;
     operation(key.algorithm, prepared)
+}
+
+/// Derives a stable synthetic P-256 signer for an Android attest-key descriptor.
+///
+/// The derivation root is the lexicographically first active keybox secret, so the same active
+/// keybox snapshot produces the same synthetic public key after backend restart without persisting
+/// another private key. The descriptor identity, caller UID and KeyMint security level provide
+/// domain separation. No derived or root private material crosses the Rust backend boundary.
+pub fn derive_attest_keypair(
+    calling_uid: u32,
+    security_level: u8,
+    attest_key_id: &[u8; 32],
+) -> Result<GeneratedEcKeypair, &'static str> {
+    if security_level == 0 || attest_key_id.iter().all(|byte| *byte == 0) {
+        return Err("invalid attest key derivation context");
+    }
+
+    let store = STORE.get_or_init(|| Mutex::new(KeyStore::default()));
+    let guard = store.lock().map_err(|_| "keybox store lock poisoned")?;
+    let root_id = guard
+        .active_ids
+        .iter()
+        .next()
+        .copied()
+        .ok_or("no active keybox secret for attest key derivation")?;
+    let root = guard
+        .keys
+        .get(&root_id)
+        .ok_or("active derivation key is not registered")?;
+    let private_len = u32::try_from(root.private_key_pkcs8.len())
+        .map_err(|_| "active derivation key exceeds length bound")?;
+
+    let mut hash = Sha256::new();
+    hash.update(b"CleveresTricky persistent attest signer seed v1\0");
+    hash.update(root_id);
+    hash.update(private_len.to_be_bytes());
+    hash.update(root.private_key_pkcs8.as_slice());
+    hash.update(calling_uid.to_be_bytes());
+    hash.update([security_level]);
+    hash.update(attest_key_id);
+    let mut seed: [u8; 32] = hash.finalize().into();
+    drop(guard);
+
+    let result = derive_ec_p256_keypair(&seed).map_err(|_| "failed to derive attest keypair");
+    seed.zeroize();
+    result
 }
 
 pub fn retain_only(ids: &[KeyId]) -> Result<(), &'static str> {
@@ -387,6 +434,49 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn deterministic_attest_signer_survives_store_rebuild_and_is_domain_separated() {
+        let _sequence = super::super::isolate_store_sequence();
+        reset_for_testing();
+        let document = parse_keybox_xml_bytes(VALID_EC).unwrap();
+        let root = register_document(&document).unwrap()[0].id;
+        retain_only(&[root]).unwrap();
+
+        let descriptor = [0x5a; 32];
+        let first = derive_attest_keypair(10_123, 1, &descriptor).unwrap();
+        let different_uid = derive_attest_keypair(10_124, 1, &descriptor).unwrap();
+        let different_level = derive_attest_keypair(10_123, 2, &descriptor).unwrap();
+        let different_descriptor = derive_attest_keypair(10_123, 1, &[0x6b; 32]).unwrap();
+        assert_ne!(first.public_key_spki_der, different_uid.public_key_spki_der);
+        assert_ne!(
+            first.public_key_spki_der,
+            different_level.public_key_spki_der
+        );
+        assert_ne!(
+            first.public_key_spki_der,
+            different_descriptor.public_key_spki_der
+        );
+
+        reset_for_testing();
+        let document = parse_keybox_xml_bytes(VALID_EC).unwrap();
+        let rebuilt_root = register_document(&document).unwrap()[0].id;
+        assert_eq!(root, rebuilt_root);
+        retain_only(&[rebuilt_root]).unwrap();
+        let rebuilt = derive_attest_keypair(10_123, 1, &descriptor).unwrap();
+        assert_eq!(first.public_key_spki_der, rebuilt.public_key_spki_der);
+        assert_eq!(
+            first.private_key_pkcs8_der.as_slice(),
+            rebuilt.private_key_pkcs8_der.as_slice()
+        );
+    }
+
+    #[test]
+    fn attest_derivation_requires_an_active_keybox() {
+        let _sequence = super::super::isolate_store_sequence();
+        reset_for_testing();
+        assert!(derive_attest_keypair(10_123, 1, &[0x5a; 32]).is_err());
     }
 
     #[test]

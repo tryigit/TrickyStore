@@ -1,10 +1,10 @@
 use crate::attest_key_store;
 use crate::keybox_wire::key_store::{self, KeyId, KEY_ID_BYTES};
 use cleverestricky_certificate_core::{
-    generate_ec_p256_keypair, inspect_certificate, parse_certificate_subject_and_issuer,
-    rewrite_certificate_prepared, AttestationIdOverride, CertificateInspection, PatchComponent,
-    PatchLevels, PreparedCertificateRewriteRequest, PreparedIssuer, SecurityLevel,
-    SigningAlgorithm, MAX_ATTESTATION_ID_BYTES, MAX_CERTIFICATE_DER_BYTES, MAX_MODULE_HASH_BYTES,
+    inspect_certificate, parse_certificate_subject_and_issuer, rewrite_certificate_prepared,
+    AttestationIdOverride, CertificateInspection, PatchComponent, PatchLevels,
+    PreparedCertificateRewriteRequest, PreparedIssuer, SecurityLevel, SigningAlgorithm,
+    MAX_ATTESTATION_ID_BYTES, MAX_CERTIFICATE_DER_BYTES, MAX_MODULE_HASH_BYTES,
 };
 use zeroize::Zeroize;
 
@@ -85,6 +85,23 @@ fn validate_hardware_provenance(provenance: &CertificateInspection) -> Result<()
     Ok(())
 }
 
+fn derive_attest_issuer(
+    calling_uid: u32,
+    security_level: SecurityLevel,
+    attest_key_id: &[u8; 32],
+    subject_der: Vec<u8>,
+) -> Result<(Vec<u8>, PreparedIssuer), &'static str> {
+    let keypair =
+        key_store::derive_attest_keypair(calling_uid, security_level.wire_value(), attest_key_id)?;
+    let prepared = PreparedIssuer::from_subject_and_key(
+        subject_der,
+        &keypair.private_key_pkcs8_der,
+        SigningAlgorithm::EcP256Sha256,
+    )
+    .map_err(|_| "failed to prepare derived attest issuer")?;
+    Ok((keypair.public_key_spki_der, prepared))
+}
+
 pub fn rewrite_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'static str> {
     let result = (|| {
         if request.len() < REWRITE_FIXED_BYTES || request.len() > MAX_REWRITE_REQUEST_BYTES {
@@ -146,21 +163,19 @@ pub fn rewrite_attest_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'
         let (subject_der, _) = parse_certificate_subject_and_issuer(parsed.genuine_leaf_der)
             .map_err(|_| "invalid attest key certificate")?;
 
-        let keypair =
-            generate_ec_p256_keypair().map_err(|_| "failed to generate attest keypair")?;
-        let prepared_for_children = PreparedIssuer::from_subject_and_key(
-            subject_der,
-            &keypair.private_key_pkcs8_der,
-            SigningAlgorithm::EcP256Sha256,
-        )
-        .map_err(|_| "failed to prepare attest issuer")?;
-
         key_store::with_prepared_key(&parsed.key_id, |stored_algorithm, prepared_issuer| {
             if stored_algorithm != parsed.signing_algorithm
                 || prepared_issuer.algorithm() != stored_algorithm
             {
                 return Err("opaque key algorithm does not match rewrite request");
             }
+
+            let (public_key_spki_der, prepared_for_children) = derive_attest_issuer(
+                parsed.calling_uid,
+                provenance.keymint_security_level,
+                &parsed.attest_key_id,
+                subject_der,
+            )?;
             let rewritten = rewrite_certificate_prepared(&PreparedCertificateRewriteRequest {
                 genuine_leaf_der: parsed.genuine_leaf_der,
                 issuer: prepared_issuer,
@@ -169,7 +184,7 @@ pub fn rewrite_attest_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'
                 module_hash: parsed.module_hash,
                 verified_boot_key: parsed.verified_boot_key,
                 verified_boot_hash: parsed.verified_boot_hash,
-                subject_public_key_info: Some(&keypair.public_key_spki_der),
+                subject_public_key_info: Some(&public_key_spki_der),
             })
             .map(|rewritten| rewritten.leaf_der)
             .map_err(|_| "attest key certificate rewrite rejected")?;
@@ -199,6 +214,11 @@ pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'s
             .map_err(|_| "child key rewrite provenance rejected")?;
         validate_hardware_provenance(&provenance)?;
 
+        // Only a parent that was authoritatively rewritten as a supported managed ATTEST_KEY may
+        // sign a synthetic child. Persistent aliases are rehydrated through getKeyEntry readback,
+        // where the real parent metadata and EC P-256 certificate are available for validation.
+        // Never infer parent eligibility from a child's issuer name: Android also supports RSA and
+        // non-P256 EC ATTEST_KEYs, which this synthetic signer path intentionally does not manage.
         let parent_issuer =
             attest_key_store::get_attest_key(parsed.calling_uid, &parsed.parent_key_id)
                 .ok_or("attest issuer not found in managed store")?;
@@ -209,17 +229,15 @@ pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'s
             {
                 return Err("child attest key is not EC P-256");
             }
-            let keypair = generate_ec_p256_keypair()
-                .map_err(|_| "failed to generate child attest keypair")?;
             let (subject_der, _) = parse_certificate_subject_and_issuer(parsed.genuine_leaf_der)
                 .map_err(|_| "invalid child certificate")?;
-            let prepared = PreparedIssuer::from_subject_and_key(
+            let (public_key_spki_der, prepared) = derive_attest_issuer(
+                parsed.calling_uid,
+                provenance.keymint_security_level,
+                &parsed.child_key_id,
                 subject_der,
-                &keypair.private_key_pkcs8_der,
-                SigningAlgorithm::EcP256Sha256,
-            )
-            .map_err(|_| "failed to prepare child attest issuer")?;
-            (Some(keypair.public_key_spki_der), Some(prepared))
+            )?;
+            (Some(public_key_spki_der), Some(prepared))
         } else {
             (None, None)
         };

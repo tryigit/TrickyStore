@@ -2,13 +2,17 @@ package cleveres.tricky.cleverestech
 
 import android.annotation.SuppressLint
 import android.hardware.security.keymint.ErrorCode
+import android.hardware.security.keymint.KeyParameterValue
+import android.hardware.security.keymint.KeyPurpose
 import android.hardware.security.keymint.SecurityLevel
+import android.hardware.security.keymint.Tag
 import android.os.IBinder
 import android.os.Parcel
 import android.os.ServiceManager
 import android.os.SystemClock
 import android.system.keystore2.IKeystoreService
 import android.system.keystore2.KeyEntryResponse
+import android.system.keystore2.KeyMetadata
 import cleveres.tricky.cleverestech.binder.BinderInterceptor
 import cleveres.tricky.cleverestech.keystore.CertHack
 import cleveres.tricky.cleverestech.keystore.Utils
@@ -39,6 +43,39 @@ object KeystoreInterceptor : BinderInterceptor() {
 
     @Volatile private var lifecycleEpoch = 0L
 
+    /**
+     * POST request payloads are intentionally omitted by the native hook. Capture only the bounded,
+     * canonical descriptor identity needed to distinguish a persistent ATTEST_KEY readback from an
+     * ordinary full-chain key. The value is removed on every POST/skip path to avoid cross-request
+     * reuse on Binder pool threads.
+     */
+    private val getKeyEntryIdentity = ThreadLocal<ByteArray?>()
+
+    private fun captureGetKeyEntryIdentity(data: Parcel, callingUid: Int): ByteArray? {
+        val position = data.dataPosition()
+        return try {
+            data.enforceInterface(IKeystoreService.DESCRIPTOR)
+            Utils.extractKeyDescriptorIdentity(data, callingUid)
+        } catch (_: RuntimeException) {
+            null
+        } finally {
+            data.setDataPosition(position)
+        }
+    }
+
+    private fun isAttestKeyEntry(metadata: KeyMetadata): Boolean {
+        val authorizations = metadata.authorizations ?: return false
+        for (authorization in authorizations) {
+            val parameter = authorization?.keyParameter ?: continue
+            if (parameter.tag != Tag.PURPOSE) continue
+            val value = parameter.value ?: continue
+            if (value.tag == KeyParameterValue.keyPurpose && value.keyPurpose == KeyPurpose.ATTEST_KEY) {
+                return true
+            }
+        }
+        return false
+    }
+
     override fun onPreTransact(
         target: IBinder,
         code: Int,
@@ -47,19 +84,32 @@ object KeystoreInterceptor : BinderInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): Result {
-        if (target != keystore) return Skip
+        if (target != keystore) {
+            getKeyEntryIdentity.remove()
+            return Skip
+        }
 
         // Security-level discovery remains completely platform-owned. In particular, a StrongBox
         // request must reach Keystore2 unchanged so callers receive the genuine StrongBox child
         // binder when the device provides one. Never substitute TEE and never manufacture an
         // unavailable result for hardware that is actually present.
-        if (!CertHack.canHack()) return Skip
+        if (!CertHack.canHack()) {
+            getKeyEntryIdentity.remove()
+            return Skip
+        }
         if (code == getKeyEntryTransaction) {
             val targeted = Config.needHack(callingUid)
+            if (targeted) {
+                captureGetKeyEntryIdentity(data, callingUid)?.let(getKeyEntryIdentity::set)
+                    ?: getKeyEntryIdentity.remove()
+            } else {
+                getKeyEntryIdentity.remove()
+            }
             val mayReadGrantedChain =
                 callingUid >= FIRST_APPLICATION_UID && CertHack.hasCachedCertificateChains()
             return if (targeted || mayReadGrantedChain) Continue else Skip
         }
+        getKeyEntryIdentity.remove()
         return Skip
     }
 
@@ -73,15 +123,34 @@ object KeystoreInterceptor : BinderInterceptor() {
         reply: Parcel?,
         resultCode: Int,
     ): Result {
-        if (target != keystore || reply == null || resultCode != 0) return Skip
+        if (target != keystore || code != getKeyEntryTransaction) {
+            getKeyEntryIdentity.remove()
+            return Skip
+        }
+        val requestedKeyId = getKeyEntryIdentity.get()
+        getKeyEntryIdentity.remove()
 
-        if (!CertHack.canHack() || code != getKeyEntryTransaction) return Skip
+        if (reply == null || resultCode != 0 || !CertHack.canHack()) return Skip
 
         try {
             reply.readException()
         } catch (e: Exception) {
             return Skip
         }
+        val forceManagedAttestRefresh =
+            if (requestedKeyId != null && ManagedAttestKeyRegistry.isKnown(callingUid, requestedKeyId)) {
+                val touchResult =
+                    runCatching { CertificateBackend.touchAttestKey(callingUid, requestedKeyId) }
+                        .getOrElse { return Skip }
+                when (touchResult) {
+                    CertificateBackend.AttestKeyTouchResult.PRESENT -> false
+                    CertificateBackend.AttestKeyTouchResult.ABSENT ->
+                        !ManagedAttestKeyRehydrator.restore(callingUid, requestedKeyId)
+                    CertificateBackend.AttestKeyTouchResult.UNAVAILABLE -> return Skip
+                }
+            } else {
+                false
+            }
         try {
             // Duck Detector measures repeated service.getKeyEntry calls, not generateKey. Read only
             // the stable-AIDL offsets and genuine leaf bytes on that path. A cache hit rewrites the
@@ -96,11 +165,13 @@ object KeystoreInterceptor : BinderInterceptor() {
                     return Skip
                 }
 
-                when (CertHack.applyCachedCertificateChain(reply, parsed)) {
-                    CertHack.CachedParcelAction.REWRITTEN ->
-                        return OverrideReply(code = 0, reply = reply)
-                    CertHack.CachedParcelAction.PASSTHROUGH -> return Skip
-                    CertHack.CachedParcelAction.MISS -> Unit
+                if (!forceManagedAttestRefresh) {
+                    when (CertHack.applyCachedCertificateChain(reply, parsed)) {
+                        CertHack.CachedParcelAction.REWRITTEN ->
+                            return OverrideReply(code = 0, reply = reply)
+                        CertHack.CachedParcelAction.PASSTHROUGH -> return Skip
+                        CertHack.CachedParcelAction.MISS -> Unit
+                    }
                 }
 
                 // Leaf-only entries must preserve their caller-selected issuer contract. A full
@@ -136,6 +207,7 @@ object KeystoreInterceptor : BinderInterceptor() {
             // A non-standard parcel cannot use the raw fast path, but it may still carry a cacheable
             // platform KeyMetadata object. Keep this path contract-compatible for vendor variants.
             if (
+                !forceManagedAttestRefresh &&
                 (targeted || mayReadGrantedChain) &&
                 CertHack.applyCachedCertificateChain(metadata)
             ) {
@@ -164,12 +236,36 @@ object KeystoreInterceptor : BinderInterceptor() {
                 return Skip
             }
 
+            val attestKeyId = requestedKeyId?.takeIf { isAttestKeyEntry(metadata) }
             val originalChain = Utils.getCertificateChain(response)
             val newChain =
-                originalChain?.let {
-                    CertHack.hackCertificateChain(it, callingUid, false).takeUnless { rewritten -> rewritten === it }
+                originalChain?.let { chain ->
+                    val rewritten =
+                        if (attestKeyId != null) {
+                            // Persistent Android attest-key aliases survive backend restarts. Re-run
+                            // the attest-key path so Rust derives the same synthetic SPKI from the
+                            // descriptor instead of publishing a generic rewrite with the genuine
+                            // parent public key.
+                            CertHack.hackAttestKeyCertificateChain(
+                                chain,
+                                callingUid,
+                                false,
+                                attestKeyId,
+                            )
+                        } else {
+                            CertHack.hackCertificateChain(chain, callingUid, false)
+                        }
+                    rewritten.takeUnless { it === chain }
                 }
             if (newChain != null) {
+                if (attestKeyId != null) {
+                    ManagedAttestKeyRegistry.remember(
+                        callingUid,
+                        attestKeyId,
+                        null,
+                        metadata.certificate,
+                    )
+                }
                 if (!CertHack.applyCachedCertificateChain(metadata)) {
                     Utils.putCertificateChain(response, newChain)
                 }
@@ -610,6 +706,7 @@ object KeystoreInterceptor : BinderInterceptor() {
     }
 
     override fun onInterceptorReplaced() {
+        getKeyEntryIdentity.remove()
         synchronized(this) {
             lifecycleEpoch++
             if (deathRecipientLinked && ::keystore.isInitialized) {

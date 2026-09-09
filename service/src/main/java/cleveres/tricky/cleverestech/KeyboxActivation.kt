@@ -80,6 +80,15 @@ internal object KeyboxActivation {
                 Logger.e("Refusing to publish keyboxes because the Rust active-set commit failed")
                 return PublicationResult.FAILED
             }
+
+            // Synthetic attest-key signers are derived from the active backend secret set. Once
+            // that set is committed, no signer prepared under the previous set may survive into the
+            // newly published Java snapshot. clearCertificateCache() is reentrant on this same
+            // publication lock; a transport failure marks the graph unhealthy so child rewrites
+            // fail closed until the backend store can be authoritatively reset.
+            if (!CertHack.clearCertificateCache()) {
+                Logger.w("Active keybox set changed while the attest-key graph could not be reset; graph remains fail-closed")
+            }
             CertHack.setKeyboxes(keyboxes)
             committedIdentity = NativeBackend.currentBackendIdentity()
             PublicationResult.COMMITTED
