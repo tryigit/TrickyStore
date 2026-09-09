@@ -68,7 +68,7 @@ object CertificateBackend {
     internal var touchAttestKeyOverride: ((Int, ByteArray) -> AttestKeyTouchResult)? = null
 
     @VisibleForTesting
-    internal var removeAttestKeyOverride: ((Int, ByteArray) -> Boolean)? = null
+    internal var removeAttestKeyOverride: ((Int, ByteArray) -> AttestKeyRemoveResult)? = null
 
     @VisibleForTesting
     internal var rewriteTransportOverride: ((Int, (OutputStream) -> Unit) -> ByteArray?)? = null
@@ -456,13 +456,19 @@ object CertificateBackend {
         }
     }
 
+    enum class AttestKeyRemoveResult {
+        REMOVED,
+        ABSENT,
+        UNAVAILABLE,
+    }
+
     @JvmStatic
-    fun removeAttestKey(callingUid: Int, attestKeyId: ByteArray): Boolean {
+    fun removeAttestKey(callingUid: Int, attestKeyId: ByteArray): AttestKeyRemoveResult {
         if (callingUid < 0 ||
             attestKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES ||
             attestKeyId.all { it == 0.toByte() }
         ) {
-            return false
+            return AttestKeyRemoveResult.ABSENT
         }
         removeAttestKeyOverride?.let { return it(callingUid, attestKeyId) }
         val response =
@@ -475,12 +481,23 @@ object CertificateBackend {
                 output.write(REWRITE_WIRE_VERSION)
                 writeI32(output, callingUid)
                 output.write(attestKeyId)
-            } ?: return false
-        return response.size == ATTEST_KEY_REMOVE_RESPONSE_BYTES && response[0] == 1.toByte()
+            } ?: return AttestKeyRemoveResult.UNAVAILABLE
+        if (response.size != ATTEST_KEY_REMOVE_RESPONSE_BYTES) {
+            return AttestKeyRemoveResult.UNAVAILABLE
+        }
+        return if (response[0] == 1.toByte()) {
+            AttestKeyRemoveResult.REMOVED
+        } else {
+            AttestKeyRemoveResult.ABSENT
+        }
     }
 
     fun interface AttestKeyTouchHandler {
         fun touch(callingUid: Int, keyId: ByteArray): AttestKeyTouchResult
+    }
+
+    fun interface AttestKeyRemoveHandler {
+        fun remove(callingUid: Int, keyId: ByteArray): AttestKeyRemoveResult
     }
 
     fun interface ClearAttestKeyStoreHandler {
@@ -501,8 +518,8 @@ object CertificateBackend {
 
     @VisibleForTesting
     @JvmStatic
-    fun setRemoveAttestKeyOverrideForTesting(override: ((Int, ByteArray) -> Boolean)?) {
-        removeAttestKeyOverride = override
+    fun setRemoveAttestKeyOverrideForTesting(override: AttestKeyRemoveHandler?) {
+        removeAttestKeyOverride = if (override != null) { { uid, id -> override.remove(uid, id) } } else null
     }
 
     @VisibleForTesting

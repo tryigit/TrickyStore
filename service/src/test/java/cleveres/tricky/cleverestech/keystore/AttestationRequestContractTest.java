@@ -466,7 +466,7 @@ public class AttestationRequestContractTest {
             removeCount.incrementAndGet();
             removedUid.set(u);
             removedKeyId.set(id.clone());
-            return true;
+            return cleveres.tricky.cleverestech.CertificateBackend.AttestKeyRemoveResult.REMOVED;
         });
 
         try {
@@ -480,6 +480,7 @@ public class AttestationRequestContractTest {
             assertEquals(1, removeCount.get());
             assertEquals(uid, removedUid.get());
             assertArrayEquals(attestKeyId, removedKeyId.get());
+            assertFalse(CertHack.isGraphStateUnhealthyForTesting());
 
             // 2. LRU overflow (eviction > 64 entries) triggers backend removeAttestKey
             removeCount.set(0);
@@ -496,8 +497,109 @@ public class AttestationRequestContractTest {
             assertTrue(removeCount.get() >= 1);
             assertEquals(uid, removedUid.get());
             assertArrayEquals(attestKeyId, removedKeyId.get());
+            assertFalse(CertHack.isGraphStateUnhealthyForTesting());
         } finally {
             cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            synchronized (cache) {
+                cache.clear();
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void removeAttestKeyTransportFailureMarksGraphStateUnhealthy() throws Exception {
+        Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object state = stateField.get(null);
+        Field cacheField = state.getClass().getDeclaredField("certificateCache");
+        cacheField.setAccessible(true);
+        Map<Object, Object> cache = (Map<Object, Object>) cacheField.get(state);
+
+        Constructor<?> keyConstructor = Class.forName(CertHack.class.getName() + "$CacheKey")
+                .getDeclaredConstructor(byte[].class);
+        keyConstructor.setAccessible(true);
+        Constructor<?> valueConstructor = Class.forName(CertHack.class.getName() + "$CachedCertificateChain")
+                .getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class, boolean.class, int.class, byte[].class, byte[].class);
+        valueConstructor.setAccessible(true);
+
+        int uid = 10005;
+        byte[] attestKeyId = new byte[32];
+        attestKeyId[0] = 77;
+
+        cleveres.tricky.cleverestech.CertificateBackend.setRemoveAttestKeyOverrideForTesting(
+                (u, id) -> cleveres.tricky.cleverestech.CertificateBackend.AttestKeyRemoveResult.UNAVAILABLE);
+
+        try {
+            assertFalse(CertHack.isGraphStateUnhealthyForTesting());
+
+            Object attestKey = keyConstructor.newInstance((Object) new byte[] {1, 2, 3});
+            Object attestVal = valueConstructor.newInstance(null, new byte[] {1, 2, 3}, null, true, false, uid, attestKeyId, null);
+            cache.put(attestKey, attestVal);
+
+            // Removing when backend returns UNAVAILABLE must mark graph state unhealthy
+            cache.remove(attestKey);
+            assertTrue(CertHack.isGraphStateUnhealthyForTesting());
+
+            // When backend clear succeeds, clearCertificateCache resets graph health
+            cleveres.tricky.cleverestech.CertificateBackend.setClearAttestKeyStoreOverrideForTesting(() -> true);
+            assertTrue(CertHack.clearCertificateCache());
+            assertFalse(CertHack.isGraphStateUnhealthyForTesting());
+
+            // LRU eviction with UNAVAILABLE also marks graph state unhealthy
+            cache.put(attestKey, attestVal);
+            for (int i = 0; i < 65; i++) {
+                byte[] leaf = new byte[] {(byte) (i / 256), (byte) (i % 256), 9};
+                Object fillerKey = keyConstructor.newInstance((Object) leaf);
+                Object fillerVal = valueConstructor.newInstance(null, leaf, null, true, false, uid, null, null);
+                cache.put(fillerKey, fillerVal);
+            }
+            assertTrue(CertHack.isGraphStateUnhealthyForTesting());
+        } finally {
+            cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            CertHack.resetGraphHealthForTesting();
+            synchronized (cache) {
+                cache.clear();
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void removeAttestKeyAbsentLeavesGraphStateHealthy() throws Exception {
+        Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object state = stateField.get(null);
+        Field cacheField = state.getClass().getDeclaredField("certificateCache");
+        cacheField.setAccessible(true);
+        Map<Object, Object> cache = (Map<Object, Object>) cacheField.get(state);
+
+        Constructor<?> keyConstructor = Class.forName(CertHack.class.getName() + "$CacheKey")
+                .getDeclaredConstructor(byte[].class);
+        keyConstructor.setAccessible(true);
+        Constructor<?> valueConstructor = Class.forName(CertHack.class.getName() + "$CachedCertificateChain")
+                .getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class, boolean.class, int.class, byte[].class, byte[].class);
+        valueConstructor.setAccessible(true);
+
+        int uid = 10005;
+        byte[] attestKeyId = new byte[32];
+        attestKeyId[0] = 77;
+
+        cleveres.tricky.cleverestech.CertificateBackend.setRemoveAttestKeyOverrideForTesting(
+                (u, id) -> cleveres.tricky.cleverestech.CertificateBackend.AttestKeyRemoveResult.ABSENT);
+
+        try {
+            assertFalse(CertHack.isGraphStateUnhealthyForTesting());
+
+            Object attestKey = keyConstructor.newInstance((Object) new byte[] {1, 2, 3});
+            Object attestVal = valueConstructor.newInstance(null, new byte[] {1, 2, 3}, null, true, false, uid, attestKeyId, null);
+            cache.put(attestKey, attestVal);
+
+            cache.remove(attestKey);
+            assertFalse(CertHack.isGraphStateUnhealthyForTesting());
+        } finally {
+            cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            CertHack.resetGraphHealthForTesting();
             synchronized (cache) {
                 cache.clear();
             }

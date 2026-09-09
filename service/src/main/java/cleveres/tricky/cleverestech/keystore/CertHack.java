@@ -465,7 +465,11 @@ public final class CertHack {
                 }
                 if (evicted != null) {
                     for (AttestKeyDescriptor desc : evicted) {
-                        CertificateBackend.removeAttestKey(desc.callingUid, desc.keyId);
+                        CertificateBackend.AttestKeyRemoveResult res =
+                                CertificateBackend.removeAttestKey(desc.callingUid, desc.keyId);
+                        if (res == CertificateBackend.AttestKeyRemoveResult.UNAVAILABLE) {
+                            graphStateUnhealthy = true;
+                        }
                     }
                 }
                 return old;
@@ -496,7 +500,11 @@ public final class CertHack {
                     }
                 }
                 if (old != null && old.attestKeyId != null) {
-                    CertificateBackend.removeAttestKey(old.attestKeyCallingUid, old.attestKeyId);
+                    CertificateBackend.AttestKeyRemoveResult res =
+                            CertificateBackend.removeAttestKey(old.attestKeyCallingUid, old.attestKeyId);
+                    if (res == CertificateBackend.AttestKeyRemoveResult.UNAVAILABLE) {
+                        graphStateUnhealthy = true;
+                    }
                 }
                 return old;
             }
