@@ -20,6 +20,57 @@ struct AttestKeyStore {
     entries: VecDeque<AttestKeyEntry>,
 }
 
+impl AttestKeyStore {
+    fn subtree_contains(&self, calling_uid: u32, root_key_id: &KeyId, key_id: &KeyId) -> bool {
+        let mut to_visit = vec![*root_key_id];
+        while let Some(target) = to_visit.pop() {
+            if &target == key_id {
+                return true;
+            }
+            to_visit.extend(
+                self.entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.calling_uid == calling_uid
+                            && entry.parent_key_id.as_ref() == Some(&target)
+                    })
+                    .map(|entry| entry.key_id),
+            );
+        }
+        false
+    }
+
+    fn remove_subtree(&mut self, calling_uid: u32, key_id: &KeyId) -> bool {
+        let mut to_remove = vec![*key_id];
+        let mut any_removed = false;
+        while let Some(target) = to_remove.pop() {
+            let children: Vec<KeyId> = self
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.calling_uid == calling_uid
+                        && entry.parent_key_id.as_ref() == Some(&target)
+                })
+                .map(|entry| entry.key_id)
+                .collect();
+            to_remove.extend(children);
+            let original_len = self.entries.len();
+            self.entries
+                .retain(|entry| entry.calling_uid != calling_uid || entry.key_id != target);
+            any_removed |= self.entries.len() != original_len;
+        }
+        any_removed
+    }
+
+    fn evict_oldest_subtree(&mut self) {
+        if let Some(oldest) = self.entries.front() {
+            let calling_uid = oldest.calling_uid;
+            let key_id = oldest.key_id;
+            self.remove_subtree(calling_uid, &key_id);
+        }
+    }
+}
+
 static STORE: OnceLock<Mutex<AttestKeyStore>> = OnceLock::new();
 
 #[allow(dead_code)]
@@ -46,16 +97,10 @@ pub fn insert_attest_key(calling_uid: u32, key_id: KeyId, issuer: Arc<PreparedIs
         Err(poisoned) => poisoned.into_inner(),
     };
 
-    if let Some(pos) = guard
-        .entries
-        .iter()
-        .position(|e| e.calling_uid == calling_uid && e.key_id == key_id)
-    {
-        guard.entries.remove(pos);
-    }
+    guard.remove_subtree(calling_uid, &key_id);
 
     if guard.entries.len() >= MAX_ATTEST_KEYS {
-        guard.entries.pop_front();
+        guard.evict_oldest_subtree();
     }
 
     guard.entries.push_back(AttestKeyEntry {
@@ -72,30 +117,40 @@ pub fn insert_child_attest_key(
     child_key_id: KeyId,
     issuer: Arc<PreparedIssuer>,
 ) -> bool {
+    if parent_key_id == &child_key_id {
+        return false;
+    }
     let store = STORE.get_or_init(|| Mutex::new(AttestKeyStore::default()));
     let mut guard = match store.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
 
-    if !guard
+    let parent_pos = guard
         .entries
         .iter()
-        .any(|e| e.calling_uid == calling_uid && &e.key_id == parent_key_id)
-    {
+        .position(|e| e.calling_uid == calling_uid && &e.key_id == parent_key_id);
+    let Some(parent_pos) = parent_pos else {
+        return false;
+    };
+    if guard.subtree_contains(calling_uid, &child_key_id, parent_key_id) {
         return false;
     }
 
-    if let Some(pos) = guard
-        .entries
-        .iter()
-        .position(|e| e.calling_uid == calling_uid && e.key_id == child_key_id)
-    {
-        guard.entries.remove(pos);
-    }
+    let parent = guard.entries.remove(parent_pos).expect("parent exists");
+    guard.entries.push_back(parent);
+
+    guard.remove_subtree(calling_uid, &child_key_id);
 
     if guard.entries.len() >= MAX_ATTEST_KEYS {
-        guard.entries.pop_front();
+        guard.evict_oldest_subtree();
+    }
+    if !guard
+        .entries
+        .iter()
+        .any(|entry| entry.calling_uid == calling_uid && &entry.key_id == parent_key_id)
+    {
+        return false;
     }
 
     guard.entries.push_back(AttestKeyEntry {
@@ -155,28 +210,7 @@ pub fn remove_attest_key(calling_uid: u32, key_id: &KeyId) -> bool {
         Err(poisoned) => poisoned.into_inner(),
     };
 
-    let mut to_remove = vec![*key_id];
-    let mut any_removed = false;
-    while let Some(target) = to_remove.pop() {
-        if let Some(pos) = guard
-            .entries
-            .iter()
-            .position(|entry| entry.calling_uid == calling_uid && entry.key_id == target)
-        {
-            guard.entries.remove(pos);
-            any_removed = true;
-        }
-        let children: Vec<KeyId> = guard
-            .entries
-            .iter()
-            .filter(|entry| {
-                entry.calling_uid == calling_uid && entry.parent_key_id.as_ref() == Some(&target)
-            })
-            .map(|entry| entry.key_id)
-            .collect();
-        to_remove.extend(children);
-    }
-    any_removed
+    guard.remove_subtree(calling_uid, key_id)
 }
 
 #[cfg(test)]
@@ -385,6 +419,121 @@ mod tests {
         assert!(get_attest_key(1000, &grandchild).is_some());
 
         assert!(remove_attest_key(1000, &parent));
+        assert!(get_attest_key(1000, &parent).is_none());
+        assert!(get_attest_key(1000, &child).is_none());
+        assert!(get_attest_key(1000, &grandchild).is_none());
+    }
+
+    #[test]
+    fn child_cannot_replace_its_parent_with_a_self_cycle() {
+        let _sequence = isolate_store_sequence();
+        reset_for_testing();
+        let parent = [10u8; 32];
+        insert_attest_key(1000, parent, make_test_issuer(b"parent"));
+
+        assert!(!insert_child_attest_key(
+            1000,
+            &parent,
+            parent,
+            make_test_issuer(b"self")
+        ));
+        assert!(remove_attest_key(1000, &parent));
+        assert!(get_attest_key(1000, &parent).is_none());
+    }
+
+    #[test]
+    fn replacing_node_removes_its_existing_descendants() {
+        let _sequence = isolate_store_sequence();
+        reset_for_testing();
+        let first_parent = [10u8; 32];
+        let second_parent = [20u8; 32];
+        let child = [11u8; 32];
+        let grandchild = [12u8; 32];
+        insert_attest_key(1000, first_parent, make_test_issuer(b"first-parent"));
+        insert_attest_key(1000, second_parent, make_test_issuer(b"second-parent"));
+        assert!(insert_child_attest_key(
+            1000,
+            &first_parent,
+            child,
+            make_test_issuer(b"child")
+        ));
+        assert!(insert_child_attest_key(
+            1000,
+            &child,
+            grandchild,
+            make_test_issuer(b"grandchild")
+        ));
+
+        assert!(insert_child_attest_key(
+            1000,
+            &second_parent,
+            child,
+            make_test_issuer(b"replacement-child")
+        ));
+        assert!(get_attest_key(1000, &child).is_some());
+        assert!(get_attest_key(1000, &grandchild).is_none());
+    }
+
+    #[test]
+    fn ancestor_cannot_be_reparented_below_its_descendant() {
+        let _sequence = isolate_store_sequence();
+        reset_for_testing();
+        let root = [10u8; 32];
+        let child = [11u8; 32];
+        let grandchild = [12u8; 32];
+        insert_attest_key(1000, root, make_test_issuer(b"root"));
+        assert!(insert_child_attest_key(
+            1000,
+            &root,
+            child,
+            make_test_issuer(b"child")
+        ));
+        assert!(insert_child_attest_key(
+            1000,
+            &child,
+            grandchild,
+            make_test_issuer(b"grandchild")
+        ));
+
+        assert!(!insert_child_attest_key(
+            1000,
+            &grandchild,
+            root,
+            make_test_issuer(b"invalid-root")
+        ));
+        assert!(get_attest_key(1000, &root).is_some());
+        assert!(get_attest_key(1000, &child).is_some());
+        assert!(get_attest_key(1000, &grandchild).is_some());
+    }
+
+    #[test]
+    fn capacity_eviction_removes_the_oldest_subtree() {
+        let _sequence = isolate_store_sequence();
+        reset_for_testing();
+        let parent = [1u8; 32];
+        let child = [2u8; 32];
+        let grandchild = [3u8; 32];
+        insert_attest_key(1000, parent, make_test_issuer(b"parent"));
+        assert!(insert_child_attest_key(
+            1000,
+            &parent,
+            child,
+            make_test_issuer(b"child")
+        ));
+        assert!(insert_child_attest_key(
+            1000,
+            &child,
+            grandchild,
+            make_test_issuer(b"grandchild")
+        ));
+        for i in 4..=64 {
+            let mut id = [0u8; 32];
+            id[0] = i;
+            insert_attest_key(1000, id, make_test_issuer(&[i]));
+        }
+
+        insert_attest_key(1000, [65u8; 32], make_test_issuer(b"overflow"));
+
         assert!(get_attest_key(1000, &parent).is_none());
         assert!(get_attest_key(1000, &child).is_none());
         assert!(get_attest_key(1000, &grandchild).is_none());

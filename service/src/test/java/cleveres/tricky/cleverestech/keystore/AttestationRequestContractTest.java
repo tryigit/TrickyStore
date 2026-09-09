@@ -167,6 +167,51 @@ public class AttestationRequestContractTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    public void cachedCertificateBytesAreDefensivelyIsolated() throws Exception {
+        Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object state = stateField.get(null);
+        Field cacheField = state.getClass().getDeclaredField("certificateCache");
+        cacheField.setAccessible(true);
+        Map<Object, Object> cache = (Map<Object, Object>) cacheField.get(state);
+        Constructor<?> keyConstructor = Class.forName(CertHack.class.getName() + "$CacheKey")
+                .getDeclaredConstructor(byte[].class);
+        keyConstructor.setAccessible(true);
+        Constructor<?> valueConstructor = Class.forName(CertHack.class.getName() + "$CachedCertificateChain")
+                .getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class);
+        valueConstructor.setAccessible(true);
+        byte[] original = new byte[] {1, 2, 3};
+        byte[] replacementLeaf = new byte[] {4, 5};
+        byte[] replacementChain = new byte[] {6, 7};
+        Object key = keyConstructor.newInstance((Object) original.clone());
+        Object value = valueConstructor.newInstance(
+                new Certificate[0], replacementLeaf, replacementChain, true);
+        try {
+            cache.put(key, value);
+
+            original[0] = 99;
+            replacementLeaf[0] = 99;
+            replacementChain[0] = 99;
+            KeyMetadata first = new KeyMetadata();
+            first.certificate = new byte[] {1, 2, 3};
+            assertTrue(CertHack.applyCachedCertificateChain(first));
+            assertArrayEquals(new byte[] {4, 5}, first.certificate);
+            assertArrayEquals(new byte[] {6, 7}, first.certificateChain);
+
+            first.certificate[0] = 88;
+            first.certificateChain[0] = 88;
+            KeyMetadata second = new KeyMetadata();
+            second.certificate = new byte[] {1, 2, 3};
+            assertTrue(CertHack.applyCachedCertificateChain(second));
+            assertArrayEquals(new byte[] {4, 5}, second.certificate);
+            assertArrayEquals(new byte[] {6, 7}, second.certificateChain);
+        } finally {
+            cache.remove(key);
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     public void cachedAttestKeyTouchesBackendAndInvalidatesWhenBackendEvicts() throws Exception {
         Field stateField = CertHack.class.getDeclaredField("state");
         stateField.setAccessible(true);
@@ -521,6 +566,32 @@ public class AttestationRequestContractTest {
         assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, null, blob)));
         assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, alias, new byte[] {1, 2, 4})));
         assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, alias, null)));
+    }
+
+    @Test
+    public void childAttestKeyCannotUseItsOwnDescriptorAsParent() {
+        byte[] descriptor = new byte[32];
+        descriptor[0] = 1;
+
+        assertNull(cleveres.tricky.cleverestech.CertificateBackend.rewriteChildKey(
+                10001,
+                descriptor,
+                descriptor.clone(),
+                new byte[] {1},
+                true,
+                0, 0,
+                0, 0,
+                0, 0,
+                java.util.Collections.emptyMap(),
+                null,
+                filledBytes(32, (byte) 2),
+                filledBytes(32, (byte) 3)));
+    }
+
+    private static byte[] filledBytes(int size, byte value) {
+        byte[] bytes = new byte[size];
+        java.util.Arrays.fill(bytes, value);
+        return bytes;
     }
 
     @Test

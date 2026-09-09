@@ -165,8 +165,8 @@ public final class CertHack {
                 byte[] parentKeyId
         ) {
             this.certificates = certificates != null ? certificates.clone() : null;
-            this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded");
-            this.issuerChainEncoded = issuerChainEncoded;
+            this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded").clone();
+            this.issuerChainEncoded = issuerChainEncoded != null ? issuerChainEncoded.clone() : null;
             this.passthrough = false;
             this.leafOnlySafe = leafOnlySafe;
             this.accountIssuerChainBytes = accountIssuerChainBytes;
@@ -212,10 +212,8 @@ public final class CertHack {
 
         void applyTo(KeyMetadata metadata) {
             if (passthrough) return;
-            // Parcel.writeTypedObject copies these byte arrays synchronously. The transient
-            // KeyMetadata object never owns or mutates the cache storage after the reply is built.
-            metadata.certificate = leafEncoded;
-            metadata.certificateChain = issuerChainEncoded;
+            metadata.certificate = leafEncoded.clone();
+            metadata.certificateChain = issuerChainEncoded != null ? issuerChainEncoded.clone() : null;
         }
     }
 
@@ -561,7 +559,7 @@ public final class CertHack {
         private final int hashCode;
 
         CacheKey(byte[] leafEncoded) {
-            this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded");
+            this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded").clone();
             this.hashCode = Arrays.hashCode(this.leafEncoded);
         }
 
@@ -888,22 +886,28 @@ public final class CertHack {
 
     private static void evictDescendants(State.CertificateCache cache, byte[] parentKeyId) {
         if (cache == null || parentKeyId == null) return;
-        List<CacheKey> keysToRemove = null;
+        List<CacheKey> keysToRemove = new ArrayList<>();
+        List<byte[]> descendantIds = new ArrayList<>();
+        descendantIds.add(parentKeyId);
         synchronized (cache) {
-            for (Map.Entry<CacheKey, CachedCertificateChain> entry : cache.entrySet()) {
-                CachedCertificateChain entryValue = entry.getValue();
-                if (entryValue != null && entryValue.parentKeyId != null && Arrays.equals(entryValue.parentKeyId, parentKeyId)) {
-                    if (keysToRemove == null) {
-                        keysToRemove = new ArrayList<>();
+            for (int index = 0; index < descendantIds.size(); index++) {
+                byte[] currentParent = descendantIds.get(index);
+                for (Map.Entry<CacheKey, CachedCertificateChain> entry : cache.entrySet()) {
+                    CachedCertificateChain entryValue = entry.getValue();
+                    if (entryValue != null
+                            && entryValue.parentKeyId != null
+                            && Arrays.equals(entryValue.parentKeyId, currentParent)
+                            && !keysToRemove.contains(entry.getKey())) {
+                        keysToRemove.add(entry.getKey());
+                        if (entryValue.attestKeyId != null) {
+                            descendantIds.add(entryValue.attestKeyId);
+                        }
                     }
-                    keysToRemove.add(entry.getKey());
                 }
             }
         }
-        if (keysToRemove != null) {
-            for (CacheKey k : keysToRemove) {
-                cache.remove(k);
-            }
+        for (CacheKey k : keysToRemove) {
+            cache.remove(k);
         }
     }
 
@@ -1402,6 +1406,12 @@ public final class CertHack {
 
             if (!clearCertificateCache()) {
                 return caList;
+            }
+            synchronized (cache) {
+                if (state != currentState) {
+                    return caList;
+                }
+                cacheEpoch = currentState.certificateCacheEpoch;
             }
 
             byte[] rewrittenDer = CertificateBackend.rewriteAttestKey(

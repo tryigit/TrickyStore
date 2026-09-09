@@ -324,6 +324,7 @@ object CertificateBackend {
             parentKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES ||
             parentKeyId.all { it == 0.toByte() } ||
             (isAttestKey && (childKeyId == null || childKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES || childKeyId.all { it == 0.toByte() })) ||
+            (isAttestKey && childKeyId.contentEquals(parentKeyId)) ||
             (!isAttestKey && childKeyId != null && childKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES) ||
             genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_CERTIFICATE_DER_BYTES ||
             !validPatch(systemDisposition, systemValue) ||

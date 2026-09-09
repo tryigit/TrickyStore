@@ -493,7 +493,11 @@ fn parse_child_key_rewrite_request(
         return Err("unsupported certificate rewrite wire version");
     }
     let calling_uid = cursor.read_u32()?;
-    let is_attest_key = cursor.read_u8()? != 0;
+    let is_attest_key = match cursor.read_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err("invalid child attest key flag"),
+    };
     let patch_levels = PatchLevels {
         system: read_patch(&mut cursor)?,
         vendor: read_patch(&mut cursor)?,
@@ -524,6 +528,9 @@ fn parse_child_key_rewrite_request(
         .map_err(|_| "invalid child attest key identifier")?;
     if is_attest_key && child_key_id.iter().all(|byte| *byte == 0) {
         return Err("invalid child attest key identifier");
+    }
+    if is_attest_key && child_key_id == parent_key_id {
+        return Err("child attest key cannot be its own parent");
     }
     let verified_boot_key: &[u8; 32] = cursor
         .read_exact(32)?
