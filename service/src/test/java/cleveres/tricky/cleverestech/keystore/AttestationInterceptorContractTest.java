@@ -84,9 +84,9 @@ public class AttestationInterceptorContractTest {
 
             backend.verify(CertHack::canHack, org.mockito.Mockito.times(2));
             backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()),
-                    org.mockito.Mockito.times(2));
+                    org.mockito.Mockito.times(1));
             backend.verify(() -> CertHack.hackChildKeyCertificate(any(), anyInt(), anyBoolean(), anyBoolean()),
-                    org.mockito.Mockito.never());
+                    org.mockito.Mockito.times(1));
         } finally {
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
         }
