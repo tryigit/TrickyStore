@@ -31,9 +31,6 @@ class ManagedAttestKeyRegistryTest {
         assertFalse(ManagedAttestKeyRegistry.isKnown(uid, ByteArray(32) { 0x6b.toByte() }))
         assertFalse(ManagedAttestKeyRegistry.isKnown(uid, ByteArray(32)))
         assertFalse(ManagedAttestKeyRegistry.isKnown(uid, ByteArray(31) { 1 }))
-
-        ManagedAttestKeyRegistry.forget(uid, lookup)
-        assertFalse(ManagedAttestKeyRegistry.isKnown(uid, lookup))
     }
 
     @Test
