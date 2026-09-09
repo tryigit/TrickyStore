@@ -214,33 +214,14 @@ pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'s
             .map_err(|_| "child key rewrite provenance rejected")?;
         validate_hardware_provenance(&provenance)?;
 
-        // A persistent Android attest-key alias can outlive this backend process. Reconstruct its
-        // synthetic signer from backend-only secret material and the canonical descriptor identity
-        // when the in-memory graph is empty after restart. The rewritten parent certificate uses
-        // the genuine subject unchanged, so the child leaf's issuer name is the exact issuer name
-        // required by the reconstructed signer.
-        let parent_issuer = if let Some(parent) =
+        // Only a parent that was authoritatively rewritten as a supported managed ATTEST_KEY may
+        // sign a synthetic child. Persistent aliases are rehydrated through getKeyEntry readback,
+        // where the real parent metadata and EC P-256 certificate are available for validation.
+        // Never infer parent eligibility from a child's issuer name: Android also supports RSA and
+        // non-P256 EC ATTEST_KEYs, which this synthetic signer path intentionally does not manage.
+        let parent_issuer =
             attest_key_store::get_attest_key(parsed.calling_uid, &parsed.parent_key_id)
-        {
-            parent
-        } else {
-            let (_, parent_subject_der) =
-                parse_certificate_subject_and_issuer(parsed.genuine_leaf_der)
-                    .map_err(|_| "invalid child certificate issuer")?;
-            let (_, prepared_parent) = derive_attest_issuer(
-                parsed.calling_uid,
-                provenance.keymint_security_level,
-                &parsed.parent_key_id,
-                parent_subject_der,
-            )?;
-            let prepared_parent = std::sync::Arc::new(prepared_parent);
-            attest_key_store::insert_attest_key(
-                parsed.calling_uid,
-                parsed.parent_key_id,
-                std::sync::Arc::clone(&prepared_parent),
-            );
-            prepared_parent
-        };
+                .ok_or("attest issuer not found in managed store")?;
 
         let (spki_override, prepared_for_children) = if parsed.is_attest_key {
             if !cleverestricky_certificate_core::is_ec_p256_certificate(parsed.genuine_leaf_der)
