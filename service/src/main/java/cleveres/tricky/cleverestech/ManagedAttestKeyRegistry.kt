@@ -2,7 +2,7 @@ package cleveres.tricky.cleverestech
 
 import androidx.annotation.VisibleForTesting
 import java.util.Arrays
-import java.util.LinkedHashMap
+import java.util.HashSet
 
 /**
  * Process-local knowledge of descriptor identities that have successfully entered the managed
@@ -10,11 +10,15 @@ import java.util.LinkedHashMap
  * still alive, which lets getKeyEntry distinguish a stale managed cache hit from an ordinary key.
  *
  * This is eligibility metadata only; presence in the live Rust graph is always revalidated with
- * touchAttestKey before a cached managed parent is reused.
+ * touchAttestKey before a cached managed parent is reused. The registry must never produce a false
+ * negative while the process-local certificate cache may still contain a synthetic parent. Once the
+ * bounded exact set fills, it therefore switches to conservative mode: valid descriptors are treated
+ * as potentially managed. False positives only add a bounded graph touch; false negatives could
+ * incorrectly reuse stale synthetic cache state after a Rust-only restart.
  */
 internal object ManagedAttestKeyRegistry {
     private const val KEY_ID_BYTES = 32
-    private const val MAX_ENTRIES = 256
+    private const val MAX_EXACT_ENTRIES = 256
 
     private class Identity private constructor(
         val uid: Int,
@@ -35,28 +39,33 @@ internal object ManagedAttestKeyRegistry {
         }
     }
 
-    private val entries =
-        object : LinkedHashMap<Identity, Unit>(64, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Identity, Unit>?): Boolean =
-                size > MAX_ENTRIES
-        }
+    private val entries = HashSet<Identity>(MAX_EXACT_ENTRIES)
+    private var conservativeMode = false
 
     @Synchronized
     fun remember(callingUid: Int, keyId: ByteArray?) {
-        if (!isValid(callingUid, keyId)) return
-        entries[Identity.stored(callingUid, requireNotNull(keyId))] = Unit
+        if (!isValid(callingUid, keyId) || conservativeMode) return
+        val nonNullKeyId = requireNotNull(keyId)
+        val lookup = Identity.lookup(callingUid, nonNullKeyId)
+        if (entries.contains(lookup)) return
+        if (entries.size >= MAX_EXACT_ENTRIES) {
+            entries.clear()
+            conservativeMode = true
+            return
+        }
+        entries.add(Identity.stored(callingUid, nonNullKeyId))
     }
 
     @Synchronized
     fun forget(callingUid: Int, keyId: ByteArray?) {
-        if (!isValid(callingUid, keyId)) return
+        if (!isValid(callingUid, keyId) || conservativeMode) return
         entries.remove(Identity.lookup(callingUid, requireNotNull(keyId)))
     }
 
     @Synchronized
     fun isKnown(callingUid: Int, keyId: ByteArray?): Boolean {
         if (!isValid(callingUid, keyId)) return false
-        return entries[Identity.lookup(callingUid, requireNotNull(keyId))] != null
+        return conservativeMode || entries.contains(Identity.lookup(callingUid, requireNotNull(keyId)))
     }
 
     private fun isValid(callingUid: Int, keyId: ByteArray?): Boolean =
@@ -69,5 +78,6 @@ internal object ManagedAttestKeyRegistry {
     @Synchronized
     internal fun resetForTesting() {
         entries.clear()
+        conservativeMode = false
     }
 }
