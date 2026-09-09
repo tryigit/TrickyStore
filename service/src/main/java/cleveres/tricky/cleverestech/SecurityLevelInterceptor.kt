@@ -145,10 +145,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                     if (!context.usesDefaultAttestationKey) {
                         val parentId = context.parentKeyId
                         if (parentId == null) {
-                            CertHack.hackChildKeyCertificate(
+                            CertHack.hackCertificateChain(
                                 originalLeafOnly,
                                 callingUid,
-                                context.isAttestKeyPurpose,
                                 true,
                             )
                         } else {
@@ -163,7 +162,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                     } else if (context.isAttestKeyPurpose) {
                         val keyId = context.generatedKeyId
                         if (keyId == null) {
-                            CertHack.hackAttestKeyCertificateChain(
+                            CertHack.hackCertificateChain(
                                 originalLeafOnly,
                                 callingUid,
                                 true,
@@ -186,7 +185,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 if (rewritten === originalLeafOnly) {
                     return Skip
                 }
-                if (context.isAttestKeyPurpose) {
+                if (context.isAttestKeyPurpose && context.generatedKeyId != null) {
                     ManagedAttestKeyRegistry.remember(
                         callingUid,
                         context.generatedKeyId,
@@ -233,10 +232,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 if (!context.usesDefaultAttestationKey) {
                     val parentId = context.parentKeyId
                     if (parentId == null) {
-                        CertHack.hackChildKeyCertificate(
+                        CertHack.hackCertificateChain(
                             originalLeafOnly,
                             callingUid,
-                            context.isAttestKeyPurpose,
                             true,
                         )
                     } else {
@@ -251,7 +249,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 } else if (context.isAttestKeyPurpose) {
                     val keyId = context.generatedKeyId
                     if (keyId == null) {
-                        CertHack.hackAttestKeyCertificateChain(
+                        CertHack.hackCertificateChain(
                             originalLeafOnly,
                             callingUid,
                             true,
@@ -274,7 +272,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             if (rewritten === originalLeafOnly) {
                 return Skip
             }
-            if (context.isAttestKeyPurpose) {
+            if (context.isAttestKeyPurpose && context.generatedKeyId != null) {
                 ManagedAttestKeyRegistry.remember(
                     callingUid,
                     context.generatedKeyId,
