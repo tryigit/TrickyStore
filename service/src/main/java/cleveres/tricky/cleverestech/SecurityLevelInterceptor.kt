@@ -37,23 +37,16 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): Result {
-        if (code != generateKeyTransaction) {
-            return Skip
-        }
-        if (!CertHack.canHack() || !Config.needHack(callingUid)) {
-            return Skip
-        }
+        if (code == generateKeyTransaction) {
+            if (!CertHack.canHack() || !Config.needHack(callingUid)) {
+                return Skip
+            }
 
-        // Prefer the complete request classification; the bounded prefix helpers retain the legacy
-        // compatibility path for platform/mock parcels that cannot expose every stable field.
-        return if (
-            Utils.parseGenerateKeyRequest(data, callingUid) != null ||
-                (Utils.usesDefaultAttestationKey(data) || Utils.hasAttestKeyPurpose(data))
-        ) {
-            Continue
-        } else {
-            Skip
+            // POST retains and reparses the bounded request. PRE must still continue for valid
+            // platform parcels whose stable fields are not fully visible to the Java mock/parser.
+            return Continue
         }
+        return Skip
     }
 
     private fun rewriteChildWithParentRecovery(
