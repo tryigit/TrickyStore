@@ -1,15 +1,15 @@
-// Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
+use crate::attest_key_store;
 use crate::keybox_wire::key_store::{self, KeyId, KEY_ID_BYTES};
 use cleverestricky_certificate_core::{
-    inspect_certificate, rewrite_certificate_prepared, AttestationIdOverride,
-    CertificateInspection, PatchComponent, PatchLevels, PreparedCertificateRewriteRequest,
-    SecurityLevel, SigningAlgorithm, MAX_ATTESTATION_ID_BYTES, MAX_CERTIFICATE_DER_BYTES,
-    MAX_MODULE_HASH_BYTES,
+    generate_ec_p256_keypair, inspect_certificate, parse_certificate_subject_and_issuer,
+    rewrite_certificate_prepared, AttestationIdOverride, CertificateInspection, PatchComponent,
+    PatchLevels, PreparedCertificateRewriteRequest, PreparedIssuer, SecurityLevel,
+    SigningAlgorithm, MAX_ATTESTATION_ID_BYTES, MAX_CERTIFICATE_DER_BYTES, MAX_MODULE_HASH_BYTES,
 };
 use zeroize::Zeroize;
 
 const INSPECT_WIRE_VERSION: u8 = 2;
-const REWRITE_WIRE_VERSION: u8 = 2;
+pub(crate) const REWRITE_WIRE_VERSION: u8 = 2;
 const SIGNING_EC_P256_SHA256: u8 = 1;
 const SIGNING_RSA_PKCS1_SHA256: u8 = 2;
 const PATCH_KEEP: u8 = 0;
@@ -17,12 +17,23 @@ const PATCH_OMIT: u8 = 1;
 const PATCH_REPLACE: u8 = 2;
 const MAX_ID_OVERRIDES: usize = 9;
 const REWRITE_FIXED_BYTES: usize = 1 + 1 + 3 * 5 + 1 + 2 + 4 + KEY_ID_BYTES + 2 * 32;
+const ATTEST_KEY_REWRITE_FIXED_BYTES: usize =
+    1 + 4 + 1 + 3 * 5 + 1 + 2 + 4 + KEY_ID_BYTES + 32 + 2 * 32;
+const CHILD_KEY_REWRITE_FIXED_BYTES: usize = 1 + 4 + 1 + 3 * 5 + 1 + 2 + 4 + 32 + 32 + 2 * 32;
 const MAX_ID_WIRE_BYTES: usize = MAX_ID_OVERRIDES * (2 + 2 + MAX_ATTESTATION_ID_BYTES);
 
 pub const MAX_INSPECT_REQUEST_BYTES: usize = MAX_CERTIFICATE_DER_BYTES;
 pub const INSPECT_RESPONSE_BYTES: usize = 1 + 1 + 2 + 3 * 5 + 2 * 32 + 2;
 pub const MAX_REWRITE_REQUEST_BYTES: usize =
     REWRITE_FIXED_BYTES + MAX_ID_WIRE_BYTES + MAX_MODULE_HASH_BYTES + MAX_CERTIFICATE_DER_BYTES;
+pub const MAX_ATTEST_KEY_REWRITE_REQUEST_BYTES: usize = ATTEST_KEY_REWRITE_FIXED_BYTES
+    + MAX_ID_WIRE_BYTES
+    + MAX_MODULE_HASH_BYTES
+    + MAX_CERTIFICATE_DER_BYTES;
+pub const MAX_CHILD_KEY_REWRITE_REQUEST_BYTES: usize = CHILD_KEY_REWRITE_FIXED_BYTES
+    + MAX_ID_WIRE_BYTES
+    + MAX_MODULE_HASH_BYTES
+    + MAX_CERTIFICATE_DER_BYTES;
 pub const MAX_REWRITE_RESPONSE_BYTES: usize = MAX_CERTIFICATE_DER_BYTES;
 
 pub fn inspect_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'static str> {
@@ -103,10 +114,141 @@ pub fn rewrite_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'static str>
                 module_hash: parsed.module_hash,
                 verified_boot_key: parsed.verified_boot_key,
                 verified_boot_hash: parsed.verified_boot_hash,
+                subject_public_key_info: None,
             })
             .map(|rewritten| rewritten.leaf_der)
             .map_err(|_| "certificate rewrite rejected")
         })
+    })();
+    request.zeroize();
+    result
+}
+
+pub fn rewrite_attest_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'static str> {
+    let result = (|| {
+        if request.len() < ATTEST_KEY_REWRITE_FIXED_BYTES
+            || request.len() > MAX_ATTEST_KEY_REWRITE_REQUEST_BYTES
+        {
+            return Err("attest key rewrite request rejected");
+        }
+        let parsed = parse_attest_key_rewrite_request(&request)?;
+
+        let provenance = inspect_certificate(parsed.genuine_leaf_der)
+            .map_err(|_| "attest key rewrite provenance rejected")?;
+        validate_hardware_provenance(&provenance)?;
+
+        if !cleverestricky_certificate_core::is_ec_p256_certificate(parsed.genuine_leaf_der)
+            .map_err(|_| "invalid attest key certificate")?
+        {
+            return Err("attest key is not EC P-256");
+        }
+
+        let (subject_der, _) = parse_certificate_subject_and_issuer(parsed.genuine_leaf_der)
+            .map_err(|_| "invalid attest key certificate")?;
+
+        let keypair =
+            generate_ec_p256_keypair().map_err(|_| "failed to generate attest keypair")?;
+        let prepared_for_children = PreparedIssuer::from_subject_and_key(
+            subject_der,
+            &keypair.private_key_pkcs8_der,
+            SigningAlgorithm::EcP256Sha256,
+        )
+        .map_err(|_| "failed to prepare attest issuer")?;
+
+        key_store::with_prepared_key(&parsed.key_id, |stored_algorithm, prepared_issuer| {
+            if stored_algorithm != parsed.signing_algorithm
+                || prepared_issuer.algorithm() != stored_algorithm
+            {
+                return Err("opaque key algorithm does not match rewrite request");
+            }
+            let rewritten = rewrite_certificate_prepared(&PreparedCertificateRewriteRequest {
+                genuine_leaf_der: parsed.genuine_leaf_der,
+                issuer: prepared_issuer,
+                patch_levels: parsed.patch_levels,
+                id_overrides: &parsed.id_overrides,
+                module_hash: parsed.module_hash,
+                verified_boot_key: parsed.verified_boot_key,
+                verified_boot_hash: parsed.verified_boot_hash,
+                subject_public_key_info: Some(&keypair.public_key_spki_der),
+            })
+            .map(|rewritten| rewritten.leaf_der)
+            .map_err(|_| "attest key certificate rewrite rejected")?;
+
+            attest_key_store::insert_attest_key(
+                parsed.calling_uid,
+                parsed.attest_key_id,
+                std::sync::Arc::new(prepared_for_children),
+            );
+            Ok(rewritten)
+        })
+    })();
+    request.zeroize();
+    result
+}
+
+pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'static str> {
+    let result = (|| {
+        if request.len() < CHILD_KEY_REWRITE_FIXED_BYTES
+            || request.len() > MAX_CHILD_KEY_REWRITE_REQUEST_BYTES
+        {
+            return Err("child key rewrite request rejected");
+        }
+        let parsed = parse_child_key_rewrite_request(&request)?;
+
+        let provenance = inspect_certificate(parsed.genuine_leaf_der)
+            .map_err(|_| "child key rewrite provenance rejected")?;
+        validate_hardware_provenance(&provenance)?;
+
+        let parent_issuer =
+            attest_key_store::get_attest_key(parsed.calling_uid, &parsed.parent_key_id)
+                .ok_or("attest issuer not found in managed store")?;
+
+        let (spki_override, prepared_for_children) = if parsed.is_attest_key {
+            if !cleverestricky_certificate_core::is_ec_p256_certificate(parsed.genuine_leaf_der)
+                .map_err(|_| "invalid child certificate")?
+            {
+                return Err("child attest key is not EC P-256");
+            }
+            let keypair = generate_ec_p256_keypair()
+                .map_err(|_| "failed to generate child attest keypair")?;
+            let (subject_der, _) = parse_certificate_subject_and_issuer(parsed.genuine_leaf_der)
+                .map_err(|_| "invalid child certificate")?;
+            let prepared = PreparedIssuer::from_subject_and_key(
+                subject_der,
+                &keypair.private_key_pkcs8_der,
+                SigningAlgorithm::EcP256Sha256,
+            )
+            .map_err(|_| "failed to prepare child attest issuer")?;
+            (Some(keypair.public_key_spki_der), Some(prepared))
+        } else {
+            (None, None)
+        };
+
+        let rewritten = rewrite_certificate_prepared(&PreparedCertificateRewriteRequest {
+            genuine_leaf_der: parsed.genuine_leaf_der,
+            issuer: parent_issuer.as_ref(),
+            patch_levels: parsed.patch_levels,
+            id_overrides: &parsed.id_overrides,
+            module_hash: parsed.module_hash,
+            verified_boot_key: parsed.verified_boot_key,
+            verified_boot_hash: parsed.verified_boot_hash,
+            subject_public_key_info: spki_override.as_deref(),
+        })
+        .map(|rewritten| rewritten.leaf_der)
+        .map_err(|_| "child certificate rewrite rejected")?;
+
+        if let Some(prepared) = prepared_for_children {
+            if !attest_key_store::insert_child_attest_key(
+                parsed.calling_uid,
+                &parsed.parent_key_id,
+                parsed.child_key_id,
+                std::sync::Arc::new(prepared),
+            ) {
+                return Err("attest parent was revoked during child key rewrite");
+            }
+        }
+
+        Ok(rewritten)
     })();
     request.zeroize();
     result
@@ -214,6 +356,241 @@ fn parse_rewrite_request(request: &[u8]) -> Result<ParsedRewrite<'_>, &'static s
     })
 }
 
+struct ParsedAttestKeyRewrite<'a> {
+    calling_uid: u32,
+    signing_algorithm: SigningAlgorithm,
+    patch_levels: PatchLevels,
+    id_overrides: Vec<AttestationIdOverride<'a>>,
+    module_hash: Option<&'a [u8]>,
+    genuine_leaf_der: &'a [u8],
+    key_id: KeyId,
+    attest_key_id: [u8; 32],
+    verified_boot_key: &'a [u8; 32],
+    verified_boot_hash: &'a [u8; 32],
+}
+
+fn parse_attest_key_rewrite_request(
+    request: &[u8],
+) -> Result<ParsedAttestKeyRewrite<'_>, &'static str> {
+    let mut cursor = Cursor::new(request);
+    if cursor.read_u8()? != REWRITE_WIRE_VERSION {
+        return Err("unsupported certificate rewrite wire version");
+    }
+    let calling_uid = cursor.read_u32()?;
+    let signing_algorithm = match cursor.read_u8()? {
+        SIGNING_EC_P256_SHA256 => SigningAlgorithm::EcP256Sha256,
+        SIGNING_RSA_PKCS1_SHA256 => SigningAlgorithm::RsaPkcs1Sha256,
+        _ => return Err("unsupported certificate signing algorithm"),
+    };
+    let patch_levels = PatchLevels {
+        system: read_patch(&mut cursor)?,
+        vendor: read_patch(&mut cursor)?,
+        boot: read_patch(&mut cursor)?,
+    };
+    let id_count = cursor.read_u8()? as usize;
+    if id_count > MAX_ID_OVERRIDES {
+        return Err("too many attestation ID overrides");
+    }
+    let module_hash_len = cursor.read_u16()? as usize;
+    if module_hash_len > MAX_MODULE_HASH_BYTES {
+        return Err("module hash exceeds certificate wire bound");
+    }
+    let genuine_leaf_len = cursor.read_u32_as_usize()?;
+    if genuine_leaf_len == 0 || genuine_leaf_len > MAX_CERTIFICATE_DER_BYTES {
+        return Err("certificate DER field exceeds wire bound");
+    }
+    let key_id: KeyId = cursor
+        .read_exact(KEY_ID_BYTES)?
+        .try_into()
+        .map_err(|_| "invalid opaque key identifier")?;
+    if key_id.iter().all(|byte| *byte == 0) {
+        return Err("invalid opaque key identifier");
+    }
+    let attest_key_id: [u8; 32] = cursor
+        .read_exact(32)?
+        .try_into()
+        .map_err(|_| "invalid attest key identifier")?;
+    if attest_key_id.iter().all(|byte| *byte == 0) {
+        return Err("invalid attest key identifier");
+    }
+    let verified_boot_key: &[u8; 32] = cursor
+        .read_exact(32)?
+        .try_into()
+        .map_err(|_| "invalid verified boot key")?;
+    let verified_boot_hash: &[u8; 32] = cursor
+        .read_exact(32)?
+        .try_into()
+        .map_err(|_| "invalid verified boot hash")?;
+    if verified_boot_key.iter().all(|byte| *byte == 0)
+        || verified_boot_hash.iter().all(|byte| *byte == 0)
+    {
+        return Err("verified boot digest is unavailable");
+    }
+
+    let mut id_overrides = Vec::new();
+    id_overrides
+        .try_reserve_exact(id_count)
+        .map_err(|_| "attestation ID allocation failed")?;
+    let mut seen_tags = [0u16; MAX_ID_OVERRIDES];
+    for seen_count in 0..id_count {
+        let tag = cursor.read_u16()?;
+        let length = cursor.read_u16()? as usize;
+        if length == 0 || length > MAX_ATTESTATION_ID_BYTES {
+            return Err("attestation ID override exceeds wire bound");
+        }
+        if seen_tags[..seen_count].contains(&tag) {
+            return Err("duplicate attestation ID override");
+        }
+        seen_tags[seen_count] = tag;
+        let value = cursor.read_exact(length)?;
+        id_overrides.push(AttestationIdOverride {
+            tag: u32::from(tag),
+            value,
+        });
+    }
+    let module_hash = if module_hash_len == 0 {
+        None
+    } else {
+        Some(cursor.read_exact(module_hash_len)?)
+    };
+    let genuine_leaf_der = cursor.read_exact(genuine_leaf_len)?;
+    if !cursor.is_at_end() {
+        return Err("trailing certificate wire bytes");
+    }
+
+    Ok(ParsedAttestKeyRewrite {
+        calling_uid,
+        signing_algorithm,
+        patch_levels,
+        id_overrides,
+        module_hash,
+        genuine_leaf_der,
+        key_id,
+        attest_key_id,
+        verified_boot_key,
+        verified_boot_hash,
+    })
+}
+
+struct ParsedChildKeyRewrite<'a> {
+    calling_uid: u32,
+    is_attest_key: bool,
+    patch_levels: PatchLevels,
+    id_overrides: Vec<AttestationIdOverride<'a>>,
+    module_hash: Option<&'a [u8]>,
+    genuine_leaf_der: &'a [u8],
+    parent_key_id: [u8; 32],
+    child_key_id: [u8; 32],
+    verified_boot_key: &'a [u8; 32],
+    verified_boot_hash: &'a [u8; 32],
+}
+
+fn parse_child_key_rewrite_request(
+    request: &[u8],
+) -> Result<ParsedChildKeyRewrite<'_>, &'static str> {
+    let mut cursor = Cursor::new(request);
+    if cursor.read_u8()? != REWRITE_WIRE_VERSION {
+        return Err("unsupported certificate rewrite wire version");
+    }
+    let calling_uid = cursor.read_u32()?;
+    let is_attest_key = match cursor.read_u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err("invalid child attest key flag"),
+    };
+    let patch_levels = PatchLevels {
+        system: read_patch(&mut cursor)?,
+        vendor: read_patch(&mut cursor)?,
+        boot: read_patch(&mut cursor)?,
+    };
+    let id_count = cursor.read_u8()? as usize;
+    if id_count > MAX_ID_OVERRIDES {
+        return Err("too many attestation ID overrides");
+    }
+    let module_hash_len = cursor.read_u16()? as usize;
+    if module_hash_len > MAX_MODULE_HASH_BYTES {
+        return Err("module hash exceeds certificate wire bound");
+    }
+    let genuine_leaf_len = cursor.read_u32_as_usize()?;
+    if genuine_leaf_len == 0 || genuine_leaf_len > MAX_CERTIFICATE_DER_BYTES {
+        return Err("certificate DER field exceeds wire bound");
+    }
+    let parent_key_id: [u8; 32] = cursor
+        .read_exact(32)?
+        .try_into()
+        .map_err(|_| "invalid parent attest key identifier")?;
+    if parent_key_id.iter().all(|byte| *byte == 0) {
+        return Err("invalid parent attest key identifier");
+    }
+    let child_key_id: [u8; 32] = cursor
+        .read_exact(32)?
+        .try_into()
+        .map_err(|_| "invalid child attest key identifier")?;
+    if is_attest_key && child_key_id.iter().all(|byte| *byte == 0) {
+        return Err("invalid child attest key identifier");
+    }
+    if is_attest_key && child_key_id == parent_key_id {
+        return Err("child attest key cannot be its own parent");
+    }
+    let verified_boot_key: &[u8; 32] = cursor
+        .read_exact(32)?
+        .try_into()
+        .map_err(|_| "invalid verified boot key")?;
+    let verified_boot_hash: &[u8; 32] = cursor
+        .read_exact(32)?
+        .try_into()
+        .map_err(|_| "invalid verified boot hash")?;
+    if verified_boot_key.iter().all(|byte| *byte == 0)
+        || verified_boot_hash.iter().all(|byte| *byte == 0)
+    {
+        return Err("verified boot digest is unavailable");
+    }
+
+    let mut id_overrides = Vec::new();
+    id_overrides
+        .try_reserve_exact(id_count)
+        .map_err(|_| "attestation ID allocation failed")?;
+    let mut seen_tags = [0u16; MAX_ID_OVERRIDES];
+    for seen_count in 0..id_count {
+        let tag = cursor.read_u16()?;
+        let length = cursor.read_u16()? as usize;
+        if length == 0 || length > MAX_ATTESTATION_ID_BYTES {
+            return Err("attestation ID override exceeds wire bound");
+        }
+        if seen_tags[..seen_count].contains(&tag) {
+            return Err("duplicate attestation ID override");
+        }
+        seen_tags[seen_count] = tag;
+        let value = cursor.read_exact(length)?;
+        id_overrides.push(AttestationIdOverride {
+            tag: u32::from(tag),
+            value,
+        });
+    }
+    let module_hash = if module_hash_len == 0 {
+        None
+    } else {
+        Some(cursor.read_exact(module_hash_len)?)
+    };
+    let genuine_leaf_der = cursor.read_exact(genuine_leaf_len)?;
+    if !cursor.is_at_end() {
+        return Err("trailing certificate wire bytes");
+    }
+
+    Ok(ParsedChildKeyRewrite {
+        calling_uid,
+        is_attest_key,
+        patch_levels,
+        id_overrides,
+        module_hash,
+        genuine_leaf_der,
+        parent_key_id,
+        child_key_id,
+        verified_boot_key,
+        verified_boot_hash,
+    })
+}
+
 fn read_patch(cursor: &mut Cursor<'_>) -> Result<PatchComponent, &'static str> {
     let disposition = cursor.read_u8()?;
     let value = cursor.read_i32()?;
@@ -269,6 +646,14 @@ impl<'a> Cursor<'a> {
             .try_into()
             .map_err(|_| "truncated certificate wire")?;
         Ok(i32::from_be_bytes(bytes))
+    }
+
+    fn read_u32(&mut self) -> Result<u32, &'static str> {
+        let bytes: [u8; 4] = self
+            .read_exact(4)?
+            .try_into()
+            .map_err(|_| "truncated certificate wire")?;
+        Ok(u32::from_be_bytes(bytes))
     }
 
     fn read_u32_as_usize(&mut self) -> Result<usize, &'static str> {

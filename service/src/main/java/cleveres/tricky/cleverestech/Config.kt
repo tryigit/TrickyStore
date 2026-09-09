@@ -1150,6 +1150,7 @@ object Config {
                 previous?.fill(0)
                 appConfigState.identityCache.clear()
                 CertHack.clearCertificateCache()
+                Unit
             }
         }.onFailure { Logger.e("Failed to refresh application privacy seed", it) }
 
@@ -1192,6 +1193,7 @@ object Config {
                         throw error
                     }
                 }
+                Unit
             }
         }.onFailure { Logger.e("Failed to materialize application privacy seed", it) }
 

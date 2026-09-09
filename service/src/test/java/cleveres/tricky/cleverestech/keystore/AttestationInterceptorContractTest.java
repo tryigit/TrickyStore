@@ -66,6 +66,8 @@ public class AttestationInterceptorContractTest {
             Certificate[] rewrittenChain = new Certificate[] {replacementCert};
             backend.when(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()))
                     .thenReturn(rewrittenChain);
+            backend.when(() -> CertHack.hackChildKeyCertificate(any(), anyInt(), anyBoolean(), anyBoolean()))
+                    .thenReturn(rewrittenChain);
 
             // Test both default RKP request (false) and custom AttestKey request (true)
             for (boolean explicitAttestKey : new boolean[] {false, true}) {
@@ -82,7 +84,65 @@ public class AttestationInterceptorContractTest {
 
             backend.verify(CertHack::canHack, org.mockito.Mockito.times(2));
             backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()),
-                    org.mockito.Mockito.times(2));
+                    org.mockito.Mockito.times(1));
+            backend.verify(() -> CertHack.hackChildKeyCertificate(any(), anyInt(), anyBoolean(), anyBoolean()),
+                    org.mockito.Mockito.times(1));
+        } finally {
+            globalModeField.set(Config.INSTANCE, prevGlobalMode);
+        }
+    }
+
+    @Test
+    public void attestKeyGenerationWithDefaultAttestationKeyRoutesToHackAttestKeyCertificateChain() throws Exception {
+        Binder target = new Binder();
+        int code = field(SecurityLevelInterceptor.class, "generateKeyTransaction").getInt(null);
+        Field globalModeField = field(Config.class, "isGlobalMode");
+        boolean prevGlobalMode = (boolean) globalModeField.get(Config.INSTANCE);
+        globalModeField.set(Config.INSTANCE, true);
+        Config.INSTANCE.setPackagesForTesting(10_001, new String[] {"com.test.app"});
+        try (MockedStatic<CertHack> backend = mockStatic(CertHack.class)) {
+            backend.when(CertHack::canHack).thenReturn(true);
+            backend.when(() -> CertHack.applyCachedCertificateChain(any())).thenReturn(false);
+
+            KeyPair parent = keyPair("EC");
+            KeyPair childKey = keyPair("EC");
+            X509Certificate childCert = certificate(childKey, parent, "child", "parent");
+            KeyMetadata metadata = metadata(childCert, childCert.getEncoded());
+            X509Certificate replacementCert = certificate(childKey, parent, "replacement", "parent");
+            Certificate[] rewrittenChain = new Certificate[] {replacementCert};
+            backend.when(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean()))
+                    .thenReturn(rewrittenChain);
+            backend.when(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()))
+                    .thenReturn(rewrittenChain);
+
+            Parcel request = mock(Parcel.class);
+            java.util.concurrent.atomic.AtomicInteger pos = new java.util.concurrent.atomic.AtomicInteger(28);
+            when(request.dataPosition()).thenAnswer(inv -> pos.get());
+            org.mockito.Mockito.doAnswer(inv -> {
+                pos.set(inv.getArgument(0));
+                return null;
+            }).when(request).setDataPosition(anyInt());
+            when(request.dataAvail()).thenReturn(128);
+            when(request.dataSize()).thenReturn(128);
+            java.util.Iterator<Integer> ints = java.util.Arrays.asList(
+                    1, 16, 0,
+                    0,
+                    1, 1, 20, 536870913, 7, 7
+            ).iterator();
+            when(request.readInt()).thenAnswer(inv -> ints.hasNext() ? ints.next() : 0);
+
+            BinderInterceptor.Result preResult = new SecurityLevelInterceptor().onPreTransact(
+                    target, code, 0, 10_001, 42, request);
+            assertSame(BinderInterceptor.Continue.INSTANCE, preResult);
+
+            Parcel reply = generatedReply(metadata);
+            BinderInterceptor.Result postResult = generate(request, reply);
+            assertTrue(postResult instanceof BinderInterceptor.OverrideReply);
+
+            backend.verify(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()),
+                    org.mockito.Mockito.times(1));
+            backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()), never());
+            backend.verify(() -> CertHack.hackChildKeyCertificate(any(), anyInt(), anyBoolean(), anyBoolean()), never());
         } finally {
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
         }

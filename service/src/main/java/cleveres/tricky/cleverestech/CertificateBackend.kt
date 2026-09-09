@@ -56,6 +56,21 @@ object CertificateBackend {
     internal var rewriteOverride: ((RewriteRequest) -> ByteArray?)? = null
 
     @VisibleForTesting
+    internal var rewriteAttestKeyOverride: ((Int, ByteArray, RewriteRequest) -> ByteArray?)? = null
+
+    @VisibleForTesting
+    internal var rewriteChildKeyOverride: ((Int, ByteArray, ByteArray?, Boolean, ByteArray, ByteArray, ByteArray) -> ByteArray?)? = null
+
+    @VisibleForTesting
+    internal var clearAttestKeyStoreOverride: (() -> Boolean)? = null
+
+    @VisibleForTesting
+    internal var touchAttestKeyOverride: ((Int, ByteArray) -> AttestKeyTouchResult)? = null
+
+    @VisibleForTesting
+    internal var removeAttestKeyOverride: ((Int, ByteArray) -> AttestKeyRemoveResult)? = null
+
+    @VisibleForTesting
     internal var rewriteTransportOverride: ((Int, (OutputStream) -> Unit) -> ByteArray?)? = null
 
     @JvmStatic
@@ -178,11 +193,346 @@ object CertificateBackend {
         )
     }
 
+    @JvmStatic
+    fun rewriteAttestKey(
+        callingUid: Int,
+        attestKeyId: ByteArray,
+        genuineLeafDer: ByteArray,
+        keyId: ByteArray,
+        signingAlgorithm: Int,
+        systemDisposition: Int,
+        systemValue: Int,
+        vendorDisposition: Int,
+        vendorValue: Int,
+        bootDisposition: Int,
+        bootValue: Int,
+        idOverrides: Map<Int, ByteArray>,
+        moduleHash: ByteArray?,
+        verifiedBootKey: ByteArray,
+        verifiedBootHash: ByteArray,
+    ): ByteArray? {
+        if (callingUid < 0 ||
+            attestKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES ||
+            attestKeyId.all { it == 0.toByte() } ||
+            genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_CERTIFICATE_DER_BYTES ||
+            keyId.size != KEY_ID_BYTES || keyId.all { it == 0.toByte() } ||
+            signingAlgorithm !in SIGNING_EC_P256_SHA256..SIGNING_RSA_PKCS1_SHA256 ||
+            !validPatch(systemDisposition, systemValue) ||
+            !validPatch(vendorDisposition, vendorValue) ||
+            !validPatch(bootDisposition, bootValue) ||
+            idOverrides.size > MAX_ID_OVERRIDES ||
+            moduleHash?.let { it.isEmpty() || it.size > MAX_MODULE_HASH_BYTES } == true ||
+            verifiedBootKey.size != BOOT_DIGEST_BYTES ||
+            verifiedBootHash.size != BOOT_DIGEST_BYTES ||
+            verifiedBootKey.all { it == 0.toByte() } ||
+            verifiedBootHash.all { it == 0.toByte() }
+        ) {
+            return null
+        }
+
+        val orderedIds = idOverrides.entries.sortedBy { it.key }
+        var idWireBytes = 0
+        for ((tag, value) in orderedIds) {
+            if (tag !in ATTESTATION_ID_TAGS || value.isEmpty() || value.size > MAX_ATTESTATION_ID_BYTES) {
+                return null
+            }
+            idWireBytes = checkedAdd(idWireBytes, ID_HEADER_BYTES, value.size) ?: return null
+        }
+        val payloadLength =
+            checkedAdd(
+                ATTEST_KEY_REWRITE_FIXED_BYTES,
+                idWireBytes,
+                moduleHash?.size ?: 0,
+                genuineLeafDer.size,
+            ) ?: return null
+        if (payloadLength > MAX_ATTEST_KEY_REWRITE_REQUEST_BYTES) return null
+
+        rewriteAttestKeyOverride?.let { override ->
+            val result =
+                override(
+                    callingUid,
+                    attestKeyId,
+                    RewriteRequest(
+                        genuineLeafDer = genuineLeafDer,
+                        keyId = keyId,
+                        signingAlgorithm = signingAlgorithm,
+                        systemDisposition = systemDisposition,
+                        systemValue = systemValue,
+                        vendorDisposition = vendorDisposition,
+                        vendorValue = vendorValue,
+                        bootDisposition = bootDisposition,
+                        bootValue = bootValue,
+                        idOverrides = idOverrides,
+                        moduleHash = moduleHash,
+                        verifiedBootKey = verifiedBootKey,
+                        verifiedBootHash = verifiedBootHash,
+                    ),
+                )
+            return if (result != null && (result.isEmpty() || result.size > MAX_REWRITTEN_LEAF_BYTES)) null else result
+        }
+
+        val writePayload: (OutputStream) -> Unit = { output ->
+            output.write(REWRITE_WIRE_VERSION)
+            writeI32(output, callingUid)
+            output.write(signingAlgorithm)
+            writePatch(output, systemDisposition, systemValue)
+            writePatch(output, vendorDisposition, vendorValue)
+            writePatch(output, bootDisposition, bootValue)
+            output.write(orderedIds.size)
+            writeU16(output, moduleHash?.size ?: 0)
+            writeI32(output, genuineLeafDer.size)
+            output.write(keyId)
+            output.write(attestKeyId)
+            output.write(verifiedBootKey)
+            output.write(verifiedBootHash)
+            for ((tag, value) in orderedIds) {
+                writeU16(output, tag)
+                writeU16(output, value.size)
+                output.write(value)
+            }
+            if (moduleHash != null) output.write(moduleHash)
+            output.write(genuineLeafDer)
+        }
+        return NativeBackend.transact(
+            OP_ATTEST_KEY_REWRITE,
+            payloadLength,
+            MAX_REWRITTEN_LEAF_BYTES,
+            propagateTransportFailure = true,
+            writePayload = writePayload,
+        )
+    }
+
+    @JvmStatic
+    fun rewriteChildKey(
+        callingUid: Int,
+        parentKeyId: ByteArray,
+        childKeyId: ByteArray?,
+        genuineLeafDer: ByteArray,
+        isAttestKey: Boolean,
+        systemDisposition: Int,
+        systemValue: Int,
+        vendorDisposition: Int,
+        vendorValue: Int,
+        bootDisposition: Int,
+        bootValue: Int,
+        idOverrides: Map<Int, ByteArray>,
+        moduleHash: ByteArray?,
+        verifiedBootKey: ByteArray,
+        verifiedBootHash: ByteArray,
+    ): ByteArray? {
+        if (callingUid < 0 ||
+            parentKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES ||
+            parentKeyId.all { it == 0.toByte() } ||
+            (isAttestKey && (childKeyId == null || childKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES || childKeyId.all { it == 0.toByte() })) ||
+            (isAttestKey && childKeyId.contentEquals(parentKeyId)) ||
+            (!isAttestKey && childKeyId != null && childKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES) ||
+            genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_CERTIFICATE_DER_BYTES ||
+            !validPatch(systemDisposition, systemValue) ||
+            !validPatch(vendorDisposition, vendorValue) ||
+            !validPatch(bootDisposition, bootValue) ||
+            idOverrides.size > MAX_ID_OVERRIDES ||
+            moduleHash?.let { it.isEmpty() || it.size > MAX_MODULE_HASH_BYTES } == true ||
+            verifiedBootKey.size != BOOT_DIGEST_BYTES ||
+            verifiedBootHash.size != BOOT_DIGEST_BYTES ||
+            verifiedBootKey.all { it == 0.toByte() } ||
+            verifiedBootHash.all { it == 0.toByte() }
+        ) {
+            return null
+        }
+
+        val orderedIds = idOverrides.entries.sortedBy { it.key }
+        var idWireBytes = 0
+        for ((tag, value) in orderedIds) {
+            if (tag !in ATTESTATION_ID_TAGS || value.isEmpty() || value.size > MAX_ATTESTATION_ID_BYTES) {
+                return null
+            }
+            idWireBytes = checkedAdd(idWireBytes, ID_HEADER_BYTES, value.size) ?: return null
+        }
+        val payloadLength =
+            checkedAdd(
+                CHILD_KEY_REWRITE_FIXED_BYTES,
+                idWireBytes,
+                moduleHash?.size ?: 0,
+                genuineLeafDer.size,
+            ) ?: return null
+        if (payloadLength > MAX_CHILD_KEY_REWRITE_REQUEST_BYTES) return null
+
+        rewriteChildKeyOverride?.let { override ->
+            val result =
+                override(
+                    callingUid,
+                    parentKeyId,
+                    childKeyId,
+                    isAttestKey,
+                    genuineLeafDer,
+                    verifiedBootKey,
+                    verifiedBootHash,
+                )
+            return if (result != null && (result.isEmpty() || result.size > MAX_REWRITTEN_LEAF_BYTES)) null else result
+        }
+
+        val zeroChildKey = ByteArray(ATTEST_DESCRIPTOR_KEY_ID_BYTES)
+        val writePayload: (OutputStream) -> Unit = { output ->
+            output.write(REWRITE_WIRE_VERSION)
+            writeI32(output, callingUid)
+            output.write(if (isAttestKey) 1 else 0)
+            writePatch(output, systemDisposition, systemValue)
+            writePatch(output, vendorDisposition, vendorValue)
+            writePatch(output, bootDisposition, bootValue)
+            output.write(orderedIds.size)
+            writeU16(output, moduleHash?.size ?: 0)
+            writeI32(output, genuineLeafDer.size)
+            output.write(parentKeyId)
+            output.write(childKeyId ?: zeroChildKey)
+            output.write(verifiedBootKey)
+            output.write(verifiedBootHash)
+            for ((tag, value) in orderedIds) {
+                writeU16(output, tag)
+                writeU16(output, value.size)
+                output.write(value)
+            }
+            if (moduleHash != null) output.write(moduleHash)
+            output.write(genuineLeafDer)
+        }
+        return NativeBackend.transact(
+            OP_CHILD_KEY_REWRITE,
+            payloadLength,
+            MAX_REWRITTEN_LEAF_BYTES,
+            propagateTransportFailure = true,
+            writePayload = writePayload,
+        )
+    }
+
+    @JvmStatic
+    fun clearAttestKeyStore(): Boolean {
+        clearAttestKeyStoreOverride?.let { return it() }
+        for (attempt in 0..1) {
+            val response =
+                NativeBackend.transact(
+                    OP_ATTEST_KEY_CLEAR,
+                    ATTEST_KEY_CLEAR_REQUEST_BYTES,
+                    ATTEST_KEY_CLEAR_RESPONSE_BYTES,
+                    propagateTransportFailure = false,
+                ) { output ->
+                    output.write(1)
+                }
+            if (response != null && response.size == ATTEST_KEY_CLEAR_RESPONSE_BYTES && response[0] == 0.toByte()) {
+                return true
+            }
+        }
+        return false
+    }
+
+    enum class AttestKeyTouchResult {
+        PRESENT,
+        ABSENT,
+        UNAVAILABLE,
+    }
+
+    @JvmStatic
+    fun touchAttestKey(callingUid: Int, attestKeyId: ByteArray): AttestKeyTouchResult {
+        if (callingUid < 0 || attestKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES || attestKeyId.all { it == 0.toByte() }) {
+            return AttestKeyTouchResult.ABSENT
+        }
+        touchAttestKeyOverride?.let { return it(callingUid, attestKeyId) }
+        val response =
+            NativeBackend.transact(
+                OP_ATTEST_KEY_TOUCH,
+                ATTEST_KEY_TOUCH_REQUEST_BYTES,
+                ATTEST_KEY_TOUCH_RESPONSE_BYTES,
+                propagateTransportFailure = false,
+            ) { output ->
+                output.write(REWRITE_WIRE_VERSION)
+                writeI32(output, callingUid)
+                output.write(attestKeyId)
+            } ?: return AttestKeyTouchResult.UNAVAILABLE
+        if (response.size != ATTEST_KEY_TOUCH_RESPONSE_BYTES) {
+            return AttestKeyTouchResult.UNAVAILABLE
+        }
+        return if (response[0] == 1.toByte()) {
+            AttestKeyTouchResult.PRESENT
+        } else {
+            AttestKeyTouchResult.ABSENT
+        }
+    }
+
+    enum class AttestKeyRemoveResult {
+        REMOVED,
+        ABSENT,
+        UNAVAILABLE,
+    }
+
+    @JvmStatic
+    fun removeAttestKey(callingUid: Int, attestKeyId: ByteArray): AttestKeyRemoveResult {
+        if (callingUid < 0 ||
+            attestKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES ||
+            attestKeyId.all { it == 0.toByte() }
+        ) {
+            return AttestKeyRemoveResult.ABSENT
+        }
+        removeAttestKeyOverride?.let { return it(callingUid, attestKeyId) }
+        val response =
+            NativeBackend.transact(
+                OP_ATTEST_KEY_REMOVE,
+                ATTEST_KEY_REMOVE_REQUEST_BYTES,
+                ATTEST_KEY_REMOVE_RESPONSE_BYTES,
+                propagateTransportFailure = false,
+            ) { output ->
+                output.write(REWRITE_WIRE_VERSION)
+                writeI32(output, callingUid)
+                output.write(attestKeyId)
+            } ?: return AttestKeyRemoveResult.UNAVAILABLE
+        if (response.size != ATTEST_KEY_REMOVE_RESPONSE_BYTES) {
+            return AttestKeyRemoveResult.UNAVAILABLE
+        }
+        return if (response[0] == 1.toByte()) {
+            AttestKeyRemoveResult.REMOVED
+        } else {
+            AttestKeyRemoveResult.ABSENT
+        }
+    }
+
+    fun interface AttestKeyTouchHandler {
+        fun touch(callingUid: Int, keyId: ByteArray): AttestKeyTouchResult
+    }
+
+    fun interface AttestKeyRemoveHandler {
+        fun remove(callingUid: Int, keyId: ByteArray): AttestKeyRemoveResult
+    }
+
+    fun interface ClearAttestKeyStoreHandler {
+        fun clear(): Boolean
+    }
+
     @VisibleForTesting
-    internal fun resetForTesting() {
+    @JvmStatic
+    fun setTouchAttestKeyOverrideForTesting(override: AttestKeyTouchHandler?) {
+        touchAttestKeyOverride = if (override != null) { { uid, id -> override.touch(uid, id) } } else null
+    }
+
+    @VisibleForTesting
+    @JvmStatic
+    fun setClearAttestKeyStoreOverrideForTesting(override: ClearAttestKeyStoreHandler?) {
+        clearAttestKeyStoreOverride = if (override != null) { { override.clear() } } else null
+    }
+
+    @VisibleForTesting
+    @JvmStatic
+    fun setRemoveAttestKeyOverrideForTesting(override: AttestKeyRemoveHandler?) {
+        removeAttestKeyOverride = if (override != null) { { uid, id -> override.remove(uid, id) } } else null
+    }
+
+    @VisibleForTesting
+    @JvmStatic
+    fun resetForTesting() {
         inspectionOverride = null
         rewriteOverride = null
         rewriteTransportOverride = null
+        rewriteAttestKeyOverride = null
+        rewriteChildKeyOverride = null
+        clearAttestKeyStoreOverride = null
+        touchAttestKeyOverride = null
+        removeAttestKeyOverride = null
     }
 
     internal fun decodeInspection(response: ByteArray): Inspection {
@@ -345,15 +695,27 @@ object CertificateBackend {
 
     private const val OP_CERTIFICATE_INSPECT = 25
     private const val OP_CERTIFICATE_REWRITE = 26
+    private const val OP_ATTEST_KEY_REWRITE = 32
+    private const val OP_CHILD_KEY_REWRITE = 33
+    private const val OP_ATTEST_KEY_CLEAR = 34
+    private const val OP_ATTEST_KEY_TOUCH = 35
+    private const val OP_ATTEST_KEY_REMOVE = 36
     private const val INSPECT_WIRE_VERSION = 2
     private const val REWRITE_WIRE_VERSION = 2
     private const val INSPECT_RESPONSE_BYTES = 85
+    private const val ATTEST_KEY_CLEAR_REQUEST_BYTES = 1
+    private const val ATTEST_KEY_CLEAR_RESPONSE_BYTES = 1
+    private const val ATTEST_KEY_TOUCH_REQUEST_BYTES = 37
+    private const val ATTEST_KEY_TOUCH_RESPONSE_BYTES = 1
+    private const val ATTEST_KEY_REMOVE_REQUEST_BYTES = 37
+    private const val ATTEST_KEY_REMOVE_RESPONSE_BYTES = 1
     private const val FLAG_MODULE_HASH_SUPPORTED = 1
     private const val FLAG_BOOT_KEY_PRESENT = 1 shl 1
     private const val FLAG_BOOT_HASH_PRESENT = 1 shl 2
     private const val INSPECT_RESERVED_FLAGS = 0xf8
     private const val PRESENT_ID_RESERVED_MASK = 0xfe00
     private const val KEY_ID_BYTES = 16
+    private const val ATTEST_DESCRIPTOR_KEY_ID_BYTES = 32
     private const val MAX_CERTIFICATE_DER_BYTES = 256 * 1024
     private const val MAX_REWRITTEN_LEAF_BYTES = 64 * 1024
     private const val MAX_ATTESTATION_ID_BYTES = 4 * 1024
@@ -362,9 +724,21 @@ object CertificateBackend {
     private const val BOOT_DIGEST_BYTES = 32
     private const val ID_HEADER_BYTES = 4
     private const val REWRITE_FIXED_BYTES = 104
+    private const val ATTEST_KEY_REWRITE_FIXED_BYTES = 140
+    private const val CHILD_KEY_REWRITE_FIXED_BYTES = 156
     private const val MAX_ID_WIRE_BYTES = MAX_ID_OVERRIDES * (ID_HEADER_BYTES + MAX_ATTESTATION_ID_BYTES)
     private const val MAX_REWRITE_REQUEST_BYTES =
         REWRITE_FIXED_BYTES +
+            MAX_ID_WIRE_BYTES +
+            MAX_MODULE_HASH_BYTES +
+            MAX_CERTIFICATE_DER_BYTES
+    private const val MAX_ATTEST_KEY_REWRITE_REQUEST_BYTES =
+        ATTEST_KEY_REWRITE_FIXED_BYTES +
+            MAX_ID_WIRE_BYTES +
+            MAX_MODULE_HASH_BYTES +
+            MAX_CERTIFICATE_DER_BYTES
+    private const val MAX_CHILD_KEY_REWRITE_REQUEST_BYTES =
+        CHILD_KEY_REWRITE_FIXED_BYTES +
             MAX_ID_WIRE_BYTES +
             MAX_MODULE_HASH_BYTES +
             MAX_CERTIFICATE_DER_BYTES

@@ -22,6 +22,15 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "generateKey")
 
         val INTERCEPTED_CODES = validTransactCodes(generateKeyTransaction)
+
+        private class PreTransactContext(
+            val isDefaultAttestationKey: Boolean,
+            val isAttestKeyPurpose: Boolean,
+            val generatedKeyId: ByteArray?,
+            val parentKeyId: ByteArray?,
+        )
+
+        private val CURRENT_CONTEXT = ThreadLocal<PreTransactContext?>()
     }
 
     override fun onPreTransact(
@@ -37,9 +46,31 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             CertHack.canHack() &&
             Config.needHack(callingUid)
         ) {
+            val reqInfo = Utils.parseGenerateKeyRequest(data, callingUid)
+            if (reqInfo != null) {
+                CURRENT_CONTEXT.set(
+                    PreTransactContext(
+                        isDefaultAttestationKey = reqInfo.usesDefaultAttestationKey,
+                        isAttestKeyPurpose = reqInfo.isAttestKeyPurpose,
+                        generatedKeyId = reqInfo.generatedKeyId,
+                        parentKeyId = reqInfo.parentKeyId,
+                    ),
+                )
+                return Continue
+            }
+            val isDefault = Utils.usesDefaultAttestationKey(data)
+            val isAttestKey = Utils.hasAttestKeyPurpose(data)
+            CURRENT_CONTEXT.set(
+                PreTransactContext(
+                    isDefaultAttestationKey = isDefault,
+                    isAttestKeyPurpose = isAttestKey,
+                    generatedKeyId = null,
+                    parentKeyId = null,
+                ),
+            )
             return Continue
         }
-
+        CURRENT_CONTEXT.remove()
         return Skip
     }
 
@@ -61,7 +92,27 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             reply == null ||
             resultCode != 0
         ) {
+            CURRENT_CONTEXT.remove()
             return Skip
+        }
+
+        val context = CURRENT_CONTEXT.get() ?: run {
+            val reqInfo = Utils.parseGenerateKeyRequest(data, callingUid)
+            if (reqInfo != null) {
+                PreTransactContext(
+                    isDefaultAttestationKey = reqInfo.usesDefaultAttestationKey,
+                    isAttestKeyPurpose = reqInfo.isAttestKeyPurpose,
+                    generatedKeyId = reqInfo.generatedKeyId,
+                    parentKeyId = reqInfo.parentKeyId,
+                )
+            } else {
+                PreTransactContext(
+                    isDefaultAttestationKey = Utils.usesDefaultAttestationKey(data),
+                    isAttestKeyPurpose = Utils.hasAttestKeyPurpose(data),
+                    generatedKeyId = null,
+                    parentKeyId = null,
+                )
+            }
         }
 
         return try {
@@ -77,11 +128,48 @@ class SecurityLevelInterceptor : BinderInterceptor() {
 
                 val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
                 val rewritten =
-                    CertHack.hackCertificateChain(
-                        originalLeafOnly,
-                        callingUid,
-                        true,
-                    )
+                    if (!context.isDefaultAttestationKey) {
+                        val parentId = context.parentKeyId
+                        if (parentId == null) {
+                            CertHack.hackChildKeyCertificate(
+                                originalLeafOnly,
+                                callingUid,
+                                context.isAttestKeyPurpose,
+                                true,
+                            )
+                        } else {
+                            CertHack.hackChildKeyCertificate(
+                                originalLeafOnly,
+                                callingUid,
+                                context.isAttestKeyPurpose,
+                                true,
+                                parentId,
+                                context.generatedKeyId,
+                            )
+                        }
+                    } else if (context.isAttestKeyPurpose) {
+                        val keyId = context.generatedKeyId
+                        if (keyId == null) {
+                            CertHack.hackAttestKeyCertificateChain(
+                                originalLeafOnly,
+                                callingUid,
+                                true,
+                            )
+                        } else {
+                            CertHack.hackAttestKeyCertificateChain(
+                                originalLeafOnly,
+                                callingUid,
+                                true,
+                                keyId,
+                            )
+                        }
+                    } else {
+                        CertHack.hackCertificateChain(
+                            originalLeafOnly,
+                            callingUid,
+                            true,
+                        )
+                    }
                 if (rewritten === originalLeafOnly) {
                     return Skip
                 }
@@ -98,7 +186,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 }
 
                 val newLeaf = rewritten[0].encoded
-                val newChain = Utils.encodeIssuerChain(rewritten)
+                val newChain = if (!context.isDefaultAttestationKey) null else Utils.encodeIssuerChain(rewritten)
                 if (!Utils.rewriteKeyMetadataParcel(reply, parsed, newLeaf, newChain)) {
                     return Skip
                 }
@@ -121,17 +209,59 @@ class SecurityLevelInterceptor : BinderInterceptor() {
 
             val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
             val rewritten =
-                CertHack.hackCertificateChain(
-                    originalLeafOnly,
-                    callingUid,
-                    true,
-                )
+                if (!context.isDefaultAttestationKey) {
+                    val parentId = context.parentKeyId
+                    if (parentId == null) {
+                        CertHack.hackChildKeyCertificate(
+                            originalLeafOnly,
+                            callingUid,
+                            context.isAttestKeyPurpose,
+                            true,
+                        )
+                    } else {
+                        CertHack.hackChildKeyCertificate(
+                            originalLeafOnly,
+                            callingUid,
+                            context.isAttestKeyPurpose,
+                            true,
+                            parentId,
+                            context.generatedKeyId,
+                        )
+                    }
+                } else if (context.isAttestKeyPurpose) {
+                    val keyId = context.generatedKeyId
+                    if (keyId == null) {
+                        CertHack.hackAttestKeyCertificateChain(
+                            originalLeafOnly,
+                            callingUid,
+                            true,
+                        )
+                    } else {
+                        CertHack.hackAttestKeyCertificateChain(
+                            originalLeafOnly,
+                            callingUid,
+                            true,
+                            keyId,
+                        )
+                    }
+                } else {
+                    CertHack.hackCertificateChain(
+                        originalLeafOnly,
+                        callingUid,
+                        true,
+                    )
+                }
             if (rewritten === originalLeafOnly) {
                 return Skip
             }
 
             if (!CertHack.applyCachedCertificateChain(metadata)) {
-                Utils.putCertificateChain(metadata, rewritten)
+                if (!context.isDefaultAttestationKey) {
+                    metadata.certificate = rewritten[0].encoded
+                    metadata.certificateChain = null
+                } else {
+                    Utils.putCertificateChain(metadata, rewritten)
+                }
             }
             reply.setDataSize(0)
             reply.setDataPosition(0)
@@ -140,6 +270,8 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             OverrideReply(0, reply)
         } catch (_: Throwable) {
             Skip
+        } finally {
+            CURRENT_CONTEXT.remove()
         }
     }
 }

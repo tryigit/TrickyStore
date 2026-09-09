@@ -4,6 +4,8 @@ import android.os.Parcel;
 import android.security.keystore.KeyProperties;
 import android.system.keystore2.KeyMetadata;
 
+import androidx.annotation.VisibleForTesting;
+
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.security.KeyPair;
@@ -117,6 +119,9 @@ public final class CertHack {
         final boolean passthrough;
         final boolean leafOnlySafe;
         final boolean accountIssuerChainBytes;
+        final int attestKeyCallingUid;
+        final byte[] attestKeyId;
+        final byte[] parentKeyId;
 
         CachedCertificateChain(
                 Certificate[] certificates,
@@ -124,7 +129,7 @@ public final class CertHack {
                 byte[] issuerChainEncoded,
                 boolean leafOnlySafe
         ) {
-            this(certificates, leafEncoded, issuerChainEncoded, leafOnlySafe, false);
+            this(certificates, leafEncoded, issuerChainEncoded, leafOnlySafe, false, 0, null, null);
         }
 
         CachedCertificateChain(
@@ -134,12 +139,40 @@ public final class CertHack {
                 boolean leafOnlySafe,
                 boolean accountIssuerChainBytes
         ) {
-            this.certificates = certificates.clone();
-            this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded");
-            this.issuerChainEncoded = Objects.requireNonNull(issuerChainEncoded, "issuerChainEncoded");
+            this(certificates, leafEncoded, issuerChainEncoded, leafOnlySafe, accountIssuerChainBytes, 0, null, null);
+        }
+
+        CachedCertificateChain(
+                Certificate[] certificates,
+                byte[] leafEncoded,
+                byte[] issuerChainEncoded,
+                boolean leafOnlySafe,
+                boolean accountIssuerChainBytes,
+                int attestKeyCallingUid,
+                byte[] attestKeyId
+        ) {
+            this(certificates, leafEncoded, issuerChainEncoded, leafOnlySafe, accountIssuerChainBytes, attestKeyCallingUid, attestKeyId, null);
+        }
+
+        CachedCertificateChain(
+                Certificate[] certificates,
+                byte[] leafEncoded,
+                byte[] issuerChainEncoded,
+                boolean leafOnlySafe,
+                boolean accountIssuerChainBytes,
+                int attestKeyCallingUid,
+                byte[] attestKeyId,
+                byte[] parentKeyId
+        ) {
+            this.certificates = certificates != null ? certificates.clone() : null;
+            this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded").clone();
+            this.issuerChainEncoded = issuerChainEncoded != null ? issuerChainEncoded.clone() : null;
             this.passthrough = false;
             this.leafOnlySafe = leafOnlySafe;
             this.accountIssuerChainBytes = accountIssuerChainBytes;
+            this.attestKeyCallingUid = attestKeyCallingUid;
+            this.attestKeyId = attestKeyId != null ? attestKeyId.clone() : null;
+            this.parentKeyId = parentKeyId != null ? parentKeyId.clone() : null;
         }
 
         private CachedCertificateChain() {
@@ -149,6 +182,9 @@ public final class CertHack {
             this.passthrough = true;
             this.leafOnlySafe = true; // Passthrough is always safe for leaves (it does nothing)
             this.accountIssuerChainBytes = false;
+            this.attestKeyCallingUid = 0;
+            this.attestKeyId = null;
+            this.parentKeyId = null;
         }
 
         static CachedCertificateChain passthrough() {
@@ -165,15 +201,19 @@ public final class CertHack {
             if (accountIssuerChainBytes && issuerChainEncoded != null) {
                 bytes += issuerChainEncoded.length;
             }
+            if (attestKeyId != null) {
+                bytes += attestKeyId.length;
+            }
+            if (parentKeyId != null) {
+                bytes += parentKeyId.length;
+            }
             return bytes;
         }
 
         void applyTo(KeyMetadata metadata) {
             if (passthrough) return;
-            // Parcel.writeTypedObject copies these byte arrays synchronously. The transient
-            // KeyMetadata object never owns or mutates the cache storage after the reply is built.
-            metadata.certificate = leafEncoded;
-            metadata.certificateChain = issuerChainEncoded;
+            metadata.certificate = leafEncoded.clone();
+            metadata.certificateChain = issuerChainEncoded != null ? issuerChainEncoded.clone() : null;
         }
     }
 
@@ -401,17 +441,37 @@ public final class CertHack {
             }
 
             @Override
-            public synchronized CachedCertificateChain put(CacheKey key, CachedCertificateChain value) {
-                CachedCertificateChain old = super.put(key, value);
-                if (old != null) {
-                    retainedBytes -= old.retainedBytes();
-                } else if (key != null) {
-                    retainedBytes += key.retainedBytes();
+            public CachedCertificateChain put(CacheKey key, CachedCertificateChain value) {
+                CachedCertificateChain old;
+                List<AttestKeyDescriptor> evicted = null;
+                synchronized (this) {
+                    old = super.put(key, value);
+                    if (old != null) {
+                        retainedBytes -= old.retainedBytes();
+                    } else if (key != null) {
+                        retainedBytes += key.retainedBytes();
+                    }
+                    if (value != null) {
+                        retainedBytes += value.retainedBytes();
+                    }
+                    evicted = trimLocked();
+                    if (old != null && old.attestKeyId != null
+                            && (value == null || !Arrays.equals(old.attestKeyId, value.attestKeyId))) {
+                        if (evicted == null) {
+                            evicted = new ArrayList<>(1);
+                        }
+                        evicted.add(new AttestKeyDescriptor(old.attestKeyCallingUid, old.attestKeyId));
+                    }
                 }
-                if (value != null) {
-                    retainedBytes += value.retainedBytes();
+                if (evicted != null) {
+                    for (AttestKeyDescriptor desc : evicted) {
+                        CertificateBackend.AttestKeyRemoveResult res =
+                                CertificateBackend.removeAttestKey(desc.callingUid, desc.keyId);
+                        if (res == CertificateBackend.AttestKeyRemoveResult.UNAVAILABLE) {
+                            graphStateUnhealthy = true;
+                        }
+                    }
                 }
-                trimLocked();
                 return old;
             }
 
@@ -419,22 +479,31 @@ public final class CertHack {
             public synchronized CachedCertificateChain putIfAbsent(CacheKey key, CachedCertificateChain value) {
                 CachedCertificateChain existing = super.get(key);
                 if (existing == null) {
-                    put(key, value);
-                    return null;
+                    return put(key, value);
                 }
                 return existing;
             }
 
             @Override
-            public synchronized CachedCertificateChain remove(Object key) {
-                CachedCertificateChain old = super.remove(key);
-                if (old != null) {
-                    if (key instanceof CacheKey cacheKey) {
-                        retainedBytes -= cacheKey.retainedBytes();
+            public CachedCertificateChain remove(Object key) {
+                CachedCertificateChain old;
+                synchronized (this) {
+                    old = super.remove(key);
+                    if (old != null) {
+                        if (key instanceof CacheKey cacheKey) {
+                            retainedBytes -= cacheKey.retainedBytes();
+                        }
+                        retainedBytes -= old.retainedBytes();
+                        if (retainedBytes < 0) {
+                            retainedBytes = 0;
+                        }
                     }
-                    retainedBytes -= old.retainedBytes();
-                    if (retainedBytes < 0) {
-                        retainedBytes = 0;
+                }
+                if (old != null && old.attestKeyId != null) {
+                    CertificateBackend.AttestKeyRemoveResult res =
+                            CertificateBackend.removeAttestKey(old.attestKeyCallingUid, old.attestKeyId);
+                    if (res == CertificateBackend.AttestKeyRemoveResult.UNAVAILABLE) {
+                        graphStateUnhealthy = true;
                     }
                 }
                 return old;
@@ -455,7 +524,8 @@ public final class CertHack {
                 return retainedBytes;
             }
 
-            private void trimLocked() {
+            private List<AttestKeyDescriptor> trimLocked() {
+                List<AttestKeyDescriptor> evicted = null;
                 Iterator<Map.Entry<CacheKey, CachedCertificateChain>> it = entrySet().iterator();
                 while (it.hasNext() && (size() > MAX_CERTIFICATE_CACHE_ENTRIES
                         || retainedBytes > MAX_CERTIFICATE_CACHE_RETAINED_BYTES)) {
@@ -464,7 +534,25 @@ public final class CertHack {
                     if (retainedBytes < 0) {
                         retainedBytes = 0;
                     }
+                    CachedCertificateChain val = entry.getValue();
+                    if (val != null && val.attestKeyId != null) {
+                        if (evicted == null) {
+                            evicted = new ArrayList<>();
+                        }
+                        evicted.add(new AttestKeyDescriptor(val.attestKeyCallingUid, val.attestKeyId));
+                    }
                     it.remove();
+                }
+                return evicted;
+            }
+
+            static final class AttestKeyDescriptor {
+                final int callingUid;
+                final byte[] keyId;
+
+                AttestKeyDescriptor(int callingUid, byte[] keyId) {
+                    this.callingUid = callingUid;
+                    this.keyId = keyId != null ? keyId.clone() : null;
                 }
             }
         }
@@ -479,7 +567,7 @@ public final class CertHack {
         private final int hashCode;
 
         CacheKey(byte[] leafEncoded) {
-            this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded");
+            this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded").clone();
             this.hashCode = Arrays.hashCode(this.leafEncoded);
         }
 
@@ -779,12 +867,66 @@ public final class CertHack {
         state = new State(newKeyboxes, newKeyboxFiles, preparedMap, classificationMap, uniqueCanonicalFiles.size());
     }
 
-    public static void clearCertificateCache() {
-        State currentState = state;
-        synchronized (currentState.certificateCache) {
-            currentState.certificateCacheEpoch = new Object();
-            currentState.certificateCache.clear();
+    private static volatile boolean graphStateUnhealthy = false;
+
+    public static boolean clearCertificateCache() {
+        KeyboxActivation.lockPublishedSnapshot();
+        try {
+            State currentState = state;
+            boolean backendCleared = CertificateBackend.clearAttestKeyStore();
+            if (!backendCleared) {
+                backendCleared = CertificateBackend.clearAttestKeyStore();
+            }
+            if (backendCleared) {
+                graphStateUnhealthy = false;
+            } else {
+                graphStateUnhealthy = true;
+            }
+            synchronized (currentState.certificateCache) {
+                currentState.certificateCacheEpoch = new Object();
+                currentState.certificateCache.clear();
+            }
+            return backendCleared;
+        } finally {
+            KeyboxActivation.unlockPublishedSnapshot();
         }
+    }
+
+    private static void evictDescendants(State.CertificateCache cache, byte[] parentKeyId) {
+        if (cache == null || parentKeyId == null) return;
+        List<CacheKey> keysToRemove = new ArrayList<>();
+        List<byte[]> descendantIds = new ArrayList<>();
+        descendantIds.add(parentKeyId);
+        synchronized (cache) {
+            for (int index = 0; index < descendantIds.size(); index++) {
+                byte[] currentParent = descendantIds.get(index);
+                for (Map.Entry<CacheKey, CachedCertificateChain> entry : cache.entrySet()) {
+                    CachedCertificateChain entryValue = entry.getValue();
+                    if (entryValue != null
+                            && entryValue.parentKeyId != null
+                            && Arrays.equals(entryValue.parentKeyId, currentParent)
+                            && !keysToRemove.contains(entry.getKey())) {
+                        keysToRemove.add(entry.getKey());
+                        if (entryValue.attestKeyId != null) {
+                            descendantIds.add(entryValue.attestKeyId);
+                        }
+                    }
+                }
+            }
+        }
+        for (CacheKey k : keysToRemove) {
+            cache.remove(k);
+        }
+    }
+
+    @VisibleForTesting
+    static boolean isGraphStateUnhealthyForTesting() {
+        return graphStateUnhealthy;
+    }
+
+    @VisibleForTesting
+    static void resetGraphHealthForTesting() {
+        graphStateUnhealthy = false;
     }
 
     static Object captureCertificateCacheEpochForTesting() {
@@ -803,6 +945,53 @@ public final class CertHack {
 
     public static boolean hasCachedCertificateChains() {
         return !state.certificateCache.isEmpty();
+    }
+
+    private static CachedCertificateChain validateAndTouchAttestGraph(
+            State.CertificateCache cache,
+            CacheKey cacheKey,
+            CachedCertificateChain cached
+    ) {
+        if (cached == null) {
+            return null;
+        }
+        if (cached.attestKeyId == null && cached.parentKeyId == null) {
+            return cached;
+        }
+
+        boolean parentAbsent = false;
+        if (cached.parentKeyId != null) {
+            CertificateBackend.AttestKeyTouchResult res =
+                    CertificateBackend.touchAttestKey(cached.attestKeyCallingUid, cached.parentKeyId);
+            if (res == CertificateBackend.AttestKeyTouchResult.ABSENT) {
+                parentAbsent = true;
+            }
+        }
+
+        boolean selfAbsent = false;
+        if (!parentAbsent && cached.attestKeyId != null) {
+            CertificateBackend.AttestKeyTouchResult res =
+                    CertificateBackend.touchAttestKey(cached.attestKeyCallingUid, cached.attestKeyId);
+            if (res == CertificateBackend.AttestKeyTouchResult.ABSENT) {
+                selfAbsent = true;
+            }
+        }
+
+        if (parentAbsent || selfAbsent) {
+            boolean backendCleared = clearCertificateCache();
+            if (!backendCleared) {
+                synchronized (cache) {
+                    CachedCertificateChain current = cache.get(cacheKey);
+                    if (current == cached) {
+                        cache.remove(cacheKey);
+                    }
+                }
+                return CachedCertificateChain.passthrough();
+            }
+            return null;
+        }
+
+        return cached;
     }
 
     /**
@@ -873,7 +1062,10 @@ public final class CertHack {
         try {
             byte[] leafEncoded = caList[0].getEncoded();
             if (leafEncoded.length == 0 || leafEncoded.length > MAX_LEAF_CERTIFICATE_BYTES) return null;
-            CachedCertificateChain cached = state.certificateCache.get(new CacheKey(leafEncoded));
+            CachedCertificateChain cached;
+            synchronized (state.certificateCache) {
+                cached = state.certificateCache.get(new CacheKey(leafEncoded));
+            }
             if (cached == null) return null;
             Certificate[] replacement = cached.certificateCopy();
             return replacement == null ? caList : replacement;
@@ -1070,6 +1262,393 @@ public final class CertHack {
         } finally {
             if (keyId != null) Arrays.fill(keyId, (byte) 0);
             if (inspection != null) inspection.wipe();
+            KeyboxActivation.unlockPublishedSnapshot();
+        }
+    }
+
+    public static Certificate[] hackAttestKeyCertificateChain(Certificate[] caList, int uid) {
+        return hackAttestKeyCertificateChain(caList, uid, false, null);
+    }
+
+    public static Certificate[] hackAttestKeyCertificateChain(
+            Certificate[] caList, int uid, boolean leafOnlySafe) {
+        return hackAttestKeyCertificateChain(caList, uid, leafOnlySafe, null);
+    }
+
+    public static Certificate[] hackAttestKeyCertificateChain(
+            Certificate[] caList, int uid, byte[] attestKeyId) {
+        return hackAttestKeyCertificateChain(caList, uid, false, attestKeyId);
+    }
+
+    public static Certificate[] hackAttestKeyCertificateChain(
+            Certificate[] caList, int uid, boolean leafOnlySafe, byte[] attestKeyId) {
+        if (caList == null || caList.length == 0 || caList[0] == null) {
+            throw new UnsupportedOperationException("Certificate chain is empty");
+        }
+        KeyboxActivation.lockPublishedSnapshot();
+        CertificateBackend.Inspection attestInspection = null;
+        byte[] keyId = null;
+        try {
+            State currentState = state;
+            byte[] leafEncoded = caList[0].getEncoded();
+            if (leafEncoded.length == 0 || leafEncoded.length > MAX_LEAF_CERTIFICATE_BYTES) {
+                return caList;
+            }
+            CacheKey cacheKey = new CacheKey(leafEncoded);
+            State.CertificateCache cache = currentState.certificateCache;
+            Object cacheEpoch;
+            CachedCertificateChain cached;
+            synchronized (cache) {
+                cached = cache.get(cacheKey);
+                cacheEpoch = currentState.certificateCacheEpoch;
+            }
+            cached = validateAndTouchAttestGraph(cache, cacheKey, cached);
+            if (cached != null) {
+                Certificate[] replacement = cached.certificateCopy();
+                return replacement == null ? caList : replacement;
+            }
+
+            if (!Utils.hasAndroidAttestationExtension(caList[0])) return caList;
+
+            attestInspection = CertificateBackend.inspect(leafEncoded);
+            if (attestInspection == null) return caList;
+            int attLevel = attestInspection.getAttestationSecurityLevel();
+            int kmLevel = attestInspection.getKeymintSecurityLevel();
+            boolean isTee = attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                    && kmLevel == CertificateBackend.SECURITY_LEVEL_TEE;
+            boolean isStrongbox =
+                    (attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX)
+                    || (attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
+                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX);
+            boolean isTeeOrStrongbox = isTee || isStrongbox;
+            if (!isTeeOrStrongbox) {
+                synchronized (cache) {
+                    if (state == currentState && currentState.certificateCacheEpoch == cacheEpoch) {
+                        cache.putIfAbsent(cacheKey, CachedCertificateChain.passthrough());
+                    }
+                }
+                return caList;
+            }
+
+            boolean needsCapturedPatchLevels = PolicyState.INSTANCE.isFeatureEnabled(
+                    PolicyState.Feature.SECURITY_PATCH, uid);
+            byte[] originalBootKey = usableBootDigest(attestInspection.getOriginalBootKey());
+            if (originalBootKey != null) {
+                capturedHardwareBootKey = originalBootKey.clone();
+            }
+            byte[] originalBootHash = usableBootDigest(attestInspection.getOriginalBootHash());
+            if (originalBootHash != null) {
+                capturedHardwareBootHash = originalBootHash.clone();
+            }
+            byte[] verifiedBootKey = selectVerifiedBootDigest(
+                    UtilKt.getBootKey(),
+                    originalBootKey != null ? originalBootKey : capturedHardwareBootKey,
+                    UtilKt.getPersistentBootKey());
+            byte[] verifiedBootHash = selectVerifiedBootDigest(
+                    UtilKt.getBootHash(),
+                    originalBootHash != null ? originalBootHash : capturedHardwareBootHash,
+                    UtilKt.getPersistentBootHash());
+            Config.AttestationPatchLevels patchLevels = needsCapturedPatchLevels
+                    ? PolicyState.INSTANCE.resolveAttestationPatchLevels(
+                            uid,
+                            attestInspection.getSystemPatch(),
+                            attestInspection.getVendorPatch(),
+                            attestInspection.getBootPatch())
+                    : keepPatchLevels();
+
+            List<KeyBox> list;
+            var appConfig = Config.INSTANCE.getAppConfig(uid);
+            if (appConfig != null && appConfig.getKeyboxFilename() != null) {
+                List<KeyBox> candidates = currentState.keyboxFiles.get(appConfig.getKeyboxFilename());
+                List<KeyBox> matchingLevel = filterKeyboxesBySecurityLevel(candidates, isStrongbox);
+                if (!matchingLevel.isEmpty()) {
+                    candidates = matchingLevel;
+                } else if (isStrongbox) {
+                    candidates = filterKeyboxesBySecurityLevel(candidates, false);
+                } else {
+                    candidates = Collections.emptyList();
+                }
+                list = selectKeyboxPool(candidates, KeyProperties.KEY_ALGORITHM_EC);
+            } else {
+                if (isStrongbox) {
+                    if (!currentState.globalStrongBoxEc.isEmpty()) {
+                        list = currentState.globalStrongBoxEc;
+                    } else if (!currentState.globalStrongBoxRsa.isEmpty()) {
+                        list = currentState.globalStrongBoxRsa;
+                    } else if (!currentState.globalTeeEc.isEmpty()) {
+                        list = currentState.globalTeeEc;
+                    } else {
+                        list = currentState.globalTeeRsa;
+                    }
+                } else {
+                    if (!currentState.globalTeeEc.isEmpty()) {
+                        list = currentState.globalTeeEc;
+                    } else {
+                        list = currentState.globalTeeRsa;
+                    }
+                }
+            }
+            if (list.isEmpty()) {
+                return caList;
+            }
+
+            KeyBox keybox = list.get(cacheKey.indexForPool(list.size()));
+            PreparedKeyBox prepared = currentState.preparedKeyboxes.get(keybox);
+            if (prepared == null) throw new UnsupportedOperationException("Keybox metadata is unavailable");
+            int signingAlgorithm = signingWireAlgorithm(prepared.signatureAlgorithm);
+            if (signingAlgorithm == 0) return caList;
+
+            if (verifiedBootKey == null || verifiedBootHash == null) {
+                return caList;
+            }
+
+            Map<Integer, byte[]> idOverrides = presentIdOverrides(uid, attestInspection.getPresentIdMask());
+            byte[] moduleHash = attestInspection.getSupportsModuleHash()
+                    ? Config.INSTANCE.getModuleHash()
+                    : null;
+            if (attestKeyId == null || attestKeyId.length != 32) {
+                return caList;
+            }
+            keyId = prepared.keyId.clone();
+
+            if (!clearCertificateCache()) {
+                return caList;
+            }
+            synchronized (cache) {
+                if (state != currentState) {
+                    return caList;
+                }
+                cacheEpoch = currentState.certificateCacheEpoch;
+            }
+
+            byte[] rewrittenDer = CertificateBackend.rewriteAttestKey(
+                    uid,
+                    attestKeyId,
+                    leafEncoded,
+                    keyId,
+                    signingAlgorithm,
+                    patchDisposition(patchLevels.getSystem()), patchLevels.getSystem().getValue(),
+                    patchDisposition(patchLevels.getVendor()), patchLevels.getVendor().getValue(),
+                    patchDisposition(patchLevels.getBoot()), patchLevels.getBoot().getValue(),
+                    idOverrides,
+                    moduleHash,
+                    verifiedBootKey,
+                    verifiedBootHash);
+            if (rewrittenDer == null || rewrittenDer.length == 0 || rewrittenDer.length > MAX_LEAF_CERTIFICATE_BYTES) {
+                return caList;
+            }
+            byte[] encodedIssuerChain = currentState.encodedIssuerChain(prepared);
+            Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer, false);
+            Certificate[] result = new Certificate[prepared.issuerChain.length + 1];
+            result[0] = rewrittenLeaf;
+            System.arraycopy(prepared.issuerChain, 0, result, 1, prepared.issuerChain.length);
+            CachedCertificateChain completed = new CachedCertificateChain(
+                    result,
+                    rewrittenDer,
+                    encodedIssuerChain,
+                    leafOnlySafe,
+                    true,
+                    uid,
+                    attestKeyId,
+                    null
+            );
+            synchronized (cache) {
+                if (state != currentState || currentState.certificateCacheEpoch != cacheEpoch) {
+                    return result;
+                }
+                CachedCertificateChain raced = cache.get(cacheKey);
+                if (raced != null) {
+                    Certificate[] replacement = raced.certificateCopy();
+                    return replacement == null ? caList : replacement;
+                }
+                cache.put(cacheKey, completed);
+            }
+            return result;
+        } catch (Throwable t) {
+            return caList;
+        } finally {
+            if (keyId != null) Arrays.fill(keyId, (byte) 0);
+            if (attestInspection != null) attestInspection.wipe();
+            KeyboxActivation.unlockPublishedSnapshot();
+        }
+    }
+
+    public static Certificate[] hackChildKeyCertificate(
+            Certificate[] caList, int uid, boolean isAttestKey) {
+        return hackChildKeyCertificate(caList, uid, isAttestKey, false, null, null);
+    }
+
+    public static Certificate[] hackChildKeyCertificate(
+            Certificate[] caList, int uid, boolean isAttestKey, boolean leafOnlySafe) {
+        return hackChildKeyCertificate(caList, uid, isAttestKey, leafOnlySafe, null, null);
+    }
+
+    public static Certificate[] hackChildKeyCertificate(
+            Certificate[] caList, int uid, boolean isAttestKey, byte[] parentKeyId, byte[] childKeyId) {
+        return hackChildKeyCertificate(caList, uid, isAttestKey, false, parentKeyId, childKeyId);
+    }
+
+    public static Certificate[] hackChildKeyCertificate(
+            Certificate[] caList, int uid, boolean isAttestKey, boolean leafOnlySafe, byte[] parentKeyId, byte[] childKeyId) {
+        if (caList == null || caList.length == 0 || caList[0] == null) {
+            return caList;
+        }
+        KeyboxActivation.lockPublishedSnapshot();
+        CertificateBackend.Inspection childInspection = null;
+        try {
+            State currentState = state;
+            byte[] leafEncoded = caList[0].getEncoded();
+            if (leafEncoded.length == 0 || leafEncoded.length > MAX_LEAF_CERTIFICATE_BYTES) {
+                return caList;
+            }
+            CacheKey cacheKey = new CacheKey(leafEncoded);
+            State.CertificateCache cache = currentState.certificateCache;
+            Object cacheEpoch;
+            CachedCertificateChain cached;
+            synchronized (cache) {
+                cached = cache.get(cacheKey);
+                cacheEpoch = currentState.certificateCacheEpoch;
+            }
+            cached = validateAndTouchAttestGraph(cache, cacheKey, cached);
+            if (cached != null) {
+                Certificate[] replacement = cached.certificateCopy();
+                return replacement == null ? caList : replacement;
+            }
+
+            if (graphStateUnhealthy) {
+                if (clearCertificateCache()) {
+                    graphStateUnhealthy = false;
+                } else {
+                    return caList;
+                }
+            }
+
+            if (isAttestKey && childKeyId != null) {
+                evictDescendants(cache, childKeyId);
+            }
+
+            if (!Utils.hasAndroidAttestationExtension(caList[0])) return caList;
+
+            childInspection = CertificateBackend.inspect(leafEncoded);
+            if (childInspection == null) return caList;
+            int attLevel = childInspection.getAttestationSecurityLevel();
+            int kmLevel = childInspection.getKeymintSecurityLevel();
+            boolean isTee = attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                    && kmLevel == CertificateBackend.SECURITY_LEVEL_TEE;
+            boolean isStrongbox =
+                    (attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX)
+                    || (attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
+                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX);
+            boolean isTeeOrStrongbox = isTee || isStrongbox;
+            if (!isTeeOrStrongbox) {
+                synchronized (cache) {
+                    if (state == currentState && currentState.certificateCacheEpoch == cacheEpoch) {
+                        cache.putIfAbsent(cacheKey, CachedCertificateChain.passthrough());
+                    }
+                }
+                return caList;
+            }
+
+            boolean needsCapturedPatchLevels = PolicyState.INSTANCE.isFeatureEnabled(
+                    PolicyState.Feature.SECURITY_PATCH, uid);
+            byte[] originalBootKey = usableBootDigest(childInspection.getOriginalBootKey());
+            if (originalBootKey != null) {
+                capturedHardwareBootKey = originalBootKey.clone();
+            }
+            byte[] originalBootHash = usableBootDigest(childInspection.getOriginalBootHash());
+            if (originalBootHash != null) {
+                capturedHardwareBootHash = originalBootHash.clone();
+            }
+            byte[] verifiedBootKey = selectVerifiedBootDigest(
+                    UtilKt.getBootKey(),
+                    originalBootKey != null ? originalBootKey : capturedHardwareBootKey,
+                    UtilKt.getPersistentBootKey());
+            byte[] verifiedBootHash = selectVerifiedBootDigest(
+                    UtilKt.getBootHash(),
+                    originalBootHash != null ? originalBootHash : capturedHardwareBootHash,
+                    UtilKt.getPersistentBootHash());
+            if (verifiedBootKey == null || verifiedBootHash == null) {
+                return caList;
+            }
+
+            Config.AttestationPatchLevels patchLevels = needsCapturedPatchLevels
+                    ? PolicyState.INSTANCE.resolveAttestationPatchLevels(
+                            uid,
+                            childInspection.getSystemPatch(),
+                            childInspection.getVendorPatch(),
+                            childInspection.getBootPatch())
+                    : keepPatchLevels();
+
+            Map<Integer, byte[]> idOverrides = presentIdOverrides(uid, childInspection.getPresentIdMask());
+            byte[] moduleHash = childInspection.getSupportsModuleHash()
+                    ? Config.INSTANCE.getModuleHash()
+                    : null;
+
+            if (parentKeyId == null || parentKeyId.length != 32) {
+                return caList;
+            }
+            if (isAttestKey && (childKeyId == null || childKeyId.length != 32)) {
+                return caList;
+            }
+
+            byte[] rewrittenDer = CertificateBackend.rewriteChildKey(
+                    uid,
+                    parentKeyId,
+                    childKeyId,
+                    leafEncoded,
+                    isAttestKey,
+                    patchDisposition(patchLevels.getSystem()), patchLevels.getSystem().getValue(),
+                    patchDisposition(patchLevels.getVendor()), patchLevels.getVendor().getValue(),
+                    patchDisposition(patchLevels.getBoot()), patchLevels.getBoot().getValue(),
+                    idOverrides,
+                    moduleHash,
+                    verifiedBootKey,
+                    verifiedBootHash);
+            if (rewrittenDer == null || rewrittenDer.length == 0 || rewrittenDer.length > MAX_LEAF_CERTIFICATE_BYTES) {
+                return caList;
+            }
+
+            Certificate rewrittenLeaf = new LazyX509Certificate(rewrittenDer, false);
+            Certificate[] result = new Certificate[caList.length];
+            result[0] = rewrittenLeaf;
+            if (caList.length > 1) {
+                System.arraycopy(caList, 1, result, 1, caList.length - 1);
+            }
+            byte[] encodedIssuerChain = null;
+            if (caList.length > 1) {
+                try {
+                    encodedIssuerChain = Utils.encodeIssuerChain(caList);
+                } catch (Throwable ignored) {
+                }
+            }
+            CachedCertificateChain completed = new CachedCertificateChain(
+                    result,
+                    rewrittenDer,
+                    encodedIssuerChain,
+                    leafOnlySafe,
+                    false,
+                    uid,
+                    isAttestKey ? childKeyId : null,
+                    parentKeyId
+            );
+            synchronized (cache) {
+                if (state != currentState || currentState.certificateCacheEpoch != cacheEpoch) {
+                    return result;
+                }
+                CachedCertificateChain raced = cache.get(cacheKey);
+                if (raced != null) {
+                    Certificate[] replacement = raced.certificateCopy();
+                    return replacement == null ? caList : replacement;
+                }
+                cache.put(cacheKey, completed);
+            }
+            return result;
+        } catch (Throwable t) {
+            return caList;
+        } finally {
+            if (childInspection != null) childInspection.wipe();
             KeyboxActivation.unlockPublishedSnapshot();
         }
     }

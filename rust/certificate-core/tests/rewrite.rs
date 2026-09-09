@@ -30,6 +30,89 @@ fn rewrites_and_resigns_rsa_leaf_with_managed_builder_semantics() {
 }
 
 #[test]
+fn attest_key_and_child_key_rootoftrust_and_signature_convergence() {
+    let document = parse_keybox_xml_bytes(VALID_EC).expect("EC fixture XML");
+    let key = document.keys.first().expect("EC fixture key");
+    let private_key = normalize_private_key_pkcs8(&key.algorithm, &key.private_key_pem)
+        .expect("EC fixture key DER");
+    let issuer_pem = key
+        .certificates_pem
+        .first()
+        .expect("EC fixture issuer certificate");
+    let keybox_ca = Certificate::from_pem(normalized_pem(issuer_pem).as_bytes())
+        .expect("EC fixture issuer DER");
+    let keybox_ca_der = keybox_ca.to_der().expect("keybox CA DER");
+
+    let k1_genuine = synthetic_genuine_leaf(&keybox_ca);
+    let k1_genuine_der = k1_genuine.to_der().expect("k1 genuine DER");
+
+    let generated_k1 = cleverestricky_certificate_core::generate_ec_p256_keypair()
+        .expect("generate EC keypair for K1");
+
+    let k1_rewritten = rewrite_certificate(&CertificateRewriteRequest {
+        genuine_leaf_der: &k1_genuine_der,
+        issuer_certificate_der: &keybox_ca_der,
+        issuer_private_key_pkcs8: private_key.as_slice(),
+        signing_algorithm: SigningAlgorithm::EcP256Sha256,
+        patch_levels: PatchLevels::default(),
+        id_overrides: &[],
+        module_hash: None,
+        verified_boot_key: &BOOT_KEY,
+        verified_boot_hash: &BOOT_HASH,
+        subject_public_key_info: Some(&generated_k1.public_key_spki_der),
+    })
+    .expect("rewrite K1 leaf");
+
+    let k1_cert = Certificate::from_der(&k1_rewritten.leaf_der).expect("K1 cert DER");
+    assert_eq!(
+        k1_cert
+            .tbs_certificate()
+            .subject_public_key_info()
+            .to_der()
+            .unwrap(),
+        generated_k1.public_key_spki_der
+    );
+    verify_signature(&k1_cert, &keybox_ca, SigningAlgorithm::EcP256Sha256);
+
+    let (k1_subject_der, _) =
+        cleverestricky_certificate_core::parse_certificate_subject_and_issuer(
+            &k1_rewritten.leaf_der,
+        )
+        .expect("parse K1 subject and issuer");
+
+    let k1_prepared_issuer = cleverestricky_certificate_core::PreparedIssuer::from_subject_and_key(
+        k1_subject_der,
+        &generated_k1.private_key_pkcs8_der,
+        SigningAlgorithm::EcP256Sha256,
+    )
+    .expect("prepare K1 issuer");
+
+    let k2_genuine = synthetic_genuine_leaf(&k1_cert);
+    let k2_genuine_der = k2_genuine.to_der().expect("K2 genuine DER");
+
+    let k2_rewritten = cleverestricky_certificate_core::rewrite_certificate_prepared(
+        &cleverestricky_certificate_core::PreparedCertificateRewriteRequest {
+            genuine_leaf_der: &k2_genuine_der,
+            issuer: &k1_prepared_issuer,
+            patch_levels: PatchLevels::default(),
+            id_overrides: &[],
+            module_hash: None,
+            verified_boot_key: &BOOT_KEY,
+            verified_boot_hash: &BOOT_HASH,
+            subject_public_key_info: None,
+        },
+    )
+    .expect("rewrite K2 child leaf");
+
+    let k2_cert = Certificate::from_der(&k2_rewritten.leaf_der).expect("K2 cert DER");
+    assert_eq!(
+        k2_cert.tbs_certificate().subject_public_key_info(),
+        k2_genuine.tbs_certificate().subject_public_key_info()
+    );
+    verify_signature(&k2_cert, &k1_cert, SigningAlgorithm::EcP256Sha256);
+}
+
+#[test]
 fn ec_issuer_resigns_rsa_subject_without_changing_subject_spki() {
     let ec_document = parse_keybox_xml_bytes(VALID_EC).expect("EC fixture XML");
     let ec_key = ec_document.keys.first().expect("EC fixture key");
@@ -72,6 +155,7 @@ fn ec_issuer_resigns_rsa_subject_without_changing_subject_spki() {
         module_hash: None,
         verified_boot_key: &BOOT_KEY,
         verified_boot_hash: &BOOT_HASH,
+        subject_public_key_info: None,
     })
     .expect("cross-algorithm Rust certificate rewrite");
     let output = Certificate::from_der(&rewritten.leaf_der).expect("rewritten certificate DER");
@@ -132,6 +216,7 @@ fn run_fixture(xml: &[u8], algorithm: SigningAlgorithm) {
         module_hash: Some(b"new-module-hash"),
         verified_boot_key: &BOOT_KEY,
         verified_boot_hash: &BOOT_HASH,
+        subject_public_key_info: None,
     })
     .expect("Rust certificate rewrite");
 
@@ -447,4 +532,28 @@ fn encode_sequence<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> Vec<u8> {
     }
     let any = attestation_der::asn1::Any::new(attestation_der::Tag::Sequence, value).unwrap();
     attestation_der::Encode::to_der(&any).unwrap()
+}
+
+#[test]
+fn is_ec_p256_certificate_distinguishes_ec_from_rsa() {
+    let ec_doc = parse_keybox_xml_bytes(VALID_EC).expect("EC fixture XML");
+    let ec_pem = ec_doc.keys[0].certificates_pem[0].clone();
+    let ec_cert = Certificate::from_pem(normalized_pem(&ec_pem).as_bytes()).unwrap();
+    let ec_der = ec_cert.to_der().unwrap();
+
+    let rsa_doc = parse_keybox_xml_bytes(VALID_RSA).expect("RSA fixture XML");
+    let rsa_pem = rsa_doc.keys[0].certificates_pem[0].clone();
+    let rsa_cert = Certificate::from_pem(normalized_pem(&rsa_pem).as_bytes()).unwrap();
+    let rsa_der = rsa_cert.to_der().unwrap();
+
+    assert_eq!(
+        cleverestricky_certificate_core::is_ec_p256_certificate(&ec_der),
+        Ok(true)
+    );
+    assert_eq!(
+        cleverestricky_certificate_core::is_ec_p256_certificate(&rsa_der),
+        Ok(false)
+    );
+    assert!(cleverestricky_certificate_core::is_ec_p256_certificate(&[]).is_err());
+    assert!(cleverestricky_certificate_core::is_ec_p256_certificate(&[1, 2, 3]).is_err());
 }
