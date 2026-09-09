@@ -57,12 +57,6 @@ internal object ManagedAttestKeyRegistry {
     }
 
     @Synchronized
-    fun forget(callingUid: Int, keyId: ByteArray?) {
-        if (!isValid(callingUid, keyId) || conservativeMode) return
-        entries.remove(Identity.lookup(callingUid, requireNotNull(keyId)))
-    }
-
-    @Synchronized
     fun isKnown(callingUid: Int, keyId: ByteArray?): Boolean {
         if (!isValid(callingUid, keyId)) return false
         return conservativeMode || entries.contains(Identity.lookup(callingUid, requireNotNull(keyId)))
