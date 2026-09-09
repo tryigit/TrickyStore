@@ -10,6 +10,18 @@ internal object ManagedAttestKeyRehydrator {
         callingUid: Int,
         keyId: ByteArray,
     ): Boolean {
+        KeyboxActivation.lockPublishedSnapshot()
+        return try {
+            restoreLocked(callingUid, keyId)
+        } finally {
+            KeyboxActivation.unlockPublishedSnapshot()
+        }
+    }
+
+    private fun restoreLocked(
+        callingUid: Int,
+        keyId: ByteArray,
+    ): Boolean {
         val path = ManagedAttestKeyRegistry.rehydrationPath(callingUid, keyId) ?: return false
         if (path.isEmpty()) return false
 
