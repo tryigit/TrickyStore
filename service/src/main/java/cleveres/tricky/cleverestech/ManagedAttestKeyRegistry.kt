@@ -62,7 +62,15 @@ internal object ManagedAttestKeyRegistry {
 
     @Synchronized
     fun remember(callingUid: Int, keyId: ByteArray?) {
-        remember(callingUid, keyId, null, null)
+        if (!isValid(callingUid, keyId)) return
+        val nonNullKeyId = requireNotNull(keyId)
+        val lookup = Identity.lookup(callingUid, nonNullKeyId)
+        val old = entries.remove(lookup)
+        if (old != null) retainedProofBytes -= old.proofBytes()
+        val stored = old ?: Entry(null, null)
+        entries[Identity.stored(callingUid, nonNullKeyId)] = stored
+        retainedProofBytes += stored.proofBytes()
+        trimLocked()
     }
 
     @Synchronized
@@ -82,9 +90,7 @@ internal object ManagedAttestKeyRegistry {
         val old = entries.remove(lookup)
         if (old != null) retainedProofBytes -= old.proofBytes()
 
-        val effectiveParent = parentKeyId ?: old?.parentKeyId
-        val effectiveLeaf = genuineLeafDer ?: old?.genuineLeafDer
-        val stored = Entry(effectiveParent, effectiveLeaf)
+        val stored = Entry(parentKeyId, genuineLeafDer ?: old?.genuineLeafDer)
         entries[Identity.stored(callingUid, nonNullKeyId)] = stored
         retainedProofBytes += stored.proofBytes()
         trimLocked()
