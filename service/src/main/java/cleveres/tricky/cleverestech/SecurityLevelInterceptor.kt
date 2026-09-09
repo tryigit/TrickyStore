@@ -173,6 +173,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 if (rewritten === originalLeafOnly) {
                     return Skip
                 }
+                if (context.isAttestKeyPurpose) {
+                    ManagedAttestKeyRegistry.remember(callingUid, context.generatedKeyId)
+                }
 
                 // hackCertificateChain publishes the completed rewrite bytes in its epoch-protected
                 // cache before returning. Reuse those exact bytes here instead of calling getEncoded()
@@ -253,6 +256,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 }
             if (rewritten === originalLeafOnly) {
                 return Skip
+            }
+            if (context.isAttestKeyPurpose) {
+                ManagedAttestKeyRegistry.remember(callingUid, context.generatedKeyId)
             }
 
             if (!CertHack.applyCachedCertificateChain(metadata)) {
