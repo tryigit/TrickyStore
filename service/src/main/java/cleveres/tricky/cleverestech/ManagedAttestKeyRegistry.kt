@@ -2,23 +2,22 @@ package cleveres.tricky.cleverestech
 
 import androidx.annotation.VisibleForTesting
 import java.util.Arrays
-import java.util.HashSet
+import java.util.LinkedHashMap
 
 /**
  * Process-local knowledge of descriptor identities that have successfully entered the managed
  * synthetic ATTEST_KEY graph. This survives a Rust-only backend restart while the Java service is
  * still alive, which lets getKeyEntry distinguish a stale managed cache hit from an ordinary key.
  *
- * This is eligibility metadata only; presence in the live Rust graph is always revalidated with
- * touchAttestKey before a cached managed parent is reused. The registry must never produce a false
- * negative while the process-local certificate cache may still contain a synthetic parent. Once the
- * bounded exact set fills, it therefore switches to conservative mode: valid descriptors are treated
- * as potentially managed. False positives only add a bounded graph touch; false negatives could
- * incorrectly reuse stale synthetic cache state after a Rust-only restart.
+ * This registry is exact eligibility metadata, not a heuristic. It is deliberately larger than the
+ * 64-entry certificate cache that can contain stale synthetic parents. Access ordering keeps entries
+ * that are actively read hot; evicting an older registry identity is safe once its corresponding
+ * certificate-cache entry has already been displaced. Never fall back to treating arbitrary
+ * descriptors as managed, because that could convert an unrelated EC P-256 ATTEST_KEY.
  */
 internal object ManagedAttestKeyRegistry {
     private const val KEY_ID_BYTES = 32
-    private const val MAX_EXACT_ENTRIES = 256
+    private const val MAX_ENTRIES = 256
 
     private class Identity private constructor(
         val uid: Int,
@@ -39,27 +38,22 @@ internal object ManagedAttestKeyRegistry {
         }
     }
 
-    private val entries = HashSet<Identity>(MAX_EXACT_ENTRIES)
-    private var conservativeMode = false
+    private val entries =
+        object : LinkedHashMap<Identity, Unit>(64, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Identity, Unit>?): Boolean =
+                size > MAX_ENTRIES
+        }
 
     @Synchronized
     fun remember(callingUid: Int, keyId: ByteArray?) {
-        if (!isValid(callingUid, keyId) || conservativeMode) return
-        val nonNullKeyId = requireNotNull(keyId)
-        val lookup = Identity.lookup(callingUid, nonNullKeyId)
-        if (entries.contains(lookup)) return
-        if (entries.size >= MAX_EXACT_ENTRIES) {
-            entries.clear()
-            conservativeMode = true
-            return
-        }
-        entries.add(Identity.stored(callingUid, nonNullKeyId))
+        if (!isValid(callingUid, keyId)) return
+        entries[Identity.stored(callingUid, requireNotNull(keyId))] = Unit
     }
 
     @Synchronized
     fun isKnown(callingUid: Int, keyId: ByteArray?): Boolean {
         if (!isValid(callingUid, keyId)) return false
-        return conservativeMode || entries.contains(Identity.lookup(callingUid, requireNotNull(keyId)))
+        return entries[Identity.lookup(callingUid, requireNotNull(keyId))] != null
     }
 
     private fun isValid(callingUid: Int, keyId: ByteArray?): Boolean =
@@ -72,6 +66,5 @@ internal object ManagedAttestKeyRegistry {
     @Synchronized
     internal fun resetForTesting() {
         entries.clear()
-        conservativeMode = false
     }
 }
