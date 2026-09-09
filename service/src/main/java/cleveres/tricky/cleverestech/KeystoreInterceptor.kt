@@ -257,6 +257,9 @@ object KeystoreInterceptor : BinderInterceptor() {
                     rewritten.takeUnless { it === chain }
                 }
             if (newChain != null) {
+                if (attestKeyId != null) {
+                    ManagedAttestKeyRegistry.remember(callingUid, attestKeyId)
+                }
                 if (!CertHack.applyCachedCertificateChain(metadata)) {
                     Utils.putCertificateChain(response, newChain)
                 }
@@ -264,9 +267,6 @@ object KeystoreInterceptor : BinderInterceptor() {
                 try {
                     p.writeNoException()
                     p.writeTypedObject(response, 0)
-                    if (attestKeyId != null) {
-                        ManagedAttestKeyRegistry.remember(callingUid, attestKeyId)
-                    }
                     return OverrideReply(0, p)
                 } catch (t: Throwable) {
                     p.recycle()

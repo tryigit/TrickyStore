@@ -173,6 +173,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 if (rewritten === originalLeafOnly) {
                     return Skip
                 }
+                if (context.isAttestKeyPurpose) {
+                    ManagedAttestKeyRegistry.remember(callingUid, context.generatedKeyId)
+                }
 
                 // hackCertificateChain publishes the completed rewrite bytes in its epoch-protected
                 // cache before returning. Reuse those exact bytes here instead of calling getEncoded()
@@ -182,9 +185,6 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                     CertHack.applyCachedCertificateChain(reply, parsed) ==
                         CertHack.CachedParcelAction.REWRITTEN
                 ) {
-                    if (context.isAttestKeyPurpose) {
-                        ManagedAttestKeyRegistry.remember(callingUid, context.generatedKeyId)
-                    }
                     return OverrideReply(code = 0, reply = reply)
                 }
 
@@ -192,9 +192,6 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 val newChain = if (!context.isDefaultAttestationKey) null else Utils.encodeIssuerChain(rewritten)
                 if (!Utils.rewriteKeyMetadataParcel(reply, parsed, newLeaf, newChain)) {
                     return Skip
-                }
-                if (context.isAttestKeyPurpose) {
-                    ManagedAttestKeyRegistry.remember(callingUid, context.generatedKeyId)
                 }
                 return OverrideReply(code = 0, reply = reply)
             }
@@ -260,6 +257,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             if (rewritten === originalLeafOnly) {
                 return Skip
             }
+            if (context.isAttestKeyPurpose) {
+                ManagedAttestKeyRegistry.remember(callingUid, context.generatedKeyId)
+            }
 
             if (!CertHack.applyCachedCertificateChain(metadata)) {
                 if (!context.isDefaultAttestationKey) {
@@ -273,9 +273,6 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             reply.setDataPosition(0)
             reply.writeNoException()
             reply.writeTypedObject(metadata, 0)
-            if (context.isAttestKeyPurpose) {
-                ManagedAttestKeyRegistry.remember(callingUid, context.generatedKeyId)
-            }
             OverrideReply(0, reply)
         } catch (_: Throwable) {
             Skip
