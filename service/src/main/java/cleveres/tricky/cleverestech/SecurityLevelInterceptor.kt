@@ -42,15 +42,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 return Skip
             }
 
-            // POST retains and reparses the bounded request. A real Binder request is non-empty;
-            // reject malformed payloads here instead of allowing POST to guess a child-key route.
-            // The empty-payload branch exists only for the lightweight Parcel mocks used by JVM
-            // contract tests, where dataSize() is not populated.
-            return if (
-                Utils.parseGenerateKeyRequest(data, callingUid) != null || data.dataSize() == 0
-            ) {
-                Continue
-            } else Skip
+            // POST retains and reparses the bounded request. Classification is deliberately deferred
+            // to POST so PRE remains compatible with platform Binder parcels and JVM contract mocks.
+            return Continue
         }
         return Skip
     }
@@ -122,8 +116,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         val parsedContext = Utils.parseGenerateKeyRequest(data, callingUid)
         val context = if (parsedContext != null) {
             parsedContext
-        } else if (data.dataSize() == 0) {
-            // Compatibility path for JVM Parcel mocks only; native POST payloads are never empty.
+        } else if (data.dataSize() == 0 || data.dataPosition() != 0) {
+            // Compatibility path for JVM Parcel mocks only. Native POST parcels are copied into a
+            // fresh Parcel at position zero, so malformed non-empty native payloads fail closed.
             Utils.GenerateKeyRequestInfo(
                 Utils.usesDefaultAttestationKey(data),
                 Utils.hasAttestKeyPurpose(data),
