@@ -10,6 +10,7 @@ pub type KeyId = [u8; 32];
 struct AttestKeyEntry {
     calling_uid: u32,
     key_id: KeyId,
+    #[allow(dead_code)]
     parent_key_id: Option<KeyId>,
     issuer: Arc<PreparedIssuer>,
 }
@@ -146,6 +147,7 @@ pub fn touch_attest_key(calling_uid: u32, key_id: &KeyId) -> bool {
     true
 }
 
+#[allow(dead_code)]
 pub fn remove_attest_key(calling_uid: u32, key_id: &KeyId) -> bool {
     let store = STORE.get_or_init(|| Mutex::new(AttestKeyStore::default()));
     let mut guard = match store.lock() {
@@ -356,7 +358,6 @@ mod tests {
         let child = [11u8; 32];
         let grandchild = [12u8; 32];
 
-        // Inserting child fails if parent is not present
         assert!(!insert_child_attest_key(
             1000,
             &parent,
@@ -365,7 +366,6 @@ mod tests {
         ));
         assert!(get_attest_key(1000, &child).is_none());
 
-        // Insert parent first, then child succeeds
         insert_attest_key(1000, parent, make_test_issuer(b"parent"));
         assert!(insert_child_attest_key(
             1000,
@@ -384,7 +384,6 @@ mod tests {
         assert!(get_attest_key(1000, &child).is_some());
         assert!(get_attest_key(1000, &grandchild).is_some());
 
-        // Removing parent cascades to child and grandchild
         assert!(remove_attest_key(1000, &parent));
         assert!(get_attest_key(1000, &parent).is_none());
         assert!(get_attest_key(1000, &child).is_none());
