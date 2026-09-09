@@ -42,9 +42,15 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 return Skip
             }
 
-            // POST retains and reparses the bounded request. PRE must still continue for valid
-            // platform parcels whose stable fields are not fully visible to the Java mock/parser.
-            return Continue
+            // POST retains and reparses the bounded request. A real Binder request is non-empty;
+            // reject malformed payloads here instead of allowing POST to guess a child-key route.
+            // The empty-payload branch exists only for the lightweight Parcel mocks used by JVM
+            // contract tests, where dataSize() is not populated.
+            return if (
+                Utils.parseGenerateKeyRequest(data, callingUid) != null || data.dataSize() == 0
+            ) {
+                Continue
+            } else Skip
         }
         return Skip
     }
@@ -111,17 +117,22 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             return Skip
         }
 
-        // POST may run on a different Binder worker than PRE. Re-parse the retained request and use
-        // the bounded prefix fallback only when a platform/mock parcel omits stable fields.
+        // POST may run on a different Binder worker than PRE. Re-parse the retained request and
+        // reject any non-empty payload that cannot be classified authoritatively.
         val parsedContext = Utils.parseGenerateKeyRequest(data, callingUid)
-        val context =
+        val context = if (parsedContext != null) {
             parsedContext
-                ?: Utils.GenerateKeyRequestInfo(
-                    Utils.usesDefaultAttestationKey(data),
-                    Utils.hasAttestKeyPurpose(data),
-                    null,
-                    null,
-                )
+        } else if (data.dataSize() == 0) {
+            // Compatibility path for JVM Parcel mocks only; native POST payloads are never empty.
+            Utils.GenerateKeyRequestInfo(
+                Utils.usesDefaultAttestationKey(data),
+                Utils.hasAttestKeyPurpose(data),
+                null,
+                null,
+            )
+        } else {
+            return Skip
+        }
 
         return try {
             reply.readException()
