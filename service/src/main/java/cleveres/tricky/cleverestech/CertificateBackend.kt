@@ -68,6 +68,9 @@ object CertificateBackend {
     internal var touchAttestKeyOverride: ((Int, ByteArray) -> AttestKeyTouchResult)? = null
 
     @VisibleForTesting
+    internal var removeAttestKeyOverride: ((Int, ByteArray) -> Boolean)? = null
+
+    @VisibleForTesting
     internal var rewriteTransportOverride: ((Int, (OutputStream) -> Unit) -> ByteArray?)? = null
 
     @JvmStatic
@@ -452,6 +455,29 @@ object CertificateBackend {
         }
     }
 
+    @JvmStatic
+    fun removeAttestKey(callingUid: Int, attestKeyId: ByteArray): Boolean {
+        if (callingUid < 0 ||
+            attestKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES ||
+            attestKeyId.all { it == 0.toByte() }
+        ) {
+            return false
+        }
+        removeAttestKeyOverride?.let { return it(callingUid, attestKeyId) }
+        val response =
+            NativeBackend.transact(
+                OP_ATTEST_KEY_REMOVE,
+                ATTEST_KEY_REMOVE_REQUEST_BYTES,
+                ATTEST_KEY_REMOVE_RESPONSE_BYTES,
+                propagateTransportFailure = false,
+            ) { output ->
+                output.write(REWRITE_WIRE_VERSION)
+                writeI32(output, callingUid)
+                output.write(attestKeyId)
+            } ?: return false
+        return response.size == ATTEST_KEY_REMOVE_RESPONSE_BYTES && response[0] == 1.toByte()
+    }
+
     fun interface AttestKeyTouchHandler {
         fun touch(callingUid: Int, keyId: ByteArray): AttestKeyTouchResult
     }
@@ -474,6 +500,12 @@ object CertificateBackend {
 
     @VisibleForTesting
     @JvmStatic
+    fun setRemoveAttestKeyOverrideForTesting(override: ((Int, ByteArray) -> Boolean)?) {
+        removeAttestKeyOverride = override
+    }
+
+    @VisibleForTesting
+    @JvmStatic
     fun resetForTesting() {
         inspectionOverride = null
         rewriteOverride = null
@@ -482,6 +514,7 @@ object CertificateBackend {
         rewriteChildKeyOverride = null
         clearAttestKeyStoreOverride = null
         touchAttestKeyOverride = null
+        removeAttestKeyOverride = null
     }
 
     internal fun decodeInspection(response: ByteArray): Inspection {
@@ -648,6 +681,7 @@ object CertificateBackend {
     private const val OP_CHILD_KEY_REWRITE = 33
     private const val OP_ATTEST_KEY_CLEAR = 34
     private const val OP_ATTEST_KEY_TOUCH = 35
+    private const val OP_ATTEST_KEY_REMOVE = 36
     private const val INSPECT_WIRE_VERSION = 2
     private const val REWRITE_WIRE_VERSION = 2
     private const val INSPECT_RESPONSE_BYTES = 85
@@ -655,6 +689,8 @@ object CertificateBackend {
     private const val ATTEST_KEY_CLEAR_RESPONSE_BYTES = 1
     private const val ATTEST_KEY_TOUCH_REQUEST_BYTES = 37
     private const val ATTEST_KEY_TOUCH_RESPONSE_BYTES = 1
+    private const val ATTEST_KEY_REMOVE_REQUEST_BYTES = 37
+    private const val ATTEST_KEY_REMOVE_RESPONSE_BYTES = 1
     private const val FLAG_MODULE_HASH_SUPPORTED = 1
     private const val FLAG_BOOT_KEY_PRESENT = 1 shl 1
     private const val FLAG_BOOT_HASH_PRESENT = 1 shl 2

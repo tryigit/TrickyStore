@@ -238,11 +238,14 @@ pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'s
         .map_err(|_| "child certificate rewrite rejected")?;
 
         if let Some(prepared) = prepared_for_children {
-            attest_key_store::insert_attest_key(
+            if !attest_key_store::insert_child_attest_key(
                 parsed.calling_uid,
+                &parsed.parent_key_id,
                 parsed.child_key_id,
                 std::sync::Arc::new(prepared),
-            );
+            ) {
+                return Err("attest parent was revoked during child key rewrite");
+            }
         }
 
         Ok(rewritten)

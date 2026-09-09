@@ -24,6 +24,25 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 public class AttestationRequestContractTest {
+    @org.junit.Before
+    @org.junit.After
+    public void resetTestState() {
+        cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+        CertHack.resetGraphHealthForTesting();
+        try {
+            Field stateField = CertHack.class.getDeclaredField("state");
+            stateField.setAccessible(true);
+            Object state = stateField.get(null);
+            Field cacheField = state.getClass().getDeclaredField("certificateCache");
+            cacheField.setAccessible(true);
+            Map<?, ?> cache = (Map<?, ?>) cacheField.get(state);
+            synchronized (cache) {
+                cache.clear();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     @Test
     public void onlyExplicitNullAttestationKeyPermitsGenericRewrite() {
         Parcel request = request(false);
@@ -340,6 +359,7 @@ public class AttestationRequestContractTest {
         Object grandchildKey = keyConstructor.newInstance((Object) new byte[] {3, 3, 3});
         Object grandchildValue = valueConstructor.newInstance(mockChain, new byte[] {3}, new byte[] {4}, true, false, uid, null, intermediateKeyId);
 
+        cleveres.tricky.cleverestech.CertificateBackend.setClearAttestKeyStoreOverrideForTesting(() -> true);
         try {
             synchronized (cache) {
                 cache.put(rootKey, rootValue);
@@ -369,6 +389,116 @@ public class AttestationRequestContractTest {
             synchronized (cache) {
                 cache.clear();
             }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void javaLruEvictionOfAttestKeyNotifiesBackendRemove() throws Exception {
+        Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object state = stateField.get(null);
+        Field cacheField = state.getClass().getDeclaredField("certificateCache");
+        cacheField.setAccessible(true);
+        Map<Object, Object> cache = (Map<Object, Object>) cacheField.get(state);
+
+        Constructor<?> keyConstructor = Class.forName(CertHack.class.getName() + "$CacheKey")
+                .getDeclaredConstructor(byte[].class);
+        keyConstructor.setAccessible(true);
+        Constructor<?> valueConstructor = Class.forName(CertHack.class.getName() + "$CachedCertificateChain")
+                .getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class, boolean.class, int.class, byte[].class, byte[].class);
+        valueConstructor.setAccessible(true);
+
+        int uid = 10005;
+        byte[] attestKeyId = new byte[32];
+        attestKeyId[0] = 77;
+
+        java.util.concurrent.atomic.AtomicInteger removeCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicInteger removedUid = new java.util.concurrent.atomic.AtomicInteger(-1);
+        java.util.concurrent.atomic.AtomicReference<byte[]> removedKeyId = new java.util.concurrent.atomic.AtomicReference<>();
+
+        cleveres.tricky.cleverestech.CertificateBackend.setRemoveAttestKeyOverrideForTesting((u, id) -> {
+            removeCount.incrementAndGet();
+            removedUid.set(u);
+            removedKeyId.set(id.clone());
+            return true;
+        });
+
+        try {
+            // 1. Explicit removal triggers backend removeAttestKey
+            Object attestKey = keyConstructor.newInstance((Object) new byte[] {1, 2, 3});
+            Object attestVal = valueConstructor.newInstance(null, new byte[] {1, 2, 3}, null, true, false, uid, attestKeyId, null);
+            cache.put(attestKey, attestVal);
+
+            assertEquals(0, removeCount.get());
+            cache.remove(attestKey);
+            assertEquals(1, removeCount.get());
+            assertEquals(uid, removedUid.get());
+            assertArrayEquals(attestKeyId, removedKeyId.get());
+
+            // 2. LRU overflow (eviction > 64 entries) triggers backend removeAttestKey
+            removeCount.set(0);
+            cache.put(attestKey, attestVal);
+
+            for (int i = 0; i < 65; i++) {
+                byte[] leaf = new byte[] {(byte) (i / 256), (byte) (i % 256), 9};
+                Object fillerKey = keyConstructor.newInstance((Object) leaf);
+                Object fillerVal = valueConstructor.newInstance(null, leaf, null, true, false, uid, null, null);
+                cache.put(fillerKey, fillerVal);
+            }
+
+            assertFalse(cache.containsKey(attestKey));
+            assertTrue(removeCount.get() >= 1);
+            assertEquals(uid, removedUid.get());
+            assertArrayEquals(attestKeyId, removedKeyId.get());
+        } finally {
+            cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            synchronized (cache) {
+                cache.clear();
+            }
+        }
+    }
+
+    @Test
+    public void clearCertificateCacheGuardsPublicationLock() throws Exception {
+        java.util.concurrent.atomic.AtomicBoolean lockHeld = new java.util.concurrent.atomic.AtomicBoolean(false);
+        java.util.concurrent.atomic.AtomicBoolean clearFinished = new java.util.concurrent.atomic.AtomicBoolean(false);
+        java.util.concurrent.CountDownLatch latchStarted = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch latchProceed = new java.util.concurrent.CountDownLatch(1);
+
+        Thread holder = new Thread(() -> {
+            cleveres.tricky.cleverestech.KeyboxActivation.lockPublishedSnapshot();
+            try {
+                lockHeld.set(true);
+                latchStarted.countDown();
+                latchProceed.await();
+            } catch (InterruptedException ignored) {
+            } finally {
+                cleveres.tricky.cleverestech.KeyboxActivation.unlockPublishedSnapshot();
+            }
+        });
+        holder.start();
+
+        try {
+            assertTrue(latchStarted.await(5, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(lockHeld.get());
+
+            Thread clearer = new Thread(() -> {
+                CertHack.clearCertificateCache();
+                clearFinished.set(true);
+            });
+            clearer.start();
+
+            Thread.sleep(150);
+            assertFalse(clearFinished.get());
+
+            latchProceed.countDown();
+            clearer.join(5000);
+            holder.join(5000);
+
+            assertTrue(clearFinished.get());
+        } finally {
+            latchProceed.countDown();
         }
     }
 

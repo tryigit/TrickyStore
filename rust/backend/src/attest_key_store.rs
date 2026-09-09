@@ -10,6 +10,7 @@ pub type KeyId = [u8; 32];
 struct AttestKeyEntry {
     calling_uid: u32,
     key_id: KeyId,
+    parent_key_id: Option<KeyId>,
     issuer: Arc<PreparedIssuer>,
 }
 
@@ -59,8 +60,50 @@ pub fn insert_attest_key(calling_uid: u32, key_id: KeyId, issuer: Arc<PreparedIs
     guard.entries.push_back(AttestKeyEntry {
         calling_uid,
         key_id,
+        parent_key_id: None,
         issuer,
     });
+}
+
+pub fn insert_child_attest_key(
+    calling_uid: u32,
+    parent_key_id: &KeyId,
+    child_key_id: KeyId,
+    issuer: Arc<PreparedIssuer>,
+) -> bool {
+    let store = STORE.get_or_init(|| Mutex::new(AttestKeyStore::default()));
+    let mut guard = match store.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    if !guard
+        .entries
+        .iter()
+        .any(|e| e.calling_uid == calling_uid && &e.key_id == parent_key_id)
+    {
+        return false;
+    }
+
+    if let Some(pos) = guard
+        .entries
+        .iter()
+        .position(|e| e.calling_uid == calling_uid && e.key_id == child_key_id)
+    {
+        guard.entries.remove(pos);
+    }
+
+    if guard.entries.len() >= MAX_ATTEST_KEYS {
+        guard.entries.pop_front();
+    }
+
+    guard.entries.push_back(AttestKeyEntry {
+        calling_uid,
+        key_id: child_key_id,
+        parent_key_id: Some(*parent_key_id),
+        issuer,
+    });
+    true
 }
 
 pub fn get_attest_key(calling_uid: u32, key_id: &KeyId) -> Option<Arc<PreparedIssuer>> {
@@ -101,6 +144,37 @@ pub fn touch_attest_key(calling_uid: u32, key_id: &KeyId) -> bool {
     let entry = guard.entries.remove(pos).expect("entry exists");
     guard.entries.push_back(entry);
     true
+}
+
+pub fn remove_attest_key(calling_uid: u32, key_id: &KeyId) -> bool {
+    let store = STORE.get_or_init(|| Mutex::new(AttestKeyStore::default()));
+    let mut guard = match store.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let mut to_remove = vec![*key_id];
+    let mut any_removed = false;
+    while let Some(target) = to_remove.pop() {
+        if let Some(pos) = guard
+            .entries
+            .iter()
+            .position(|entry| entry.calling_uid == calling_uid && entry.key_id == target)
+        {
+            guard.entries.remove(pos);
+            any_removed = true;
+        }
+        let children: Vec<KeyId> = guard
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.calling_uid == calling_uid && entry.parent_key_id.as_ref() == Some(&target)
+            })
+            .map(|entry| entry.key_id)
+            .collect();
+        to_remove.extend(children);
+    }
+    any_removed
 }
 
 #[cfg(test)]
@@ -256,5 +330,64 @@ mod tests {
         id1[0] = 1;
         assert!(get_attest_key(1000, &id1).is_none());
         assert!(get_attest_key(1000, &id64).is_some());
+    }
+
+    #[test]
+    fn remove_attest_key_revokes_only_the_selected_entry() {
+        let _sequence = isolate_store_sequence();
+        reset_for_testing();
+        let first = [1u8; 32];
+        let second = [2u8; 32];
+        insert_attest_key(1000, first, make_test_issuer(b"first"));
+        insert_attest_key(1000, second, make_test_issuer(b"second"));
+
+        assert!(remove_attest_key(1000, &first));
+        assert!(!remove_attest_key(1000, &first));
+        assert!(get_attest_key(1000, &first).is_none());
+        assert!(get_attest_key(1000, &second).is_some());
+        assert!(!remove_attest_key(1001, &second));
+    }
+
+    #[test]
+    fn insert_child_attest_key_requires_parent_and_cascades_removal() {
+        let _sequence = isolate_store_sequence();
+        reset_for_testing();
+        let parent = [10u8; 32];
+        let child = [11u8; 32];
+        let grandchild = [12u8; 32];
+
+        // Inserting child fails if parent is not present
+        assert!(!insert_child_attest_key(
+            1000,
+            &parent,
+            child,
+            make_test_issuer(b"child")
+        ));
+        assert!(get_attest_key(1000, &child).is_none());
+
+        // Insert parent first, then child succeeds
+        insert_attest_key(1000, parent, make_test_issuer(b"parent"));
+        assert!(insert_child_attest_key(
+            1000,
+            &parent,
+            child,
+            make_test_issuer(b"child")
+        ));
+        assert!(insert_child_attest_key(
+            1000,
+            &child,
+            grandchild,
+            make_test_issuer(b"grandchild")
+        ));
+
+        assert!(get_attest_key(1000, &parent).is_some());
+        assert!(get_attest_key(1000, &child).is_some());
+        assert!(get_attest_key(1000, &grandchild).is_some());
+
+        // Removing parent cascades to child and grandchild
+        assert!(remove_attest_key(1000, &parent));
+        assert!(get_attest_key(1000, &parent).is_none());
+        assert!(get_attest_key(1000, &child).is_none());
+        assert!(get_attest_key(1000, &grandchild).is_none());
     }
 }

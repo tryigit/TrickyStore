@@ -96,8 +96,8 @@ internal object KeyboxActivation {
         }
 
     /**
-     * Java-facing guard for a fresh certificate rewrite that consumes managed + Rust key state.
-     * Cache-hit certificate reads do not need this mutex because they no longer consume Rust keys.
+     * Java-facing guard for certificate rewrites and cache/store lifecycle mutations.
+     * Serializes backend key registration, child key rewriting, and certificate cache clears.
      */
     @JvmStatic
     fun lockPublishedSnapshot() {

@@ -4,6 +4,8 @@ import android.os.Parcel;
 import android.security.keystore.KeyProperties;
 import android.system.keystore2.KeyMetadata;
 
+import androidx.annotation.VisibleForTesting;
+
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.security.KeyPair;
@@ -441,17 +443,33 @@ public final class CertHack {
             }
 
             @Override
-            public synchronized CachedCertificateChain put(CacheKey key, CachedCertificateChain value) {
-                CachedCertificateChain old = super.put(key, value);
-                if (old != null) {
-                    retainedBytes -= old.retainedBytes();
-                } else if (key != null) {
-                    retainedBytes += key.retainedBytes();
+            public CachedCertificateChain put(CacheKey key, CachedCertificateChain value) {
+                CachedCertificateChain old;
+                List<AttestKeyDescriptor> evicted = null;
+                synchronized (this) {
+                    old = super.put(key, value);
+                    if (old != null) {
+                        retainedBytes -= old.retainedBytes();
+                    } else if (key != null) {
+                        retainedBytes += key.retainedBytes();
+                    }
+                    if (value != null) {
+                        retainedBytes += value.retainedBytes();
+                    }
+                    evicted = trimLocked();
+                    if (old != null && old.attestKeyId != null
+                            && (value == null || !Arrays.equals(old.attestKeyId, value.attestKeyId))) {
+                        if (evicted == null) {
+                            evicted = new ArrayList<>(1);
+                        }
+                        evicted.add(new AttestKeyDescriptor(old.attestKeyCallingUid, old.attestKeyId));
+                    }
                 }
-                if (value != null) {
-                    retainedBytes += value.retainedBytes();
+                if (evicted != null) {
+                    for (AttestKeyDescriptor desc : evicted) {
+                        CertificateBackend.removeAttestKey(desc.callingUid, desc.keyId);
+                    }
                 }
-                trimLocked();
                 return old;
             }
 
@@ -459,23 +477,28 @@ public final class CertHack {
             public synchronized CachedCertificateChain putIfAbsent(CacheKey key, CachedCertificateChain value) {
                 CachedCertificateChain existing = super.get(key);
                 if (existing == null) {
-                    put(key, value);
-                    return null;
+                    return put(key, value);
                 }
                 return existing;
             }
 
             @Override
-            public synchronized CachedCertificateChain remove(Object key) {
-                CachedCertificateChain old = super.remove(key);
-                if (old != null) {
-                    if (key instanceof CacheKey cacheKey) {
-                        retainedBytes -= cacheKey.retainedBytes();
+            public CachedCertificateChain remove(Object key) {
+                CachedCertificateChain old;
+                synchronized (this) {
+                    old = super.remove(key);
+                    if (old != null) {
+                        if (key instanceof CacheKey cacheKey) {
+                            retainedBytes -= cacheKey.retainedBytes();
+                        }
+                        retainedBytes -= old.retainedBytes();
+                        if (retainedBytes < 0) {
+                            retainedBytes = 0;
+                        }
                     }
-                    retainedBytes -= old.retainedBytes();
-                    if (retainedBytes < 0) {
-                        retainedBytes = 0;
-                    }
+                }
+                if (old != null && old.attestKeyId != null) {
+                    CertificateBackend.removeAttestKey(old.attestKeyCallingUid, old.attestKeyId);
                 }
                 return old;
             }
@@ -495,7 +518,8 @@ public final class CertHack {
                 return retainedBytes;
             }
 
-            private void trimLocked() {
+            private List<AttestKeyDescriptor> trimLocked() {
+                List<AttestKeyDescriptor> evicted = null;
                 Iterator<Map.Entry<CacheKey, CachedCertificateChain>> it = entrySet().iterator();
                 while (it.hasNext() && (size() > MAX_CERTIFICATE_CACHE_ENTRIES
                         || retainedBytes > MAX_CERTIFICATE_CACHE_RETAINED_BYTES)) {
@@ -504,7 +528,25 @@ public final class CertHack {
                     if (retainedBytes < 0) {
                         retainedBytes = 0;
                     }
+                    CachedCertificateChain val = entry.getValue();
+                    if (val != null && val.attestKeyId != null) {
+                        if (evicted == null) {
+                            evicted = new ArrayList<>();
+                        }
+                        evicted.add(new AttestKeyDescriptor(val.attestKeyCallingUid, val.attestKeyId));
+                    }
                     it.remove();
+                }
+                return evicted;
+            }
+
+            static final class AttestKeyDescriptor {
+                final int callingUid;
+                final byte[] keyId;
+
+                AttestKeyDescriptor(int callingUid, byte[] keyId) {
+                    this.callingUid = callingUid;
+                    this.keyId = keyId != null ? keyId.clone() : null;
                 }
             }
         }
@@ -822,21 +864,47 @@ public final class CertHack {
     private static volatile boolean graphStateUnhealthy = false;
 
     public static boolean clearCertificateCache() {
-        State currentState = state;
-        boolean backendCleared = CertificateBackend.clearAttestKeyStore();
-        if (!backendCleared) {
-            backendCleared = CertificateBackend.clearAttestKeyStore();
+        KeyboxActivation.lockPublishedSnapshot();
+        try {
+            State currentState = state;
+            boolean backendCleared = CertificateBackend.clearAttestKeyStore();
+            if (!backendCleared) {
+                backendCleared = CertificateBackend.clearAttestKeyStore();
+            }
+            if (backendCleared) {
+                graphStateUnhealthy = false;
+            } else {
+                graphStateUnhealthy = true;
+            }
+            synchronized (currentState.certificateCache) {
+                currentState.certificateCacheEpoch = new Object();
+                currentState.certificateCache.clear();
+            }
+            return backendCleared;
+        } finally {
+            KeyboxActivation.unlockPublishedSnapshot();
         }
-        if (backendCleared) {
-            graphStateUnhealthy = false;
-        } else {
-            graphStateUnhealthy = true;
+    }
+
+    private static void evictDescendants(State.CertificateCache cache, byte[] parentKeyId) {
+        if (cache == null || parentKeyId == null) return;
+        List<CacheKey> keysToRemove = null;
+        synchronized (cache) {
+            for (Map.Entry<CacheKey, CachedCertificateChain> entry : cache.entrySet()) {
+                CachedCertificateChain entryValue = entry.getValue();
+                if (entryValue != null && entryValue.parentKeyId != null && Arrays.equals(entryValue.parentKeyId, parentKeyId)) {
+                    if (keysToRemove == null) {
+                        keysToRemove = new ArrayList<>();
+                    }
+                    keysToRemove.add(entry.getKey());
+                }
+            }
         }
-        synchronized (currentState.certificateCache) {
-            currentState.certificateCacheEpoch = new Object();
-            currentState.certificateCache.clear();
+        if (keysToRemove != null) {
+            for (CacheKey k : keysToRemove) {
+                cache.remove(k);
+            }
         }
-        return backendCleared;
     }
 
     @VisibleForTesting
@@ -1438,6 +1506,10 @@ public final class CertHack {
                 }
             }
 
+            if (isAttestKey && childKeyId != null) {
+                evictDescendants(cache, childKeyId);
+            }
+
             if (!Utils.hasAndroidAttestationExtension(caList[0])) return caList;
 
             childInspection = CertificateBackend.inspect(leafEncoded);
@@ -1501,26 +1573,6 @@ public final class CertHack {
             }
             if (isAttestKey && (childKeyId == null || childKeyId.length != 32)) {
                 return caList;
-            }
-
-            if (isAttestKey && childKeyId != null) {
-                synchronized (cache) {
-                    List<CacheKey> keysToRemove = null;
-                    for (Map.Entry<CacheKey, CachedCertificateChain> entry : cache.entrySet()) {
-                        CachedCertificateChain entryValue = entry.getValue();
-                        if (entryValue != null && entryValue.parentKeyId != null && Arrays.equals(entryValue.parentKeyId, childKeyId)) {
-                            if (keysToRemove == null) {
-                                keysToRemove = new ArrayList<>();
-                            }
-                            keysToRemove.add(entry.getKey());
-                        }
-                    }
-                    if (keysToRemove != null) {
-                        for (CacheKey k : keysToRemove) {
-                            cache.remove(k);
-                        }
-                    }
-                }
             }
 
             byte[] rewrittenDer = CertificateBackend.rewriteChildKey(

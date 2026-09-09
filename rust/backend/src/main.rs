@@ -69,6 +69,9 @@ const ATTEST_KEY_CLEAR_RESPONSE_BYTES: usize = 1;
 const OP_ATTEST_KEY_TOUCH: u16 = 35;
 const ATTEST_KEY_TOUCH_REQUEST_BYTES: usize = 37;
 const ATTEST_KEY_TOUCH_RESPONSE_BYTES: usize = 1;
+const OP_ATTEST_KEY_REMOVE: u16 = 36;
+const ATTEST_KEY_REMOVE_REQUEST_BYTES: usize = 37;
+const ATTEST_KEY_REMOVE_RESPONSE_BYTES: usize = 1;
 const SCOPE_CONFIG_ROOT: u8 = 0;
 const SCOPE_KEYBOX_DIRECTORY: u8 = 1;
 
@@ -381,6 +384,7 @@ fn opcode_request_limit(opcode: u16) -> Option<usize> {
         OP_CHILD_KEY_REWRITE => Some(certificate_wire::MAX_CHILD_KEY_REWRITE_REQUEST_BYTES),
         OP_ATTEST_KEY_CLEAR => Some(ATTEST_KEY_CLEAR_REQUEST_BYTES),
         OP_ATTEST_KEY_TOUCH => Some(ATTEST_KEY_TOUCH_REQUEST_BYTES),
+        OP_ATTEST_KEY_REMOVE => Some(ATTEST_KEY_REMOVE_REQUEST_BYTES),
         OP_CRL_CHECK_BATCH => Some(crl_wire::MAX_REQUEST_BYTES),
         backend_instance::OP_BACKEND_PING => Some(backend_instance::REQUEST_BYTES),
         _ => None,
@@ -399,6 +403,7 @@ fn opcode_response_limit(opcode: u16) -> Option<usize> {
         }
         OP_ATTEST_KEY_CLEAR => Some(ATTEST_KEY_CLEAR_RESPONSE_BYTES),
         OP_ATTEST_KEY_TOUCH => Some(ATTEST_KEY_TOUCH_RESPONSE_BYTES),
+        OP_ATTEST_KEY_REMOVE => Some(ATTEST_KEY_REMOVE_RESPONSE_BYTES),
         OP_CRL_CHECK_BATCH => Some(crl_wire::MAX_RESPONSE_BYTES),
         backend_instance::OP_BACKEND_PING => Some(backend_instance::RESPONSE_BYTES),
         _ => None,
@@ -503,6 +508,17 @@ fn handle_request(opcode: u16, mut request: Vec<u8>) -> Result<Vec<u8>, &'static
             let key_id: [u8; 32] = request[5..37].try_into().unwrap();
             let touched = attest_key_store::touch_attest_key(calling_uid, &key_id);
             Ok(vec![if touched { 1 } else { 0 }])
+        }
+        OP_ATTEST_KEY_REMOVE => {
+            if request.len() != ATTEST_KEY_REMOVE_REQUEST_BYTES
+                || request[0] != certificate_wire::REWRITE_WIRE_VERSION
+            {
+                return Err("invalid attest key remove request");
+            }
+            let calling_uid = u32::from_be_bytes(request[1..5].try_into().unwrap());
+            let key_id: [u8; 32] = request[5..37].try_into().unwrap();
+            let removed = attest_key_store::remove_attest_key(calling_uid, &key_id);
+            Ok(vec![if removed { 1 } else { 0 }])
         }
         OP_CRL_CHECK_BATCH => crl_wire::handle(request),
         backend_instance::OP_BACKEND_PING => backend_instance::handle(request),
