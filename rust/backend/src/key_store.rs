@@ -450,8 +450,14 @@ mod tests {
         let different_level = derive_attest_keypair(10_123, 2, &descriptor).unwrap();
         let different_descriptor = derive_attest_keypair(10_123, 1, &[0x6b; 32]).unwrap();
         assert_ne!(first.public_key_spki_der, different_uid.public_key_spki_der);
-        assert_ne!(first.public_key_spki_der, different_level.public_key_spki_der);
-        assert_ne!(first.public_key_spki_der, different_descriptor.public_key_spki_der);
+        assert_ne!(
+            first.public_key_spki_der,
+            different_level.public_key_spki_der
+        );
+        assert_ne!(
+            first.public_key_spki_der,
+            different_descriptor.public_key_spki_der
+        );
 
         reset_for_testing();
         let document = parse_keybox_xml_bytes(VALID_EC).unwrap();
