@@ -160,32 +160,41 @@ public class AttestationRequestContractTest {
                 .getDeclaredConstructor(byte[].class);
         keyConstructor.setAccessible(true);
         Constructor<?> valueConstructor = Class.forName(CertHack.class.getName() + "$CachedCertificateChain")
-                .getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class, boolean.class, int.class, byte[].class);
+                .getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class, boolean.class, int.class, byte[].class, byte[].class);
         valueConstructor.setAccessible(true);
 
         byte[] leaf = new byte[] {10, 20, 30};
         byte[] attestKeyId = new byte[32];
         attestKeyId[0] = 7;
+        byte[] parentKeyId = new byte[32];
+        parentKeyId[0] = 3;
         int uid = 10001;
+
+        Certificate replacementCert = mock(Certificate.class);
+        Certificate[] replacementChain = new Certificate[] {replacementCert};
+        Certificate leafCert = mock(Certificate.class);
+        when(leafCert.getEncoded()).thenReturn(leaf);
+        Certificate[] caList = new Certificate[] {leafCert};
 
         Object key = keyConstructor.newInstance((Object) leaf.clone());
         Object value = valueConstructor.newInstance(
-                new Certificate[0],
+                replacementChain,
                 new byte[] {40, 50},
                 new byte[] {60, 70},
                 true,
                 true,
                 uid,
-                attestKeyId
+                attestKeyId,
+                null
         );
 
         java.util.concurrent.atomic.AtomicInteger touchCount = new java.util.concurrent.atomic.AtomicInteger();
-        java.util.concurrent.atomic.AtomicBoolean touchResult = new java.util.concurrent.atomic.AtomicBoolean(true);
+        java.util.concurrent.atomic.AtomicReference<cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult> touchResult =
+                new java.util.concurrent.atomic.AtomicReference<>(cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.PRESENT);
 
         cleveres.tricky.cleverestech.CertificateBackend.setTouchAttestKeyOverrideForTesting((callingUid, keyId) -> {
             touchCount.incrementAndGet();
             assertEquals(uid, callingUid);
-            assertArrayEquals(attestKeyId, keyId);
             return touchResult.get();
         });
 
@@ -194,34 +203,62 @@ public class AttestationRequestContractTest {
                 cache.put(key, value);
             }
 
-            KeyMetadata metadata = new KeyMetadata();
-            metadata.certificate = leaf.clone();
-            metadata.certificateChain = new byte[] {99};
-
-            // Hit with valid backend touch -> returns true, keeps in cache
-            assertTrue(CertHack.applyCachedCertificateChain(metadata));
+            // 1. Hit with PRESENT touch -> returns replacement chain, keeps in cache
+            Certificate[] result = CertHack.hackAttestKeyCertificateChain(caList, uid, true, attestKeyId);
             assertEquals(1, touchCount.get());
-            assertArrayEquals(new byte[] {40, 50}, metadata.certificate);
+            assertSame(replacementCert, result[0]);
             synchronized (cache) {
                 assertTrue(cache.containsKey(key));
             }
 
-            // Backend evicted the key (touch returns false) -> invalidates from cache, returns false
-            touchResult.set(false);
-            metadata.certificate = leaf.clone();
-            assertFalse(CertHack.applyCachedCertificateChain(metadata));
+            // 2. Hit with UNAVAILABLE (transport failure) -> preserves cache, still returns replacement
+            touchResult.set(cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.UNAVAILABLE);
+            result = CertHack.hackAttestKeyCertificateChain(caList, uid, true, attestKeyId);
             assertEquals(2, touchCount.get());
+            assertSame(replacementCert, result[0]);
+            synchronized (cache) {
+                assertTrue(cache.containsKey(key));
+            }
+
+            // 3. Hit with ABSENT (backend evicted key) -> authoritatively purges graph, returns caList
+            touchResult.set(cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.ABSENT);
+            result = CertHack.hackAttestKeyCertificateChain(caList, uid, true, attestKeyId);
+            assertEquals(3, touchCount.get());
+            assertSame(leafCert, result[0]);
             synchronized (cache) {
                 assertFalse(cache.containsKey(key));
             }
 
-            // Next attempt should miss cache directly without calling touch again
-            assertFalse(CertHack.applyCachedCertificateChain(metadata));
-            assertEquals(2, touchCount.get());
+            // 4. Child key with parentKeyId: if parent is ABSENT, child also authoritatively purges graph
+            byte[] childLeaf = new byte[] {11, 22, 33};
+            Certificate childLeafCert = mock(Certificate.class);
+            when(childLeafCert.getEncoded()).thenReturn(childLeaf);
+            Certificate[] childCaList = new Certificate[] {childLeafCert};
+            Object childKey = keyConstructor.newInstance((Object) childLeaf.clone());
+            Object childValue = valueConstructor.newInstance(
+                    replacementChain,
+                    new byte[] {41, 51},
+                    new byte[] {61, 71},
+                    true,
+                    false,
+                    uid,
+                    null,
+                    parentKeyId
+            );
+            synchronized (cache) {
+                cache.put(childKey, childValue);
+            }
+
+            touchResult.set(cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.ABSENT);
+            result = CertHack.hackChildKeyCertificate(childCaList, uid, false, true, parentKeyId, null);
+            assertSame(childLeafCert, result[0]);
+            synchronized (cache) {
+                assertFalse(cache.containsKey(childKey));
+            }
         } finally {
             cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
             synchronized (cache) {
-                cache.remove(key);
+                cache.clear();
             }
         }
     }

@@ -65,7 +65,7 @@ object CertificateBackend {
     internal var clearAttestKeyStoreOverride: (() -> Boolean)? = null
 
     @VisibleForTesting
-    internal var touchAttestKeyOverride: ((Int, ByteArray) -> Boolean)? = null
+    internal var touchAttestKeyOverride: ((Int, ByteArray) -> AttestKeyTouchResult)? = null
 
     @VisibleForTesting
     internal var rewriteTransportOverride: ((Int, (OutputStream) -> Unit) -> ByteArray?)? = null
@@ -414,10 +414,16 @@ object CertificateBackend {
         return response.size == ATTEST_KEY_CLEAR_RESPONSE_BYTES && response[0] == 0.toByte()
     }
 
+    enum class AttestKeyTouchResult {
+        PRESENT,
+        ABSENT,
+        UNAVAILABLE,
+    }
+
     @JvmStatic
-    fun touchAttestKey(callingUid: Int, attestKeyId: ByteArray): Boolean {
+    fun touchAttestKey(callingUid: Int, attestKeyId: ByteArray): AttestKeyTouchResult {
         if (callingUid < 0 || attestKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES || attestKeyId.all { it == 0.toByte() }) {
-            return false
+            return AttestKeyTouchResult.ABSENT
         }
         touchAttestKeyOverride?.let { return it(callingUid, attestKeyId) }
         val response =
@@ -430,12 +436,19 @@ object CertificateBackend {
                 output.write(REWRITE_WIRE_VERSION)
                 writeI32(output, callingUid)
                 output.write(attestKeyId)
-            } ?: return false
-        return response.size == ATTEST_KEY_TOUCH_RESPONSE_BYTES && response[0] == 1.toByte()
+            } ?: return AttestKeyTouchResult.UNAVAILABLE
+        if (response.size != ATTEST_KEY_TOUCH_RESPONSE_BYTES) {
+            return AttestKeyTouchResult.UNAVAILABLE
+        }
+        return if (response[0] == 1.toByte()) {
+            AttestKeyTouchResult.PRESENT
+        } else {
+            AttestKeyTouchResult.ABSENT
+        }
     }
 
     fun interface AttestKeyTouchHandler {
-        fun touch(callingUid: Int, keyId: ByteArray): Boolean
+        fun touch(callingUid: Int, keyId: ByteArray): AttestKeyTouchResult
     }
 
     @VisibleForTesting

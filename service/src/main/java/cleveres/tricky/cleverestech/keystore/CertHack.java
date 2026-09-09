@@ -119,6 +119,7 @@ public final class CertHack {
         final boolean accountIssuerChainBytes;
         final int attestKeyCallingUid;
         final byte[] attestKeyId;
+        final byte[] parentKeyId;
 
         CachedCertificateChain(
                 Certificate[] certificates,
@@ -126,7 +127,7 @@ public final class CertHack {
                 byte[] issuerChainEncoded,
                 boolean leafOnlySafe
         ) {
-            this(certificates, leafEncoded, issuerChainEncoded, leafOnlySafe, false, 0, null);
+            this(certificates, leafEncoded, issuerChainEncoded, leafOnlySafe, false, 0, null, null);
         }
 
         CachedCertificateChain(
@@ -136,7 +137,7 @@ public final class CertHack {
                 boolean leafOnlySafe,
                 boolean accountIssuerChainBytes
         ) {
-            this(certificates, leafEncoded, issuerChainEncoded, leafOnlySafe, accountIssuerChainBytes, 0, null);
+            this(certificates, leafEncoded, issuerChainEncoded, leafOnlySafe, accountIssuerChainBytes, 0, null, null);
         }
 
         CachedCertificateChain(
@@ -148,6 +149,19 @@ public final class CertHack {
                 int attestKeyCallingUid,
                 byte[] attestKeyId
         ) {
+            this(certificates, leafEncoded, issuerChainEncoded, leafOnlySafe, accountIssuerChainBytes, attestKeyCallingUid, attestKeyId, null);
+        }
+
+        CachedCertificateChain(
+                Certificate[] certificates,
+                byte[] leafEncoded,
+                byte[] issuerChainEncoded,
+                boolean leafOnlySafe,
+                boolean accountIssuerChainBytes,
+                int attestKeyCallingUid,
+                byte[] attestKeyId,
+                byte[] parentKeyId
+        ) {
             this.certificates = certificates != null ? certificates.clone() : null;
             this.leafEncoded = Objects.requireNonNull(leafEncoded, "leafEncoded");
             this.issuerChainEncoded = issuerChainEncoded;
@@ -156,6 +170,7 @@ public final class CertHack {
             this.accountIssuerChainBytes = accountIssuerChainBytes;
             this.attestKeyCallingUid = attestKeyCallingUid;
             this.attestKeyId = attestKeyId != null ? attestKeyId.clone() : null;
+            this.parentKeyId = parentKeyId != null ? parentKeyId.clone() : null;
         }
 
         private CachedCertificateChain() {
@@ -167,6 +182,7 @@ public final class CertHack {
             this.accountIssuerChainBytes = false;
             this.attestKeyCallingUid = 0;
             this.attestKeyId = null;
+            this.parentKeyId = null;
         }
 
         static CachedCertificateChain passthrough() {
@@ -185,6 +201,9 @@ public final class CertHack {
             }
             if (attestKeyId != null) {
                 bytes += attestKeyId.length;
+            }
+            if (parentKeyId != null) {
+                bytes += parentKeyId.length;
             }
             return bytes;
         }
@@ -800,13 +819,14 @@ public final class CertHack {
         state = new State(newKeyboxes, newKeyboxFiles, preparedMap, classificationMap, uniqueCanonicalFiles.size());
     }
 
-    public static void clearCertificateCache() {
+    public static boolean clearCertificateCache() {
         State currentState = state;
+        boolean backendCleared = CertificateBackend.clearAttestKeyStore();
         synchronized (currentState.certificateCache) {
             currentState.certificateCacheEpoch = new Object();
             currentState.certificateCache.clear();
         }
-        CertificateBackend.clearAttestKeyStore();
+        return backendCleared;
     }
 
     static Object captureCertificateCacheEpochForTesting() {
@@ -827,24 +847,42 @@ public final class CertHack {
         return !state.certificateCache.isEmpty();
     }
 
-    private static CachedCertificateChain validateAndTouchAttestKey(
+    private static CachedCertificateChain validateAndTouchAttestGraph(
             State.CertificateCache cache,
             CacheKey cacheKey,
             CachedCertificateChain cached
     ) {
-        if (cached == null || cached.attestKeyId == null) {
+        if (cached == null) {
+            return null;
+        }
+        if (cached.attestKeyId == null && cached.parentKeyId == null) {
             return cached;
         }
-        if (CertificateBackend.touchAttestKey(cached.attestKeyCallingUid, cached.attestKeyId)) {
-            return cached;
-        }
-        synchronized (cache) {
-            CachedCertificateChain current = cache.get(cacheKey);
-            if (current == cached) {
-                cache.remove(cacheKey);
+
+        boolean parentAbsent = false;
+        if (cached.parentKeyId != null) {
+            CertificateBackend.AttestKeyTouchResult res =
+                    CertificateBackend.touchAttestKey(cached.attestKeyCallingUid, cached.parentKeyId);
+            if (res == CertificateBackend.AttestKeyTouchResult.ABSENT) {
+                parentAbsent = true;
             }
         }
-        return null;
+
+        boolean selfAbsent = false;
+        if (!parentAbsent && cached.attestKeyId != null) {
+            CertificateBackend.AttestKeyTouchResult res =
+                    CertificateBackend.touchAttestKey(cached.attestKeyCallingUid, cached.attestKeyId);
+            if (res == CertificateBackend.AttestKeyTouchResult.ABSENT) {
+                selfAbsent = true;
+            }
+        }
+
+        if (parentAbsent || selfAbsent) {
+            clearCertificateCache();
+            return null;
+        }
+
+        return cached;
     }
 
     /**
@@ -858,12 +896,10 @@ public final class CertHack {
             return false;
         }
         State currentState = state;
-        CacheKey cacheKey = new CacheKey(metadata.certificate);
         CachedCertificateChain cached;
         synchronized (currentState.certificateCache) {
-            cached = currentState.certificateCache.get(cacheKey);
+            cached = currentState.certificateCache.get(new CacheKey(metadata.certificate));
         }
-        cached = validateAndTouchAttestKey(currentState.certificateCache, cacheKey, cached);
         if (cached == null) return false;
 
         if (isLeafOnly && !cached.leafOnlySafe) {
@@ -895,12 +931,10 @@ public final class CertHack {
         }
 
         State currentState = state;
-        CacheKey cacheKey = new CacheKey(parsed.leafEncoded);
         CachedCertificateChain cached;
         synchronized (currentState.certificateCache) {
-            cached = currentState.certificateCache.get(cacheKey);
+            cached = currentState.certificateCache.get(new CacheKey(parsed.leafEncoded));
         }
-        cached = validateAndTouchAttestKey(currentState.certificateCache, cacheKey, cached);
         if (cached == null || (parsed.hasLeafOnlyCertificate() && !cached.leafOnlySafe)) {
             return CachedParcelAction.MISS;
         }
@@ -919,12 +953,10 @@ public final class CertHack {
         try {
             byte[] leafEncoded = caList[0].getEncoded();
             if (leafEncoded.length == 0 || leafEncoded.length > MAX_LEAF_CERTIFICATE_BYTES) return null;
-            CacheKey cacheKey = new CacheKey(leafEncoded);
             CachedCertificateChain cached;
             synchronized (state.certificateCache) {
-                cached = state.certificateCache.get(cacheKey);
+                cached = state.certificateCache.get(new CacheKey(leafEncoded));
             }
-            cached = validateAndTouchAttestKey(state.certificateCache, cacheKey, cached);
             if (cached == null) return null;
             Certificate[] replacement = cached.certificateCopy();
             return replacement == null ? caList : replacement;
@@ -960,15 +992,13 @@ public final class CertHack {
             CacheKey cacheKey = new CacheKey(leafEncoded);
             State.CertificateCache cache = currentState.certificateCache;
             Object cacheEpoch;
-            CachedCertificateChain cached;
             synchronized (cache) {
-                cached = cache.get(cacheKey);
+                CachedCertificateChain cached = cache.get(cacheKey);
+                if (cached != null) {
+                    Certificate[] replacement = cached.certificateCopy();
+                    return replacement == null ? caList : replacement;
+                }
                 cacheEpoch = currentState.certificateCacheEpoch;
-            }
-            cached = validateAndTouchAttestKey(cache, cacheKey, cached);
-            if (cached != null) {
-                Certificate[] replacement = cached.certificateCopy();
-                return replacement == null ? caList : replacement;
             }
 
             // Preserve the local non-attested fast path. Only genuine Android attestation leaves
@@ -1163,7 +1193,7 @@ public final class CertHack {
                 cached = cache.get(cacheKey);
                 cacheEpoch = currentState.certificateCacheEpoch;
             }
-            cached = validateAndTouchAttestKey(cache, cacheKey, cached);
+            cached = validateAndTouchAttestGraph(cache, cacheKey, cached);
             if (cached != null) {
                 Certificate[] replacement = cached.certificateCopy();
                 return replacement == null ? caList : replacement;
@@ -1301,7 +1331,8 @@ public final class CertHack {
                     leafOnlySafe,
                     true,
                     uid,
-                    attestKeyId
+                    attestKeyId,
+                    null
             );
             synchronized (cache) {
                 if (state != currentState || currentState.certificateCacheEpoch != cacheEpoch) {
@@ -1360,7 +1391,7 @@ public final class CertHack {
                 cached = cache.get(cacheKey);
                 cacheEpoch = currentState.certificateCacheEpoch;
             }
-            cached = validateAndTouchAttestKey(cache, cacheKey, cached);
+            cached = validateAndTouchAttestGraph(cache, cacheKey, cached);
             if (cached != null) {
                 Certificate[] replacement = cached.certificateCopy();
                 return replacement == null ? caList : replacement;
@@ -1468,7 +1499,8 @@ public final class CertHack {
                     leafOnlySafe,
                     false,
                     isAttestKey ? uid : 0,
-                    isAttestKey ? childKeyId : null
+                    isAttestKey ? childKeyId : null,
+                    parentKeyId
             );
             synchronized (cache) {
                 if (state != currentState || currentState.certificateCacheEpoch != cacheEpoch) {
