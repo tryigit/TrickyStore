@@ -74,6 +74,47 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         return Skip
     }
 
+    private fun rewriteChildWithParentRecovery(
+        original: Array<Certificate>,
+        callingUid: Int,
+        isAttestKey: Boolean,
+        parentKeyId: ByteArray,
+        childKeyId: ByteArray?,
+    ): Array<Certificate> {
+        KeyboxActivation.lockPublishedSnapshot()
+        return try {
+            val first =
+                CertHack.hackChildKeyCertificate(
+                    original,
+                    callingUid,
+                    isAttestKey,
+                    true,
+                    parentKeyId,
+                    childKeyId,
+                )
+            if (first !== original || !ManagedAttestKeyRegistry.isKnown(callingUid, parentKeyId)) {
+                return first
+            }
+
+            val presence =
+                runCatching { CertificateBackend.touchAttestKey(callingUid, parentKeyId) }
+                    .getOrElse { return first }
+            if (presence != CertificateBackend.AttestKeyTouchResult.ABSENT) return first
+            if (!ManagedAttestKeyRehydrator.restore(callingUid, parentKeyId)) return first
+
+            CertHack.hackChildKeyCertificate(
+                original,
+                callingUid,
+                isAttestKey,
+                true,
+                parentKeyId,
+                childKeyId,
+            )
+        } finally {
+            KeyboxActivation.unlockPublishedSnapshot()
+        }
+    }
+
     override fun onPostTransact(
         target: IBinder,
         code: Int,
@@ -138,11 +179,10 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                                 true,
                             )
                         } else {
-                            CertHack.hackChildKeyCertificate(
+                            rewriteChildWithParentRecovery(
                                 originalLeafOnly,
                                 callingUid,
                                 context.isAttestKeyPurpose,
-                                true,
                                 parentId,
                                 context.generatedKeyId,
                             )
@@ -227,11 +267,10 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                             true,
                         )
                     } else {
-                        CertHack.hackChildKeyCertificate(
+                        rewriteChildWithParentRecovery(
                             originalLeafOnly,
                             callingUid,
                             context.isAttestKeyPurpose,
-                            true,
                             parentId,
                             context.generatedKeyId,
                         )
