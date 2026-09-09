@@ -91,11 +91,8 @@ fn derive_attest_issuer(
     attest_key_id: &[u8; 32],
     subject_der: Vec<u8>,
 ) -> Result<(Vec<u8>, PreparedIssuer), &'static str> {
-    let keypair = key_store::derive_attest_keypair(
-        calling_uid,
-        security_level.wire_value(),
-        attest_key_id,
-    )?;
+    let keypair =
+        key_store::derive_attest_keypair(calling_uid, security_level.wire_value(), attest_key_id)?;
     let prepared = PreparedIssuer::from_subject_and_key(
         subject_der,
         &keypair.private_key_pkcs8_der,
@@ -222,29 +219,28 @@ pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'s
         // when the in-memory graph is empty after restart. The rewritten parent certificate uses
         // the genuine subject unchanged, so the child leaf's issuer name is the exact issuer name
         // required by the reconstructed signer.
-        let parent_issuer =
-            if let Some(parent) =
-                attest_key_store::get_attest_key(parsed.calling_uid, &parsed.parent_key_id)
-            {
-                parent
-            } else {
-                let (_, parent_subject_der) =
-                    parse_certificate_subject_and_issuer(parsed.genuine_leaf_der)
-                        .map_err(|_| "invalid child certificate issuer")?;
-                let (_, prepared_parent) = derive_attest_issuer(
-                    parsed.calling_uid,
-                    provenance.keymint_security_level,
-                    &parsed.parent_key_id,
-                    parent_subject_der,
-                )?;
-                let prepared_parent = std::sync::Arc::new(prepared_parent);
-                attest_key_store::insert_attest_key(
-                    parsed.calling_uid,
-                    parsed.parent_key_id,
-                    std::sync::Arc::clone(&prepared_parent),
-                );
-                prepared_parent
-            };
+        let parent_issuer = if let Some(parent) =
+            attest_key_store::get_attest_key(parsed.calling_uid, &parsed.parent_key_id)
+        {
+            parent
+        } else {
+            let (_, parent_subject_der) =
+                parse_certificate_subject_and_issuer(parsed.genuine_leaf_der)
+                    .map_err(|_| "invalid child certificate issuer")?;
+            let (_, prepared_parent) = derive_attest_issuer(
+                parsed.calling_uid,
+                provenance.keymint_security_level,
+                &parsed.parent_key_id,
+                parent_subject_der,
+            )?;
+            let prepared_parent = std::sync::Arc::new(prepared_parent);
+            attest_key_store::insert_attest_key(
+                parsed.calling_uid,
+                parsed.parent_key_id,
+                std::sync::Arc::clone(&prepared_parent),
+            );
+            prepared_parent
+        };
 
         let (spki_override, prepared_for_children) = if parsed.is_attest_key {
             if !cleverestricky_certificate_core::is_ec_p256_certificate(parsed.genuine_leaf_der)
