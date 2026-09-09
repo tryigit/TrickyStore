@@ -137,6 +137,16 @@ object KeystoreInterceptor : BinderInterceptor() {
         } catch (e: Exception) {
             return Skip
         }
+        val forceManagedAttestRefresh =
+            if (requestedKeyId != null && ManagedAttestKeyRegistry.isKnown(callingUid, requestedKeyId)) {
+                when (CertificateBackend.touchAttestKey(callingUid, requestedKeyId)) {
+                    CertificateBackend.AttestKeyTouchResult.PRESENT -> false
+                    CertificateBackend.AttestKeyTouchResult.ABSENT -> true
+                    CertificateBackend.AttestKeyTouchResult.UNAVAILABLE -> return Skip
+                }
+            } else {
+                false
+            }
         try {
             // Duck Detector measures repeated service.getKeyEntry calls, not generateKey. Read only
             // the stable-AIDL offsets and genuine leaf bytes on that path. A cache hit rewrites the
@@ -151,11 +161,13 @@ object KeystoreInterceptor : BinderInterceptor() {
                     return Skip
                 }
 
-                when (CertHack.applyCachedCertificateChain(reply, parsed)) {
-                    CertHack.CachedParcelAction.REWRITTEN ->
-                        return OverrideReply(code = 0, reply = reply)
-                    CertHack.CachedParcelAction.PASSTHROUGH -> return Skip
-                    CertHack.CachedParcelAction.MISS -> Unit
+                if (!forceManagedAttestRefresh) {
+                    when (CertHack.applyCachedCertificateChain(reply, parsed)) {
+                        CertHack.CachedParcelAction.REWRITTEN ->
+                            return OverrideReply(code = 0, reply = reply)
+                        CertHack.CachedParcelAction.PASSTHROUGH -> return Skip
+                        CertHack.CachedParcelAction.MISS -> Unit
+                    }
                 }
 
                 // Leaf-only entries must preserve their caller-selected issuer contract. A full
@@ -191,6 +203,7 @@ object KeystoreInterceptor : BinderInterceptor() {
             // A non-standard parcel cannot use the raw fast path, but it may still carry a cacheable
             // platform KeyMetadata object. Keep this path contract-compatible for vendor variants.
             if (
+                !forceManagedAttestRefresh &&
                 (targeted || mayReadGrantedChain) &&
                 CertHack.applyCachedCertificateChain(metadata)
             ) {
@@ -241,6 +254,9 @@ object KeystoreInterceptor : BinderInterceptor() {
                     rewritten.takeUnless { it === chain }
                 }
             if (newChain != null) {
+                if (attestKeyId != null) {
+                    ManagedAttestKeyRegistry.remember(callingUid, attestKeyId)
+                }
                 if (!CertHack.applyCachedCertificateChain(metadata)) {
                     Utils.putCertificateChain(response, newChain)
                 }
