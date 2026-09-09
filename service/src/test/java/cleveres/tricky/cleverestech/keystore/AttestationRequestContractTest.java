@@ -229,7 +229,7 @@ public class AttestationRequestContractTest {
                 assertFalse(cache.containsKey(key));
             }
 
-            // 4. Child key with parentKeyId: if parent is ABSENT, child also authoritatively purges graph
+            // 4. Normal child key with parentKeyId: hit with PRESENT touch verifies callingUid == uid (not 0) and keeps in cache
             byte[] childLeaf = new byte[] {11, 22, 33};
             Certificate childLeafCert = mock(Certificate.class);
             when(childLeafCert.getEncoded()).thenReturn(childLeaf);
@@ -249,6 +249,38 @@ public class AttestationRequestContractTest {
                 cache.put(childKey, childValue);
             }
 
+            // Normal child hit with PRESENT:
+            touchResult.set(cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.PRESENT);
+            result = CertHack.hackChildKeyCertificate(childCaList, uid, false, true, parentKeyId, null);
+            assertEquals(4, touchCount.get());
+            assertSame(replacementCert, result[0]);
+            synchronized (cache) {
+                assertTrue(cache.containsKey(childKey));
+            }
+
+            // 5. Child key with parentKeyId: if parent is ABSENT, child authoritatively purges graph
+            touchResult.set(cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.ABSENT);
+            result = CertHack.hackChildKeyCertificate(childCaList, uid, false, true, parentKeyId, null);
+            assertSame(childLeafCert, result[0]);
+            synchronized (cache) {
+                assertFalse(cache.containsKey(childKey));
+            }
+
+            // 6. Rekey generation boundary: full graph clear purges child keys
+            synchronized (cache) {
+                cache.put(childKey, childValue);
+                assertTrue(cache.containsKey(childKey));
+            }
+            CertHack.clearCertificateCache();
+            synchronized (cache) {
+                assertFalse(cache.containsKey(childKey));
+            }
+
+            // 7. Backend clear failure during touch ABSENT fails closed to genuine cert
+            synchronized (cache) {
+                cache.put(childKey, childValue);
+            }
+            cleveres.tricky.cleverestech.CertificateBackend.setClearAttestKeyStoreOverrideForTesting(() -> false);
             touchResult.set(cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.ABSENT);
             result = CertHack.hackChildKeyCertificate(childCaList, uid, false, true, parentKeyId, null);
             assertSame(childLeafCert, result[0]);

@@ -822,6 +822,9 @@ public final class CertHack {
     public static boolean clearCertificateCache() {
         State currentState = state;
         boolean backendCleared = CertificateBackend.clearAttestKeyStore();
+        if (!backendCleared) {
+            backendCleared = CertificateBackend.clearAttestKeyStore();
+        }
         synchronized (currentState.certificateCache) {
             currentState.certificateCacheEpoch = new Object();
             currentState.certificateCache.clear();
@@ -878,7 +881,16 @@ public final class CertHack {
         }
 
         if (parentAbsent || selfAbsent) {
-            clearCertificateCache();
+            boolean backendCleared = clearCertificateCache();
+            if (!backendCleared) {
+                synchronized (cache) {
+                    CachedCertificateChain current = cache.get(cacheKey);
+                    if (current == cached) {
+                        cache.remove(cacheKey);
+                    }
+                }
+                return CachedCertificateChain.passthrough();
+            }
             return null;
         }
 
@@ -1303,6 +1315,10 @@ public final class CertHack {
             }
             keyId = prepared.keyId.clone();
 
+            if (!clearCertificateCache()) {
+                return caList;
+            }
+
             byte[] rewrittenDer = CertificateBackend.rewriteAttestKey(
                     uid,
                     attestKeyId,
@@ -1462,6 +1478,12 @@ public final class CertHack {
                 return caList;
             }
 
+            if (isAttestKey) {
+                if (!clearCertificateCache()) {
+                    return caList;
+                }
+            }
+
             byte[] rewrittenDer = CertificateBackend.rewriteChildKey(
                     uid,
                     parentKeyId,
@@ -1498,7 +1520,7 @@ public final class CertHack {
                     encodedIssuerChain,
                     leafOnlySafe,
                     false,
-                    isAttestKey ? uid : 0,
+                    uid,
                     isAttestKey ? childKeyId : null,
                     parentKeyId
             );

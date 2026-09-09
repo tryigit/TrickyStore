@@ -402,16 +402,21 @@ object CertificateBackend {
     @JvmStatic
     fun clearAttestKeyStore(): Boolean {
         clearAttestKeyStoreOverride?.let { return it() }
-        val response =
-            NativeBackend.transact(
-                OP_ATTEST_KEY_CLEAR,
-                ATTEST_KEY_CLEAR_REQUEST_BYTES,
-                ATTEST_KEY_CLEAR_RESPONSE_BYTES,
-                propagateTransportFailure = false,
-            ) { output ->
-                output.write(1)
-            } ?: return false
-        return response.size == ATTEST_KEY_CLEAR_RESPONSE_BYTES && response[0] == 0.toByte()
+        for (attempt in 0..1) {
+            val response =
+                NativeBackend.transact(
+                    OP_ATTEST_KEY_CLEAR,
+                    ATTEST_KEY_CLEAR_REQUEST_BYTES,
+                    ATTEST_KEY_CLEAR_RESPONSE_BYTES,
+                    propagateTransportFailure = false,
+                ) { output ->
+                    output.write(1)
+                }
+            if (response != null && response.size == ATTEST_KEY_CLEAR_RESPONSE_BYTES && response[0] == 0.toByte()) {
+                return true
+            }
+        }
+        return false
     }
 
     enum class AttestKeyTouchResult {
