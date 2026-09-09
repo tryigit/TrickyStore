@@ -671,6 +671,22 @@ public class AttestationRequestContractTest {
     }
 
     @Test
+    public void computeKeyDescriptorIdentityNormalizesAppDomainNamespace() {
+        int uid = 10001;
+        int domain = 0; // Domain.APP
+        String alias = "my_attest_key";
+        byte[] blob = null;
+
+        byte[] idWithAppNamespace = Utils.computeKeyDescriptorIdentity(uid, domain, -1L, alias, blob);
+        byte[] idWithZeroNamespace = Utils.computeKeyDescriptorIdentity(uid, domain, 0L, alias, blob);
+        byte[] idWithUidNamespace = Utils.computeKeyDescriptorIdentity(uid, domain, (long) uid, alias, blob);
+
+        assertEquals(32, idWithAppNamespace.length);
+        assertArrayEquals(idWithAppNamespace, idWithZeroNamespace);
+        assertArrayEquals(idWithAppNamespace, idWithUidNamespace);
+    }
+
+    @Test
     public void childAttestKeyCannotUseItsOwnDescriptorAsParent() {
         byte[] descriptor = new byte[32];
         descriptor[0] = 1;

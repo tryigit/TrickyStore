@@ -72,11 +72,17 @@ public final class Utils {
     public static byte[] computeKeyDescriptorIdentity(
             int callingUid, int domain, long nspace, String alias, byte[] blob) {
         try {
+            // For Domain.APP (0), Android Keystore2 binds key identity strictly to callingUid
+            // and key alias; client-provided namespace (-1 for KeyProperties.NAMESPACE_APPLICATION,
+            // 0 for default uninitialized parcelables, or callingUid) is ignored by Keystore2 daemon.
+            // Canonicalize namespace to 0L for Domain.APP so generated parent keys and child
+            // parent references produce identical identifiers.
+            long effectiveNspace = (domain == 0) ? 0L : nspace;
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             ByteBuffer buffer = ByteBuffer.allocate(4 + 4 + 8).order(ByteOrder.BIG_ENDIAN);
             buffer.putInt(callingUid);
             buffer.putInt(domain);
-            buffer.putLong(nspace);
+            buffer.putLong(effectiveNspace);
             digest.update(buffer.array());
 
             if (alias == null) {
