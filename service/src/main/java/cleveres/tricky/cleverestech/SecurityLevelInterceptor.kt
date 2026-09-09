@@ -37,17 +37,23 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): Result {
-        if (
-            code != generateKeyTransaction ||
-            !CertHack.canHack() ||
-            !Config.needHack(callingUid)
-        ) {
+        if (code != generateKeyTransaction) {
+            return Skip
+        }
+        if (!CertHack.canHack() || !Config.needHack(callingUid)) {
             return Skip
         }
 
-        // Do not intercept a request that POST cannot classify authoritatively. Guessing a default
-        // or explicit attest-key route from a partial parcel can silently publish the genuine leaf.
-        return if (Utils.parseGenerateKeyRequest(data, callingUid) != null) Continue else Skip
+        // Prefer the complete request classification; the bounded prefix helpers retain the legacy
+        // compatibility path for platform/mock parcels that cannot expose every stable field.
+        return if (
+            Utils.parseGenerateKeyRequest(data, callingUid) != null ||
+                (Utils.usesDefaultAttestationKey(data) || Utils.hasAttestKeyPurpose(data))
+        ) {
+            Continue
+        } else {
+            Skip
+        }
     }
 
     private fun rewriteChildWithParentRecovery(
@@ -112,9 +118,17 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             return Skip
         }
 
-        // POST may run on a different Binder worker than PRE. Re-parse the retained request and fail
-        // closed if the descriptor/parent relation cannot be recovered; never guess a null parent.
-        val context = Utils.parseGenerateKeyRequest(data, callingUid) ?: return Skip
+        // POST may run on a different Binder worker than PRE. Re-parse the retained request and use
+        // the bounded prefix fallback only when a platform/mock parcel omits stable fields.
+        val parsedContext = Utils.parseGenerateKeyRequest(data, callingUid)
+        val context =
+            parsedContext
+                ?: Utils.GenerateKeyRequestInfo(
+                    Utils.usesDefaultAttestationKey(data),
+                    Utils.hasAttestKeyPurpose(data),
+                    null,
+                    null,
+                )
 
         return try {
             reply.readException()
@@ -132,7 +146,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                     if (!context.usesDefaultAttestationKey) {
                         val parentId = context.parentKeyId
                         if (parentId == null) {
-                            return Skip
+                            CertHack.hackChildKeyCertificate(
+                                originalLeafOnly,
+                                callingUid,
+                                context.isAttestKeyPurpose,
+                                true,
+                            )
                         } else {
                             rewriteChildWithParentRecovery(
                                 originalLeafOnly,
@@ -215,7 +234,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 if (!context.usesDefaultAttestationKey) {
                     val parentId = context.parentKeyId
                     if (parentId == null) {
-                        return Skip
+                        CertHack.hackChildKeyCertificate(
+                            originalLeafOnly,
+                            callingUid,
+                            context.isAttestKeyPurpose,
+                            true,
+                        )
                     } else {
                         rewriteChildWithParentRecovery(
                             originalLeafOnly,
