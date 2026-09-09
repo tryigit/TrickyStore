@@ -31,7 +31,7 @@ public final class Utils {
     private static final int MAX_AUTHORIZATIONS = 256;
     private static final int MAX_REWRITTEN_PARCEL_BYTES = 8 * 1024 * 1024;
     private static final int MAX_RETAINED_SCRATCH_PARCEL_BYTES = 64 * 1024;
-    private static final int TAG_PURPOSE = 0x20000001; // TagType.ENUM_REP | 1
+    private static final int TAG_PURPOSE = 0x20000001;
     private static final int KEY_PARAMETER_VALUE_KEY_PURPOSE = 7;
     private static final int KEY_PURPOSE_ATTEST_KEY = 7;
 
@@ -210,9 +210,7 @@ public final class Utils {
         int position = request.dataPosition();
         try {
             request.enforceInterface(IKeystoreSecurityLevel.DESCRIPTOR);
-            // 1. Skip key: KeyDescriptor
             if (!skipStableTypedParcelable(request)) return false;
-            // 2. Skip optional attestationKey: KeyDescriptor
             if (request.dataAvail() < Integer.BYTES) return false;
             int attestationKeyPresence = request.readInt();
             if (attestationKeyPresence == 1) {
@@ -220,7 +218,6 @@ public final class Utils {
             } else if (attestationKeyPresence != 0) {
                 return false;
             }
-            // 3. Inspect params: KeyParameter[]
             return inspectParamsForAttestKeyPurpose(request);
         } catch (RuntimeException invalidRequest) {
             return false;

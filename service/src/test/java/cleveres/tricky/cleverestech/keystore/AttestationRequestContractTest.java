@@ -157,23 +157,12 @@ public class AttestationRequestContractTest {
         byte[] base = Utils.computeKeyDescriptorIdentity(uid, domain, nspace, alias, blob);
         assertEquals(32, base.length);
 
-        // Deterministic
         assertArrayEquals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, alias, blob));
-
-        // Different UID
         assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid + 1, domain, nspace, alias, blob)));
-
-        // Different domain
         assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain + 1, nspace, alias, blob)));
-
-        // Different nspace
         assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace + 1, alias, blob)));
-
-        // Different alias
         assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, "other_key", blob)));
         assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, null, blob)));
-
-        // Different blob
         assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, alias, new byte[] {1, 2, 4})));
         assertFalse(java.util.Arrays.equals(base, Utils.computeKeyDescriptorIdentity(uid, domain, nspace, alias, null)));
     }
@@ -190,11 +179,10 @@ public class AttestationRequestContractTest {
         when(request.dataAvail()).thenReturn(128);
         when(request.dataSize()).thenReturn(128);
 
-        // 1. Request with default attestation key (presence = 0) and attestKey purpose
         java.util.Iterator<Integer> defaultAttestInts = java.util.Arrays.asList(
-                1, 16, 0, // KeyDescriptor (presence, size, domain)
-                0,        // attestationKey (presence = 0, null/default)
-                1, 1, 20, 536870913, 7, 7 // params (count, presence, size, tag, unionTag, unionVal)
+                1, 16, 0,
+                0,
+                1, 1, 20, 536870913, 7, 7
         ).iterator();
         when(request.readInt()).thenAnswer(inv -> defaultAttestInts.hasNext() ? defaultAttestInts.next() : 0);
 
@@ -206,12 +194,11 @@ public class AttestationRequestContractTest {
         assertEquals(32, info.generatedKeyId.length);
         assertNull(info.parentKeyId);
 
-        // 2. Request with explicit parent attest key (presence = 1) and non-attest purpose
         pos.set(28);
         java.util.Iterator<Integer> explicitParentInts = java.util.Arrays.asList(
-                1, 16, 0, // Generated KeyDescriptor (presence, size, domain)
-                1, 16, 0, // Parent KeyDescriptor (presence, size, domain)
-                0         // params (count = 0)
+                1, 16, 0,
+                1, 16, 0,
+                0
         ).iterator();
         when(request.readInt()).thenAnswer(inv -> explicitParentInts.hasNext() ? explicitParentInts.next() : 0);
 

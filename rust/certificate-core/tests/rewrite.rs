@@ -43,7 +43,6 @@ fn attest_key_and_child_key_rootoftrust_and_signature_convergence() {
         .expect("EC fixture issuer DER");
     let keybox_ca_der = keybox_ca.to_der().expect("keybox CA DER");
 
-    // 1. Generate K1 (attest key)
     let k1_genuine = synthetic_genuine_leaf(&keybox_ca);
     let k1_genuine_der = k1_genuine.to_der().expect("k1 genuine DER");
 
@@ -65,7 +64,6 @@ fn attest_key_and_child_key_rootoftrust_and_signature_convergence() {
     .expect("rewrite K1 leaf");
 
     let k1_cert = Certificate::from_der(&k1_rewritten.leaf_der).expect("K1 cert DER");
-    // Verify K1's public key matches the generated keypair
     assert_eq!(
         k1_cert
             .tbs_certificate()
@@ -74,10 +72,8 @@ fn attest_key_and_child_key_rootoftrust_and_signature_convergence() {
             .unwrap(),
         generated_k1.public_key_spki_der
     );
-    // Verify K1 is signed by Keybox CA
     verify_signature(&k1_cert, &keybox_ca, SigningAlgorithm::EcP256Sha256);
 
-    // 2. Prepare K1 as issuer for K2
     let (k1_subject_der, _) =
         cleverestricky_certificate_core::parse_certificate_subject_and_issuer(
             &k1_rewritten.leaf_der,
@@ -91,7 +87,6 @@ fn attest_key_and_child_key_rootoftrust_and_signature_convergence() {
     )
     .expect("prepare K1 issuer");
 
-    // 3. Child key K2 genuine leaf (minted by hardware KeyMint, with K1 as issuer)
     let k2_genuine = synthetic_genuine_leaf(&k1_cert);
     let k2_genuine_der = k2_genuine.to_der().expect("K2 genuine DER");
 
@@ -104,18 +99,16 @@ fn attest_key_and_child_key_rootoftrust_and_signature_convergence() {
             module_hash: None,
             verified_boot_key: &BOOT_KEY,
             verified_boot_hash: &BOOT_HASH,
-            subject_public_key_info: None, // K2 keeps genuine hardware SPKI
+            subject_public_key_info: None,
         },
     )
     .expect("rewrite K2 child leaf");
 
     let k2_cert = Certificate::from_der(&k2_rewritten.leaf_der).expect("K2 cert DER");
-    // Verify K2 preserves genuine SPKI
     assert_eq!(
         k2_cert.tbs_certificate().subject_public_key_info(),
         k2_genuine.tbs_certificate().subject_public_key_info()
     );
-    // Verify K2 is signed by K1 (verifies with K1's public key!)
     verify_signature(&k2_cert, &k1_cert, SigningAlgorithm::EcP256Sha256);
 }
 
