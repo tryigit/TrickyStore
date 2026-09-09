@@ -31,10 +31,13 @@ class ManagedAttestKeyRegistryTest {
         assertFalse(ManagedAttestKeyRegistry.isKnown(uid, ByteArray(32) { 0x6b.toByte() }))
         assertFalse(ManagedAttestKeyRegistry.isKnown(uid, ByteArray(32)))
         assertFalse(ManagedAttestKeyRegistry.isKnown(uid, ByteArray(31) { 1 }))
+
+        ManagedAttestKeyRegistry.forget(uid, lookup)
+        assertFalse(ManagedAttestKeyRegistry.isKnown(uid, lookup))
     }
 
     @Test
-    fun `registry remains bounded and evicts least recently used identity`() {
+    fun `registry becomes conservative at bound instead of producing false negatives`() {
         val uid = 10_123
         fun descriptor(index: Int): ByteArray =
             ByteArray(32).also {
@@ -46,14 +49,16 @@ class ManagedAttestKeyRegistryTest {
         for (index in 1..256) {
             ManagedAttestKeyRegistry.remember(uid, descriptor(index))
         }
-        val first = descriptor(1)
-        val second = descriptor(2)
-        assertTrue(ManagedAttestKeyRegistry.isKnown(uid, first))
+        assertTrue(ManagedAttestKeyRegistry.isKnown(uid, descriptor(1)))
+        assertTrue(ManagedAttestKeyRegistry.isKnown(uid, descriptor(256)))
+        assertFalse(ManagedAttestKeyRegistry.isKnown(uid, descriptor(999)))
 
         ManagedAttestKeyRegistry.remember(uid, descriptor(257))
 
-        assertTrue(ManagedAttestKeyRegistry.isKnown(uid, first))
-        assertFalse(ManagedAttestKeyRegistry.isKnown(uid, second))
+        assertTrue(ManagedAttestKeyRegistry.isKnown(uid, descriptor(1)))
+        assertTrue(ManagedAttestKeyRegistry.isKnown(uid, descriptor(256)))
         assertTrue(ManagedAttestKeyRegistry.isKnown(uid, descriptor(257)))
+        assertTrue(ManagedAttestKeyRegistry.isKnown(uid, descriptor(999)))
+        assertFalse(ManagedAttestKeyRegistry.isKnown(uid, ByteArray(32)))
     }
 }
