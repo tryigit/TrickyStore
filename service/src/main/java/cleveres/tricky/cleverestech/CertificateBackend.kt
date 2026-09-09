@@ -456,10 +456,20 @@ object CertificateBackend {
         fun touch(callingUid: Int, keyId: ByteArray): AttestKeyTouchResult
     }
 
+    fun interface ClearAttestKeyStoreHandler {
+        fun clear(): Boolean
+    }
+
     @VisibleForTesting
     @JvmStatic
     fun setTouchAttestKeyOverrideForTesting(override: AttestKeyTouchHandler?) {
         touchAttestKeyOverride = if (override != null) { { uid, id -> override.touch(uid, id) } } else null
+    }
+
+    @VisibleForTesting
+    @JvmStatic
+    fun setClearAttestKeyStoreOverrideForTesting(override: ClearAttestKeyStoreHandler?) {
+        clearAttestKeyStoreOverride = if (override != null) { { override.clear() } } else null
     }
 
     @VisibleForTesting

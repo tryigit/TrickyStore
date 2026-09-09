@@ -819,17 +819,34 @@ public final class CertHack {
         state = new State(newKeyboxes, newKeyboxFiles, preparedMap, classificationMap, uniqueCanonicalFiles.size());
     }
 
+    private static volatile boolean graphStateUnhealthy = false;
+
     public static boolean clearCertificateCache() {
         State currentState = state;
         boolean backendCleared = CertificateBackend.clearAttestKeyStore();
         if (!backendCleared) {
             backendCleared = CertificateBackend.clearAttestKeyStore();
         }
+        if (backendCleared) {
+            graphStateUnhealthy = false;
+        } else {
+            graphStateUnhealthy = true;
+        }
         synchronized (currentState.certificateCache) {
             currentState.certificateCacheEpoch = new Object();
             currentState.certificateCache.clear();
         }
         return backendCleared;
+    }
+
+    @VisibleForTesting
+    static boolean isGraphStateUnhealthyForTesting() {
+        return graphStateUnhealthy;
+    }
+
+    @VisibleForTesting
+    static void resetGraphHealthForTesting() {
+        graphStateUnhealthy = false;
     }
 
     static Object captureCertificateCacheEpochForTesting() {
@@ -1413,6 +1430,14 @@ public final class CertHack {
                 return replacement == null ? caList : replacement;
             }
 
+            if (graphStateUnhealthy) {
+                if (clearCertificateCache()) {
+                    graphStateUnhealthy = false;
+                } else {
+                    return caList;
+                }
+            }
+
             if (!Utils.hasAndroidAttestationExtension(caList[0])) return caList;
 
             childInspection = CertificateBackend.inspect(leafEncoded);
@@ -1478,9 +1503,23 @@ public final class CertHack {
                 return caList;
             }
 
-            if (isAttestKey) {
-                if (!clearCertificateCache()) {
-                    return caList;
+            if (isAttestKey && childKeyId != null) {
+                synchronized (cache) {
+                    List<CacheKey> keysToRemove = null;
+                    for (Map.Entry<CacheKey, CachedCertificateChain> entry : cache.entrySet()) {
+                        CachedCertificateChain entryValue = entry.getValue();
+                        if (entryValue != null && entryValue.parentKeyId != null && Arrays.equals(entryValue.parentKeyId, childKeyId)) {
+                            if (keysToRemove == null) {
+                                keysToRemove = new ArrayList<>();
+                            }
+                            keysToRemove.add(entry.getKey());
+                        }
+                    }
+                    if (keysToRemove != null) {
+                        for (CacheKey k : keysToRemove) {
+                            cache.remove(k);
+                        }
+                    }
                 }
             }
 

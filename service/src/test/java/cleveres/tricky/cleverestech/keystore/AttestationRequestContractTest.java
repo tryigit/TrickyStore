@@ -276,7 +276,7 @@ public class AttestationRequestContractTest {
                 assertFalse(cache.containsKey(childKey));
             }
 
-            // 7. Backend clear failure during touch ABSENT fails closed to genuine cert
+            // 7. Backend clear failure marks graph unhealthy and fails closed to genuine cert
             synchronized (cache) {
                 cache.put(childKey, childValue);
             }
@@ -287,8 +287,85 @@ public class AttestationRequestContractTest {
             synchronized (cache) {
                 assertFalse(cache.containsKey(childKey));
             }
+            assertTrue(CertHack.isGraphStateUnhealthyForTesting());
+
+            // 8. While graph is unhealthy, subsequent child request fails closed without rewriting
+            result = CertHack.hackChildKeyCertificate(childCaList, uid, false, true, parentKeyId, null);
+            assertSame(childLeafCert, result[0]);
+
+            // 9. When backend clear succeeds again, graph health recovers
+            cleveres.tricky.cleverestech.CertificateBackend.setClearAttestKeyStoreOverrideForTesting(() -> true);
+            CertHack.clearCertificateCache();
+            assertFalse(CertHack.isGraphStateUnhealthyForTesting());
         } finally {
             cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            CertHack.resetGraphHealthForTesting();
+            synchronized (cache) {
+                cache.clear();
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void nestedAttestKeyInvalidatesDescendantsWithoutPurgingParent() throws Exception {
+        Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object state = stateField.get(null);
+        Field cacheField = state.getClass().getDeclaredField("certificateCache");
+        cacheField.setAccessible(true);
+        Map<Object, Object> cache = (Map<Object, Object>) cacheField.get(state);
+
+        Constructor<?> keyConstructor = Class.forName(CertHack.class.getName() + "$CacheKey")
+                .getDeclaredConstructor(byte[].class);
+        keyConstructor.setAccessible(true);
+        Constructor<?> valueConstructor = Class.forName(CertHack.class.getName() + "$CachedCertificateChain")
+                .getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class, boolean.class, int.class, byte[].class, byte[].class);
+        valueConstructor.setAccessible(true);
+
+        int uid = 10001;
+        byte[] rootKeyId = new byte[32];
+        rootKeyId[0] = 1;
+        byte[] intermediateKeyId = new byte[32];
+        intermediateKeyId[0] = 2;
+
+        Certificate mockCert = mock(Certificate.class);
+        Certificate[] mockChain = new Certificate[] {mockCert};
+
+        // Root entry (parentKeyId = null, attestKeyId = rootKeyId)
+        Object rootKey = keyConstructor.newInstance((Object) new byte[] {1, 1, 1});
+        Object rootValue = valueConstructor.newInstance(mockChain, new byte[] {1}, new byte[] {2}, true, true, uid, rootKeyId, null);
+
+        // Grandchild entry (parentKeyId = intermediateKeyId)
+        Object grandchildKey = keyConstructor.newInstance((Object) new byte[] {3, 3, 3});
+        Object grandchildValue = valueConstructor.newInstance(mockChain, new byte[] {3}, new byte[] {4}, true, false, uid, null, intermediateKeyId);
+
+        try {
+            synchronized (cache) {
+                cache.put(rootKey, rootValue);
+                cache.put(grandchildKey, grandchildValue);
+                assertTrue(cache.containsKey(rootKey));
+                assertTrue(cache.containsKey(grandchildKey));
+            }
+
+            // Create a fake leaf certificate for the intermediate child
+            byte[] intermediateLeaf = new byte[] {2, 2, 2};
+            Certificate intermediateCert = mock(Certificate.class);
+            when(intermediateCert.getEncoded()).thenReturn(intermediateLeaf);
+            Certificate[] intermediateCaList = new Certificate[] {intermediateCert};
+
+            // Call hackChildKeyCertificate with isAttestKey = true and childKeyId = intermediateKeyId
+            // The intermediate mock has no attestation extension, so it will exit early after descendant eviction
+            CertHack.hackChildKeyCertificate(intermediateCaList, uid, true, true, rootKeyId, intermediateKeyId);
+
+            synchronized (cache) {
+                // Root parent MUST remain in cache
+                assertTrue(cache.containsKey(rootKey));
+                // Grandchild of intermediate MUST be evicted from cache
+                assertFalse(cache.containsKey(grandchildKey));
+            }
+        } finally {
+            CertHack.resetGraphHealthForTesting();
             synchronized (cache) {
                 cache.clear();
             }
