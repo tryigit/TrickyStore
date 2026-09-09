@@ -174,7 +174,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                     return Skip
                 }
                 if (context.isAttestKeyPurpose) {
-                    ManagedAttestKeyRegistry.remember(callingUid, context.generatedKeyId)
+                    ManagedAttestKeyRegistry.remember(
+                        callingUid,
+                        context.generatedKeyId,
+                        context.parentKeyId,
+                        parsed.leafEncoded,
+                    )
                 }
 
                 // hackCertificateChain publishes the completed rewrite bytes in its epoch-protected
@@ -258,7 +263,12 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 return Skip
             }
             if (context.isAttestKeyPurpose) {
-                ManagedAttestKeyRegistry.remember(callingUid, context.generatedKeyId)
+                ManagedAttestKeyRegistry.remember(
+                    callingUid,
+                    context.generatedKeyId,
+                    context.parentKeyId,
+                    metadata.certificate,
+                )
             }
 
             if (!CertHack.applyCachedCertificateChain(metadata)) {
