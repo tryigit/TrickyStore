@@ -66,6 +66,9 @@ const OP_CHILD_KEY_REWRITE: u16 = 33;
 const OP_ATTEST_KEY_CLEAR: u16 = 34;
 const ATTEST_KEY_CLEAR_REQUEST_BYTES: usize = 1;
 const ATTEST_KEY_CLEAR_RESPONSE_BYTES: usize = 1;
+const OP_ATTEST_KEY_TOUCH: u16 = 35;
+const ATTEST_KEY_TOUCH_REQUEST_BYTES: usize = 37;
+const ATTEST_KEY_TOUCH_RESPONSE_BYTES: usize = 1;
 const SCOPE_CONFIG_ROOT: u8 = 0;
 const SCOPE_KEYBOX_DIRECTORY: u8 = 1;
 
@@ -377,6 +380,7 @@ fn opcode_request_limit(opcode: u16) -> Option<usize> {
         OP_ATTEST_KEY_REWRITE => Some(certificate_wire::MAX_ATTEST_KEY_REWRITE_REQUEST_BYTES),
         OP_CHILD_KEY_REWRITE => Some(certificate_wire::MAX_CHILD_KEY_REWRITE_REQUEST_BYTES),
         OP_ATTEST_KEY_CLEAR => Some(ATTEST_KEY_CLEAR_REQUEST_BYTES),
+        OP_ATTEST_KEY_TOUCH => Some(ATTEST_KEY_TOUCH_REQUEST_BYTES),
         OP_CRL_CHECK_BATCH => Some(crl_wire::MAX_REQUEST_BYTES),
         backend_instance::OP_BACKEND_PING => Some(backend_instance::REQUEST_BYTES),
         _ => None,
@@ -394,6 +398,7 @@ fn opcode_response_limit(opcode: u16) -> Option<usize> {
             Some(certificate_wire::MAX_REWRITE_RESPONSE_BYTES)
         }
         OP_ATTEST_KEY_CLEAR => Some(ATTEST_KEY_CLEAR_RESPONSE_BYTES),
+        OP_ATTEST_KEY_TOUCH => Some(ATTEST_KEY_TOUCH_RESPONSE_BYTES),
         OP_CRL_CHECK_BATCH => Some(crl_wire::MAX_RESPONSE_BYTES),
         backend_instance::OP_BACKEND_PING => Some(backend_instance::RESPONSE_BYTES),
         _ => None,
@@ -487,6 +492,17 @@ fn handle_request(opcode: u16, mut request: Vec<u8>) -> Result<Vec<u8>, &'static
             }
             attest_key_store::clear();
             Ok(vec![0])
+        }
+        OP_ATTEST_KEY_TOUCH => {
+            if request.len() != ATTEST_KEY_TOUCH_REQUEST_BYTES
+                || request[0] != certificate_wire::REWRITE_WIRE_VERSION
+            {
+                return Err("invalid attest key touch request");
+            }
+            let calling_uid = u32::from_be_bytes(request[1..5].try_into().unwrap());
+            let key_id: [u8; 32] = request[5..37].try_into().unwrap();
+            let touched = attest_key_store::touch_attest_key(calling_uid, &key_id);
+            Ok(vec![if touched { 1 } else { 0 }])
         }
         OP_CRL_CHECK_BATCH => crl_wire::handle(request),
         backend_instance::OP_BACKEND_PING => backend_instance::handle(request),
@@ -1043,10 +1059,28 @@ mod tests {
             opcode_response_limit(OP_CHILD_KEY_REWRITE),
             Some(certificate_wire::MAX_REWRITE_RESPONSE_BYTES)
         );
+        assert_eq!(
+            opcode_request_limit(OP_ATTEST_KEY_CLEAR),
+            Some(ATTEST_KEY_CLEAR_REQUEST_BYTES)
+        );
+        assert_eq!(
+            opcode_response_limit(OP_ATTEST_KEY_CLEAR),
+            Some(ATTEST_KEY_CLEAR_RESPONSE_BYTES)
+        );
+        assert_eq!(
+            opcode_request_limit(OP_ATTEST_KEY_TOUCH),
+            Some(ATTEST_KEY_TOUCH_REQUEST_BYTES)
+        );
+        assert_eq!(
+            opcode_response_limit(OP_ATTEST_KEY_TOUCH),
+            Some(ATTEST_KEY_TOUCH_RESPONSE_BYTES)
+        );
         assert!(handle_request(OP_CERTIFICATE_INSPECT, vec![1]).is_err());
         assert!(handle_request(OP_CERTIFICATE_REWRITE, vec![1]).is_err());
         assert!(handle_request(OP_ATTEST_KEY_REWRITE, vec![1]).is_err());
         assert!(handle_request(OP_CHILD_KEY_REWRITE, vec![1]).is_err());
+        assert!(handle_request(OP_ATTEST_KEY_CLEAR, vec![0]).is_err());
+        assert!(handle_request(OP_ATTEST_KEY_TOUCH, vec![1]).is_err());
     }
 
     #[test]

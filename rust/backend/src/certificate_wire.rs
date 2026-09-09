@@ -9,7 +9,7 @@ use cleverestricky_certificate_core::{
 use zeroize::Zeroize;
 
 const INSPECT_WIRE_VERSION: u8 = 2;
-const REWRITE_WIRE_VERSION: u8 = 2;
+pub(crate) const REWRITE_WIRE_VERSION: u8 = 2;
 const SIGNING_EC_P256_SHA256: u8 = 1;
 const SIGNING_RSA_PKCS1_SHA256: u8 = 2;
 const PATCH_KEEP: u8 = 0;

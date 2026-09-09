@@ -147,6 +147,86 @@ public class AttestationRequestContractTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    public void cachedAttestKeyTouchesBackendAndInvalidatesWhenBackendEvicts() throws Exception {
+        Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object state = stateField.get(null);
+        Field cacheField = state.getClass().getDeclaredField("certificateCache");
+        cacheField.setAccessible(true);
+        Map<Object, Object> cache = (Map<Object, Object>) cacheField.get(state);
+
+        Constructor<?> keyConstructor = Class.forName(CertHack.class.getName() + "$CacheKey")
+                .getDeclaredConstructor(byte[].class);
+        keyConstructor.setAccessible(true);
+        Constructor<?> valueConstructor = Class.forName(CertHack.class.getName() + "$CachedCertificateChain")
+                .getDeclaredConstructor(Certificate[].class, byte[].class, byte[].class, boolean.class, boolean.class, int.class, byte[].class);
+        valueConstructor.setAccessible(true);
+
+        byte[] leaf = new byte[] {10, 20, 30};
+        byte[] attestKeyId = new byte[32];
+        attestKeyId[0] = 7;
+        int uid = 10001;
+
+        Object key = keyConstructor.newInstance((Object) leaf.clone());
+        Object value = valueConstructor.newInstance(
+                new Certificate[0],
+                new byte[] {40, 50},
+                new byte[] {60, 70},
+                true,
+                true,
+                uid,
+                attestKeyId
+        );
+
+        java.util.concurrent.atomic.AtomicInteger touchCount = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicBoolean touchResult = new java.util.concurrent.atomic.AtomicBoolean(true);
+
+        cleveres.tricky.cleverestech.CertificateBackend.setTouchAttestKeyOverrideForTesting((callingUid, keyId) -> {
+            touchCount.incrementAndGet();
+            assertEquals(uid, callingUid);
+            assertArrayEquals(attestKeyId, keyId);
+            return touchResult.get();
+        });
+
+        try {
+            synchronized (cache) {
+                cache.put(key, value);
+            }
+
+            KeyMetadata metadata = new KeyMetadata();
+            metadata.certificate = leaf.clone();
+            metadata.certificateChain = new byte[] {99};
+
+            // Hit with valid backend touch -> returns true, keeps in cache
+            assertTrue(CertHack.applyCachedCertificateChain(metadata));
+            assertEquals(1, touchCount.get());
+            assertArrayEquals(new byte[] {40, 50}, metadata.certificate);
+            synchronized (cache) {
+                assertTrue(cache.containsKey(key));
+            }
+
+            // Backend evicted the key (touch returns false) -> invalidates from cache, returns false
+            touchResult.set(false);
+            metadata.certificate = leaf.clone();
+            assertFalse(CertHack.applyCachedCertificateChain(metadata));
+            assertEquals(2, touchCount.get());
+            synchronized (cache) {
+                assertFalse(cache.containsKey(key));
+            }
+
+            // Next attempt should miss cache directly without calling touch again
+            assertFalse(CertHack.applyCachedCertificateChain(metadata));
+            assertEquals(2, touchCount.get());
+        } finally {
+            cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            synchronized (cache) {
+                cache.remove(key);
+            }
+        }
+    }
+
+    @Test
     public void computeKeyDescriptorIdentityIsDeterministicAndDifferentiatesDistinctFields() {
         int uid = 10001;
         int domain = 1;

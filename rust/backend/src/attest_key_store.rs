@@ -81,6 +81,28 @@ pub fn get_attest_key(calling_uid: u32, key_id: &KeyId) -> Option<Arc<PreparedIs
     Some(issuer)
 }
 
+#[allow(dead_code)]
+pub fn touch_attest_key(calling_uid: u32, key_id: &KeyId) -> bool {
+    let store = STORE.get_or_init(|| Mutex::new(AttestKeyStore::default()));
+    let mut guard = match store.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let pos = match guard
+        .entries
+        .iter()
+        .position(|e| e.calling_uid == calling_uid && &e.key_id == key_id)
+    {
+        Some(pos) => pos,
+        None => return false,
+    };
+
+    let entry = guard.entries.remove(pos).expect("entry exists");
+    guard.entries.push_back(entry);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +226,35 @@ mod tests {
         assert!(get_attest_key(1000, &id1).is_some());
         assert!(get_attest_key(1000, &id2).is_some());
         assert!(get_attest_key(1000, &id3).is_some());
+    }
+
+    #[test]
+    fn touch_attest_key_updates_lru_and_returns_existence() {
+        let _sequence = isolate_store_sequence();
+        reset_for_testing();
+
+        let id_missing = [99u8; 32];
+        assert!(!touch_attest_key(1000, &id_missing));
+
+        for i in 0..64 {
+            let mut id = [0u8; 32];
+            id[0] = i as u8;
+            insert_attest_key(1000, id, make_test_issuer(&[i as u8]));
+        }
+
+        let mut id0 = [0u8; 32];
+        id0[0] = 0;
+        assert!(touch_attest_key(1000, &id0));
+        assert!(!touch_attest_key(1001, &id0));
+
+        let mut id64 = [0u8; 32];
+        id64[0] = 64;
+        insert_attest_key(1000, id64, make_test_issuer(b"k64"));
+
+        assert!(get_attest_key(1000, &id0).is_some());
+        let mut id1 = [0u8; 32];
+        id1[0] = 1;
+        assert!(get_attest_key(1000, &id1).is_none());
+        assert!(get_attest_key(1000, &id64).is_some());
     }
 }
