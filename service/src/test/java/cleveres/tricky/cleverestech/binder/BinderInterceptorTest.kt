@@ -134,4 +134,44 @@ class BinderInterceptorTest {
         assertTrue(ok)
         assertEquals(BinderInterceptor.CAP_OMIT_POST_REQUEST_PAYLOAD, writtenCapabilities)
     }
+
+    @Test
+    fun requiredPostRequestPayloadCannotBeOmittedByRegistration() {
+        var writtenCapabilities = 0
+        val control =
+            object : Binder() {
+                override fun onTransact(
+                    code: Int,
+                    data: Parcel,
+                    reply: Parcel?,
+                    flags: Int,
+                ): Boolean {
+                    data.readStrongBinder()
+                    data.readStrongBinder()
+                    val count = data.readInt()
+                    repeat(count) { data.readInt() }
+                    if (data.dataAvail() >= Int.SIZE_BYTES) {
+                        writtenCapabilities = data.readInt()
+                    }
+                    reply?.writeInt(0)
+                    return true
+                }
+            }
+        val interceptor =
+            object : BinderInterceptor() {
+                override val requiresPostRequestPayload: Boolean = true
+            }
+
+        val ok =
+            BinderInterceptor.registerBinderInterceptor(
+                control,
+                Binder(),
+                interceptor,
+                intArrayOf(1),
+                BinderInterceptor.CAP_OMIT_POST_REQUEST_PAYLOAD,
+            )
+
+        assertTrue(ok)
+        assertEquals(0, writtenCapabilities)
+    }
 }
