@@ -126,14 +126,8 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 null,
             )
         } else {
-            // Fail closed to the genuine chain, but leave a trace: a persistent divergence
-            // between the RKP and ATTEST_KEY paths on device is diagnosed from logcat.
-            Logger.w(
-                "generateKey POST dropped: unparseable request " +
-                    "(size=" + data.dataSize() +
-                    ", pos=" + data.dataPosition() +
-                    ", uid=" + callingUid + ")",
-            )
+            // Fail closed to the genuine chain. This path stays log-free on purpose:
+            // the generateKey reply path must not allocate or log (timing side-channel).
             return Skip
         }
 
