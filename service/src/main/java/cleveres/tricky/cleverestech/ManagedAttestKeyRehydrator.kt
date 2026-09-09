@@ -25,16 +25,15 @@ internal object ManagedAttestKeyRehydrator {
         val path = ManagedAttestKeyRegistry.rehydrationPath(callingUid, keyId) ?: return false
         if (path.isEmpty()) return false
 
-        for (entry in path) {
-            val presence =
-                runCatching { CertificateBackend.touchAttestKey(callingUid, entry.keyId) }
-                    .getOrElse { return false }
-            when (presence) {
-                CertificateBackend.AttestKeyTouchResult.PRESENT -> continue
-                CertificateBackend.AttestKeyTouchResult.UNAVAILABLE -> return false
-                CertificateBackend.AttestKeyTouchResult.ABSENT -> Unit
-            }
+        // restore() is entered only after the requested signer was authoritatively ABSENT. Rebuild
+        // from one clean graph instead of trying to preserve a partially live ancestry: a stale
+        // Java child cache can otherwise discover its missing Rust entry, clear the graph inside
+        // CertHack validation, and revoke an already-checked parent halfway through reconstruction.
+        // The publication lock above makes this clear -> parent-first rebuild atomic with respect to
+        // certificate generation, cache eviction and active-keybox publication.
+        if (!CertHack.clearCertificateCache()) return false
 
+        for (entry in path) {
             val originalLeaf = LazyX509Certificate(entry.genuineLeafDer, false)
             val original = arrayOf<Certificate>(originalLeaf)
             val rewritten =
