@@ -207,4 +207,35 @@ class ManagedAttestKeyRegistryTest {
         assertEquals(3, path.size)
         assertArrayEquals(a, path[0].keyId)
     }
+
+    @Test
+    fun `saturation evicts unrelated subtrees while protecting complete parent ancestry`() {
+        val uid = 10_123
+        fun descriptor(index: Int): ByteArray =
+            ByteArray(32).also {
+                it[0] = ((index ushr 8) and 0xff).toByte()
+                it[1] = (index and 0xff).toByte()
+                it[2] = 2
+            }
+
+        val root = descriptor(1)
+        val parent = descriptor(2)
+        ManagedAttestKeyRegistry.remember(uid, root, null, byteArrayOf(1), true)
+        ManagedAttestKeyRegistry.remember(uid, parent, root, byteArrayOf(2), true)
+
+        for (index in 3..256) {
+            ManagedAttestKeyRegistry.remember(uid, descriptor(index))
+        }
+
+        val child = descriptor(999)
+        ManagedAttestKeyRegistry.remember(uid, child, parent, byteArrayOf(3), true)
+
+        assertArrayEquals(root, ManagedAttestKeyRegistry.getParentKeyId(uid, parent))
+        assertArrayEquals(parent, ManagedAttestKeyRegistry.getParentKeyId(uid, child))
+        val path = requireNotNull(ManagedAttestKeyRegistry.rehydrationPath(uid, child))
+        assertEquals(3, path.size)
+        assertArrayEquals(root, path[0].keyId)
+        assertArrayEquals(parent, path[1].keyId)
+        assertArrayEquals(child, path[2].keyId)
+    }
 }

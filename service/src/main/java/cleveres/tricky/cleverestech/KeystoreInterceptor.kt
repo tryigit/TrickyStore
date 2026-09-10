@@ -300,7 +300,8 @@ object KeystoreInterceptor : BinderInterceptor() {
             val isAttestKey = isAttestKeyEntry(metadata)
             if (
                 originalLeaf == null ||
-                (!Utils.hasAndroidAttestationExtension(originalLeaf) && !isAttestKey)
+                (!Utils.hasAndroidAttestationExtension(originalLeaf) && !isAttestKey) ||
+                (isAttestKey && requestedKeyId == null)
             ) {
                 return Skip
             }

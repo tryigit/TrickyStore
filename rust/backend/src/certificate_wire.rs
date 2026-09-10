@@ -215,9 +215,16 @@ pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'s
         }
         let parsed = parse_child_key_rewrite_request(&request)?;
 
-        let provenance = inspect_certificate(parsed.genuine_leaf_der)
-            .map_err(|_| "child key rewrite provenance rejected")?;
-        validate_hardware_provenance(&provenance)?;
+        let keymint_security_level = match inspect_certificate(parsed.genuine_leaf_der) {
+            Ok(provenance) => {
+                validate_hardware_provenance(&provenance)?;
+                provenance.keymint_security_level
+            }
+            Err(CertCoreError::MissingAttestationExtension) if parsed.is_attest_key => {
+                SecurityLevel::TrustedEnvironment
+            }
+            Err(_) => return Err("child key rewrite provenance rejected"),
+        };
 
         // Only a parent that was authoritatively rewritten as a supported managed ATTEST_KEY may
         // sign a synthetic child. Persistent aliases are rehydrated through getKeyEntry readback,
@@ -238,7 +245,7 @@ pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'s
                 .map_err(|_| "invalid child certificate")?;
             let (public_key_spki_der, prepared) = derive_attest_issuer(
                 parsed.calling_uid,
-                provenance.keymint_security_level,
+                keymint_security_level,
                 &parsed.child_key_id,
                 subject_der,
             )?;

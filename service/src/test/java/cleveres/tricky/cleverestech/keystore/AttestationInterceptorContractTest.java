@@ -561,6 +561,7 @@ public class AttestationInterceptorContractTest {
 
     @Test
     public void attestKeyGenerationWithoutAttestationExtensionIsRewrittenAndRegistered() throws Exception {
+        byte[] expectedKeyId = Utils.computeKeyDescriptorIdentity(10_001, 0, 0L, null, null);
         KeyPair c = keyPair("EC");
         X509Certificate nonAttested = certificate(c, c, "attest-leaf", "attest-issuer", false);
         KeyMetadata metadata = metadata(nonAttested, null);
@@ -592,7 +593,10 @@ public class AttestationInterceptorContractTest {
             BinderInterceptor.Result result = generate(request, reply);
             assertTrue(result instanceof BinderInterceptor.OverrideReply);
             backend.verify(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()));
+            assertTrue(cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.INSTANCE.isAttestKey(10_001, expectedKeyId));
             ((BinderInterceptor.OverrideReply) result).getReply().recycle();
+        } finally {
+            cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.resetForTesting();
         }
     }
 

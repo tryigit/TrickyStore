@@ -90,8 +90,17 @@ internal object ManagedAttestKeyRegistry {
         val lookup = Identity.lookup(callingUid, nonNullKeyId)
         val parentLookup = if (parentKeyId != null) Identity.lookup(callingUid, parentKeyId) else null
         val parentExistedBefore = parentLookup != null && entries.containsKey(parentLookup)
-        if (parentLookup != null) {
-            entries[parentLookup]
+        val protectedAncestry = HashSet<Identity>()
+        if (parentKeyId != null) {
+            var curr: ByteArray? = parentKeyId
+            var depth = 0
+            while (curr != null && depth < MAX_ANCESTRY_DEPTH) {
+                val id = Identity.lookup(callingUid, curr)
+                if (!protectedAncestry.add(id)) break
+                val entry = entries[id] ?: break
+                curr = entry.parentKeyId
+                depth++
+            }
         }
 
         val old = entries.remove(lookup)
@@ -100,7 +109,9 @@ internal object ManagedAttestKeyRegistry {
         if (old == null && entries.size >= MAX_ENTRIES) {
             conservativeMode = true
             while (entries.size >= MAX_ENTRIES) {
-                evictOldestSubtreeLocked()
+                if (!evictOldestSubtreeLocked(protectedAncestry)) {
+                    return
+                }
             }
             if (parentExistedBefore && !entries.containsKey(parentLookup)) {
                 return
@@ -188,11 +199,14 @@ internal object ManagedAttestKeyRegistry {
         return depth >= MAX_ANCESTRY_DEPTH
     }
 
-    private fun evictOldestSubtreeLocked() {
-        val iterator = entries.entries.iterator()
-        if (!iterator.hasNext()) return
-        val eldest = iterator.next()
-        removeSubtreeLocked(eldest.key.uid, eldest.key.keyId)
+    private fun evictOldestSubtreeLocked(protected: Set<Identity>): Boolean {
+        for (entry in entries.entries) {
+            if (!protected.contains(entry.key)) {
+                removeSubtreeLocked(entry.key.uid, entry.key.keyId)
+                return true
+            }
+        }
+        return false
     }
 
     private fun removeSubtreeLocked(uid: Int, rootKeyId: ByteArray) {

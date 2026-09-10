@@ -287,7 +287,10 @@ mod fixture {
         ));
     }
 
-    pub(super) fn synthetic_leaf_without_attestation(issuer: &Certificate) -> Certificate {
+    pub(super) fn synthetic_leaf_without_attestation(
+        issuer: &Certificate,
+        spki_der: &[u8],
+    ) -> Certificate {
         let issuer_tbs = issuer.tbs_certificate();
         let version = explicit_x509_tag(0, &2i32.to_der().expect("v3 DER"));
         let serial = 0x80i32.to_der().expect("serial DER");
@@ -298,10 +301,6 @@ mod fixture {
         let issuer_name = issuer_tbs.subject().to_der().expect("issuer name DER");
         let validity = issuer_tbs.validity().to_der().expect("validity DER");
         let subject = issuer_tbs.subject().to_der().expect("subject DER");
-        let spki = issuer_tbs
-            .subject_public_key_info()
-            .to_der()
-            .expect("SPKI DER");
 
         let mut extensions = issuer_tbs.extensions().cloned().unwrap_or_default();
         extensions.retain(|extension| extension.extn_id != ANDROID_ATTESTATION_OID);
@@ -315,7 +314,7 @@ mod fixture {
             issuer_name.as_slice(),
             validity.as_slice(),
             subject.as_slice(),
-            spki.as_slice(),
+            spki_der,
             extensions.as_slice(),
         ]);
         let outer_algorithm = issuer
@@ -356,7 +355,18 @@ mod fixture {
         )
         .expect("prepared issuer");
 
-        let leaf_without_attest = synthetic_leaf_without_attestation(&issuer);
+        let rsa_doc = parse_keybox_xml_bytes(rsa()).expect("fixture rsa XML");
+        let rsa_key = rsa_doc.keys.first().expect("rsa key");
+        let rsa_issuer_pem = rsa_key.certificates_pem.first().expect("rsa cert");
+        let rsa_cert =
+            Certificate::from_pem(normalized_pem(rsa_issuer_pem).as_bytes()).expect("rsa cert");
+        let genuine_spki = rsa_cert
+            .tbs_certificate()
+            .subject_public_key_info()
+            .to_der()
+            .expect("rsa SPKI DER");
+
+        let leaf_without_attest = synthetic_leaf_without_attestation(&issuer, &genuine_spki);
         let leaf_der = leaf_without_attest.to_der().expect("leaf DER");
 
         let fail_result = cleverestricky_certificate_core::rewrite_certificate_prepared(
@@ -381,6 +391,8 @@ mod fixture {
             .subject_public_key_info()
             .to_der()
             .expect("SPKI DER");
+        assert_ne!(synthetic_spki, genuine_spki);
+
         let rewritten = cleverestricky_certificate_core::rewrite_certificate_prepared(
             &cleverestricky_certificate_core::PreparedCertificateRewriteRequest {
                 genuine_leaf_der: &leaf_der,
@@ -403,6 +415,15 @@ mod fixture {
                 boot: None,
             }
         );
+
+        let output = Certificate::from_der(&rewritten.leaf_der).expect("rewritten DER");
+        let rewritten_spki = output
+            .tbs_certificate()
+            .subject_public_key_info()
+            .to_der()
+            .expect("rewritten SPKI");
+        assert_eq!(rewritten_spki, synthetic_spki);
+        assert_ne!(rewritten_spki, genuine_spki);
     }
 
     pub(super) fn ec() -> &'static [u8] {
