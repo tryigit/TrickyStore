@@ -53,6 +53,7 @@ internal object ManagedAttestKeyRegistry {
     private class Entry(
         parentKeyId: ByteArray?,
         genuineLeafDer: ByteArray?,
+        val isAttestKey: Boolean,
     ) {
         val parentKeyId = parentKeyId?.clone()
         var genuineLeafDer = genuineLeafDer?.clone()
@@ -66,32 +67,23 @@ internal object ManagedAttestKeyRegistry {
 
     @Synchronized
     fun remember(callingUid: Int, keyId: ByteArray?) {
-        if (!isValid(callingUid, keyId)) return
-        val nonNullKeyId = requireNotNull(keyId)
-        val lookup = Identity.lookup(callingUid, nonNullKeyId)
-        val old = entries.remove(lookup)
-        if (old == null && entries.size >= MAX_ENTRIES) {
-            conservativeMode = true
-            return
-        }
-        if (old != null) retainedProofBytes -= old.proofBytes()
-        val stored = old ?: Entry(null, null)
-        entries[Identity.stored(callingUid, nonNullKeyId)] = stored
-        retainedProofBytes += stored.proofBytes()
-        trimProofBytesLocked()
+        remember(callingUid, keyId, null, null, true)
     }
 
+    @JvmOverloads
     @Synchronized
     fun remember(
         callingUid: Int,
         keyId: ByteArray?,
         parentKeyId: ByteArray?,
         genuineLeafDer: ByteArray?,
+        isAttestKey: Boolean = true,
     ) {
         if (!isValid(callingUid, keyId)) return
         if (parentKeyId != null && !isValid(callingUid, parentKeyId)) return
         if (parentKeyId != null && Arrays.equals(keyId, parentKeyId)) return
-        if (genuineLeafDer != null && (genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_LEAF_BYTES)) return
+        val effectiveLeafDer = if (isAttestKey) genuineLeafDer else null
+        if (effectiveLeafDer != null && (effectiveLeafDer.isEmpty() || effectiveLeafDer.size > MAX_LEAF_BYTES)) return
 
         val nonNullKeyId = requireNotNull(keyId)
         val lookup = Identity.lookup(callingUid, nonNullKeyId)
@@ -102,7 +94,7 @@ internal object ManagedAttestKeyRegistry {
         }
         if (old != null) retainedProofBytes -= old.proofBytes()
 
-        val stored = Entry(parentKeyId, genuineLeafDer ?: old?.genuineLeafDer)
+        val stored = Entry(parentKeyId, effectiveLeafDer ?: (if (isAttestKey) old?.genuineLeafDer else null), isAttestKey)
         entries[Identity.stored(callingUid, nonNullKeyId)] = stored
         retainedProofBytes += stored.proofBytes()
         trimProofBytesLocked()
@@ -112,6 +104,13 @@ internal object ManagedAttestKeyRegistry {
     fun isKnown(callingUid: Int, keyId: ByteArray?): Boolean {
         if (!isValid(callingUid, keyId)) return false
         return conservativeMode || entries[Identity.lookup(callingUid, requireNotNull(keyId))] != null
+    }
+
+    @Synchronized
+    fun isAttestKey(callingUid: Int, keyId: ByteArray?): Boolean {
+        if (!isValid(callingUid, keyId)) return false
+        val entry = entries[Identity.lookup(callingUid, requireNotNull(keyId))] ?: return false
+        return entry.isAttestKey
     }
 
     /**
@@ -139,6 +138,7 @@ internal object ManagedAttestKeyRegistry {
             val lookup = Identity.lookup(callingUid, current)
             if (!seen.add(Identity.stored(callingUid, current))) return null
             val entry = entries[lookup] ?: return null
+            if (!entry.isAttestKey) return null
             val leaf = entry.genuineLeafDer ?: return null
             reversed.add(
                 RehydrationEntry(

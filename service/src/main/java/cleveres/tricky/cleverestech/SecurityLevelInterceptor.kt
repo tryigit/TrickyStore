@@ -194,12 +194,13 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 if (rewritten === originalLeafOnly) {
                     return Skip
                 }
-                if (context.isAttestKeyPurpose) {
+                if (context.isAttestKeyPurpose || context.parentKeyId != null) {
                     ManagedAttestKeyRegistry.remember(
                         callingUid,
                         context.generatedKeyId,
                         context.parentKeyId,
                         parsed.leafEncoded,
+                        context.isAttestKeyPurpose,
                     )
                 }
 
@@ -288,12 +289,13 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             if (rewritten === originalLeafOnly) {
                 return Skip
             }
-            if (context.isAttestKeyPurpose) {
+            if (context.isAttestKeyPurpose || context.parentKeyId != null) {
                 ManagedAttestKeyRegistry.remember(
                     callingUid,
                     context.generatedKeyId,
                     context.parentKeyId,
                     metadata.certificate,
+                    context.isAttestKeyPurpose,
                 )
             }
 

@@ -116,4 +116,23 @@ class ManagedAttestKeyRegistryTest {
         ManagedAttestKeyRegistry.remember(uid, child, missingParent, byteArrayOf(9))
         assertNull(ManagedAttestKeyRegistry.rehydrationPath(uid, child))
     }
+
+    @Test
+    fun `child key records parent relation but is not an attest key and cannot be rehydrated`() {
+        val uid = 10_123
+        val parent = ByteArray(32) { 0x71 }
+        val child = ByteArray(32) { 0x72 }
+        val childLeaf = byteArrayOf(1, 2, 3)
+
+        ManagedAttestKeyRegistry.remember(uid, parent, null, byteArrayOf(9), true)
+        ManagedAttestKeyRegistry.remember(uid, child, parent, childLeaf, false)
+
+        assertTrue(ManagedAttestKeyRegistry.isKnown(uid, child))
+        assertTrue(ManagedAttestKeyRegistry.isAttestKey(uid, parent))
+        assertFalse(ManagedAttestKeyRegistry.isAttestKey(uid, child))
+        assertFalse(ManagedAttestKeyRegistry.isAttestKey(uid, ByteArray(32) { 0x99.toByte() }))
+        assertArrayEquals(parent, ManagedAttestKeyRegistry.getParentKeyId(uid, child))
+        assertNull(ManagedAttestKeyRegistry.getParentKeyId(uid, parent))
+        assertNull(ManagedAttestKeyRegistry.rehydrationPath(uid, child))
+    }
 }

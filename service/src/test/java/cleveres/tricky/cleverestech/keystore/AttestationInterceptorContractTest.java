@@ -33,6 +33,7 @@ import java.util.Date;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
@@ -165,7 +166,7 @@ public class AttestationInterceptorContractTest {
         X509Certificate childLeaf = certificate(subject, parent, "managed-child", "parent");
         X509Certificate replacement = certificate(subject, parent, "replacement", "parent");
         cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.INSTANCE.remember(
-                44_502, childId, parentId, null);
+                44_502, childId, parentId, null, false);
         cleveres.tricky.cleverestech.CertificateBackend.setTouchAttestKeyOverrideForTesting(
                 (uid, id) -> cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.PRESENT);
         try (MockedStatic<CertHack> backend = mockStatic(CertHack.class);
@@ -204,6 +205,67 @@ public class AttestationInterceptorContractTest {
             assertSame(before, ordinaryMetadata.certificate);
         } finally {
             // Registry entries use a test-unique UID (44_502), so no reset is needed.
+            cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            keystore.set(null, previous);
+            globalModeField.set(Config.INSTANCE, prevGlobalMode);
+        }
+    }
+
+    @Test
+    public void childKeyReadbackDoesNotTouchRustBackendAndRewritesUsingRegistryParent() throws Exception {
+        Binder target = new Binder();
+        Field keystore = field(KeystoreInterceptor.class, "keystore");
+        Object previous = keystore.get(null);
+        keystore.set(null, target);
+        Field globalModeField = field(Config.class, "isGlobalMode");
+        boolean prevGlobalMode = (boolean) globalModeField.get(Config.INSTANCE);
+        globalModeField.set(Config.INSTANCE, true);
+        Config.INSTANCE.setPackagesForTesting(44_503, new String[] {"com.test.childnotouch"});
+        byte[] parentId = new byte[32];
+        parentId[0] = 5;
+        parentId[1] = 9;
+        byte[] childId = Utils.computeKeyDescriptorIdentity(44_503, 0, -1L, "child-no-touch", null);
+        KeyPair parent = keyPair("EC");
+        KeyPair subject = keyPair("EC");
+        X509Certificate childLeaf = certificate(subject, parent, "child-no-touch", "parent");
+        X509Certificate replacement = certificate(subject, parent, "replacement", "parent");
+
+        // Remember as child key (isAttestKey = false)
+        cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.INSTANCE.remember(
+                44_503, childId, parentId, null, false);
+
+        java.util.concurrent.atomic.AtomicBoolean childTouched = new java.util.concurrent.atomic.AtomicBoolean(false);
+        cleveres.tricky.cleverestech.CertificateBackend.setTouchAttestKeyOverrideForTesting((uid, id) -> {
+            if (java.util.Arrays.equals(id, childId)) {
+                childTouched.set(true);
+                return cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.ABSENT;
+            }
+            return cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.PRESENT;
+        });
+
+        try (MockedStatic<CertHack> backend = mockStatic(CertHack.class);
+             MockedStatic<Parcel> parcels = mockStatic(Parcel.class)) {
+            backend.when(CertHack::canHack).thenReturn(true);
+            backend.when(() -> CertHack.hackChildKeyCertificate(
+                    any(), anyInt(), anyBoolean(), anyBoolean(), any(), any()))
+                    .thenReturn(new Certificate[] {replacement});
+            Parcel obtained = mock(Parcel.class);
+            parcels.when(Parcel::obtain).thenReturn(obtained);
+
+            KeyMetadata metadata = metadata(childLeaf, null);
+            KeyEntryResponse response = new KeyEntryResponse();
+            response.metadata = metadata;
+            Parcel reply = mock(Parcel.class);
+            when(reply.readTypedObject(KeyEntryResponse.CREATOR)).thenReturn(response);
+
+            BinderInterceptor.Result result = KeystoreInterceptor.INSTANCE.onPostTransact(target,
+                    field(KeystoreInterceptor.class, "getKeyEntryTransaction").getInt(null),
+                    0, 44_503, 42, descriptorRequest("child-no-touch"), reply, 0);
+
+            assertTrue(result instanceof BinderInterceptor.OverrideReply);
+            assertArrayEquals(replacement.getEncoded(), metadata.certificate);
+            assertFalse("Child key must NOT trigger touchAttestKey on getKeyEntry", childTouched.get());
+        } finally {
             cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
             keystore.set(null, previous);
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
