@@ -1354,10 +1354,7 @@ public final class CertHack {
                     }
                     return caList;
                 }
-                if (platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_TEE
-                        || platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
-                    if (kmLevel != platformSecurityLevel) return caList;
-                }
+                if (platformSecurityLevel != 0 && kmLevel != platformSecurityLevel) return caList;
 
                 boolean needsCapturedPatchLevels = PolicyState.INSTANCE.isFeatureEnabled(
                         PolicyState.Feature.SECURITY_PATCH, uid);
@@ -1626,10 +1623,7 @@ public final class CertHack {
                     }
                     return caList;
                 }
-                if (platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_TEE
-                        || platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
-                    if (kmLevel != platformSecurityLevel) return caList;
-                }
+                if (platformSecurityLevel != 0 && kmLevel != platformSecurityLevel) return caList;
 
                 boolean needsCapturedPatchLevels = PolicyState.INSTANCE.isFeatureEnabled(
                         PolicyState.Feature.SECURITY_PATCH, uid);
