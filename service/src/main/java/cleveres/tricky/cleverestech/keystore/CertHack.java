@@ -1412,7 +1412,17 @@ public final class CertHack {
             }
             keyId = prepared.keyId.clone();
 
-            if (!clearCertificateCache()) {
+            // Evict only this attest-key subtree instead of clearing the whole graph. A
+            // global clear on every attest-key generation wipes unrelated keys, other
+            // UIDs, and previously completed pairs that checkers re-read later, which
+            // systematically breaks multi-key attest graphs while RKP keys (which never
+            // clear here) keep working. The Rust remove cascades to descendants, and the
+            // insert below replaces this same subtree, so re-keying stays correct.
+            evictDescendants(cache, attestKeyId);
+            CertificateBackend.AttestKeyRemoveResult subtreeRemoved =
+                    CertificateBackend.removeAttestKey(uid, attestKeyId);
+            if (subtreeRemoved == CertificateBackend.AttestKeyRemoveResult.UNAVAILABLE) {
+                graphStateUnhealthy = true;
                 return caList;
             }
             synchronized (cache) {
