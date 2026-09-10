@@ -47,6 +47,7 @@ class AttestSubtreeEvictionTest {
 
     private val removeCalls = mutableListOf<Pair<Int, ByteArray>>()
     private var clearCalls = 0
+    private val events = mutableListOf<String>()
 
     @Before
     fun setUp() {
@@ -94,14 +95,17 @@ class AttestSubtreeEvictionTest {
             )
         }
         CertificateBackend.rewriteAttestKeyOverride = { _, _, _ ->
+            events.add("rewrite")
             byteArrayOf(0x30, 0x01, 0x00)
         }
         CertificateBackend.removeAttestKeyOverride = { callingUid, keyId ->
             removeCalls.add(callingUid to keyId.clone())
+            events.add("remove")
             CertificateBackend.AttestKeyRemoveResult.REMOVED
         }
         CertificateBackend.clearAttestKeyStoreOverride = {
             clearCalls++
+            events.add("clear")
             true
         }
         // Keybox publication above may run a real backend clear while no override is
@@ -146,6 +150,46 @@ class AttestSubtreeEvictionTest {
         assertEquals(uid, removeCalls[0].first)
         assertArrayEquals(freshKeyId, removeCalls[0].second)
         assertEquals("graph-wide clear must not run on attest-key generation", 0, clearCalls)
+        assertFalse(CertHack.isGraphStateUnhealthyForTesting())
+    }
+
+    @Test
+    fun `rotating an attest key evicts the stale root and its descendant`() {
+        val rotatedId = ByteArray(32) { (it + 11).toByte() }
+        val staleRootKey = cacheKey(byteArrayOf(21, 22, 23))
+        putCacheEntry(
+            staleRootKey,
+            byteArrayOf(51, 52),
+            uid = uid,
+            attestKeyId = rotatedId,
+            parentKeyId = null,
+        )
+        val descendantKey = cacheKey(byteArrayOf(31, 32, 33))
+        putCacheEntry(
+            descendantKey,
+            byteArrayOf(61, 62),
+            uid = uid,
+            attestKeyId = null,
+            parentKeyId = rotatedId,
+        )
+
+        val freshLeaf = attestedLeaf("rotated-attest-key")
+        val original = arrayOf<Certificate>(freshLeaf)
+        val rewritten = CertHack.hackAttestKeyCertificateChain(original, uid, true, rotatedId)
+
+        assertTrue("rotated attest key must be rewritten", rewritten !== original)
+        assertFalse("stale root entry must be evicted", containsCacheKey(staleRootKey))
+        assertFalse("stale descendant entry must be evicted", containsCacheKey(descendantKey))
+        assertTrue(
+            "replacement entry must be published",
+            containsCacheKey(cacheKey(freshLeaf.encoded)),
+        )
+        val removals = removeCalls.filter { it.first == uid && it.second.contentEquals(rotatedId) }
+        assertEquals("stale root backend state must be removed", 2, removals.size)
+        val rewriteIndex = events.indexOf("rewrite")
+        val lastRemovalIndex = events.indexOfLast { it == "remove" }
+        assertTrue(rewriteIndex >= 0 && lastRemovalIndex >= 0 && lastRemovalIndex < rewriteIndex)
+        assertFalse("rotation must not clear unrelated graph state", events.contains("clear"))
         assertFalse(CertHack.isGraphStateUnhealthyForTesting())
     }
 

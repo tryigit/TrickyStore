@@ -892,17 +892,36 @@ public final class CertHack {
         }
     }
 
-    private static void evictDescendants(State.CertificateCache cache, byte[] parentKeyId) {
+    /**
+     * Evicts one caller's attest-key subtree: the stale root entry recorded under the
+     * rotated identifier plus every descendant linked to it. The root itself must go too:
+     * it retains the same backend identifier as the replacement root, so a later
+     * trim-eviction of the stale entry would delete the newly installed backend key
+     * instead. Descriptor identities already embed the caller UID, and entries are
+     * additionally scoped by it so unrelated callers are never touched.
+     */
+    private static void evictDescendants(State.CertificateCache cache, int callingUid, byte[] parentKeyId) {
         if (cache == null || parentKeyId == null) return;
         List<CacheKey> keysToRemove = new ArrayList<>();
         List<byte[]> descendantIds = new ArrayList<>();
         descendantIds.add(parentKeyId);
         synchronized (cache) {
+            for (Map.Entry<CacheKey, CachedCertificateChain> entry : cache.entrySet()) {
+                CachedCertificateChain entryValue = entry.getValue();
+                if (entryValue != null
+                        && entryValue.attestKeyCallingUid == callingUid
+                        && entryValue.attestKeyId != null
+                        && Arrays.equals(entryValue.attestKeyId, parentKeyId)
+                        && !keysToRemove.contains(entry.getKey())) {
+                    keysToRemove.add(entry.getKey());
+                }
+            }
             for (int index = 0; index < descendantIds.size(); index++) {
                 byte[] currentParent = descendantIds.get(index);
                 for (Map.Entry<CacheKey, CachedCertificateChain> entry : cache.entrySet()) {
                     CachedCertificateChain entryValue = entry.getValue();
                     if (entryValue != null
+                            && entryValue.attestKeyCallingUid == callingUid
                             && entryValue.parentKeyId != null
                             && Arrays.equals(entryValue.parentKeyId, currentParent)
                             && !keysToRemove.contains(entry.getKey())) {
@@ -1418,7 +1437,7 @@ public final class CertHack {
             // systematically breaks multi-key attest graphs while RKP keys (which never
             // clear here) keep working. The Rust remove cascades to descendants, and the
             // insert below replaces this same subtree, so re-keying stays correct.
-            evictDescendants(cache, attestKeyId);
+            evictDescendants(cache, uid, attestKeyId);
             CertificateBackend.AttestKeyRemoveResult subtreeRemoved =
                     CertificateBackend.removeAttestKey(uid, attestKeyId);
             if (subtreeRemoved == CertificateBackend.AttestKeyRemoveResult.UNAVAILABLE) {
@@ -1535,7 +1554,7 @@ public final class CertHack {
             }
 
             if (isAttestKey && childKeyId != null) {
-                evictDescendants(cache, childKeyId);
+                evictDescendants(cache, uid, childKeyId);
             }
 
             if (!Utils.hasAndroidAttestationExtension(caList[0])) return caList;
