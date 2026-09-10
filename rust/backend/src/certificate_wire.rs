@@ -2,9 +2,9 @@ use crate::attest_key_store;
 use crate::keybox_wire::key_store::{self, KeyId, KEY_ID_BYTES};
 use cleverestricky_certificate_core::{
     inspect_certificate, parse_certificate_subject_and_issuer, rewrite_certificate_prepared,
-    AttestationIdOverride, CertificateInspection, PatchComponent, PatchLevels,
-    PreparedCertificateRewriteRequest, PreparedIssuer, SecurityLevel, SigningAlgorithm,
-    MAX_ATTESTATION_ID_BYTES, MAX_CERTIFICATE_DER_BYTES, MAX_MODULE_HASH_BYTES,
+    AttestationIdOverride, CertificateInspection, Error as CertCoreError, PatchComponent,
+    PatchLevels, PreparedCertificateRewriteRequest, PreparedIssuer, SecurityLevel,
+    SigningAlgorithm, MAX_ATTESTATION_ID_BYTES, MAX_CERTIFICATE_DER_BYTES, MAX_MODULE_HASH_BYTES,
 };
 use zeroize::Zeroize;
 
@@ -150,9 +150,14 @@ pub fn rewrite_attest_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'
         }
         let parsed = parse_attest_key_rewrite_request(&request)?;
 
-        let provenance = inspect_certificate(parsed.genuine_leaf_der)
-            .map_err(|_| "attest key rewrite provenance rejected")?;
-        validate_hardware_provenance(&provenance)?;
+        let keymint_security_level = match inspect_certificate(parsed.genuine_leaf_der) {
+            Ok(provenance) => {
+                validate_hardware_provenance(&provenance)?;
+                provenance.keymint_security_level
+            }
+            Err(CertCoreError::MissingAttestationExtension) => SecurityLevel::TrustedEnvironment,
+            Err(_) => return Err("attest key rewrite provenance rejected"),
+        };
 
         if !cleverestricky_certificate_core::is_ec_p256_certificate(parsed.genuine_leaf_der)
             .map_err(|_| "invalid attest key certificate")?
@@ -172,7 +177,7 @@ pub fn rewrite_attest_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'
 
             let (public_key_spki_der, prepared_for_children) = derive_attest_issuer(
                 parsed.calling_uid,
-                provenance.keymint_security_level,
+                keymint_security_level,
                 &parsed.attest_key_id,
                 subject_der,
             )?;

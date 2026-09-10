@@ -15,6 +15,9 @@ public interface IKeystoreSecurityLevel extends IInterface {
                             KeyParameter[] params, int flags, byte[] entropy);
 
     class Stub {
+        public static final int TRANSACTION_createOperation = 1;
+        public static final int TRANSACTION_generateKey = 2;
+
         public static IKeystoreSecurityLevel asInterface(IBinder b) {
             throw new RuntimeException("");
         }

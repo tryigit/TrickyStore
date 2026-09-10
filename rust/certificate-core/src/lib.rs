@@ -357,62 +357,91 @@ pub fn rewrite_certificate_prepared(
         }
     }
 
-    let extensions_explicit_der =
-        extensions_explicit_der.ok_or(Error::MissingAttestationExtension)?;
-    let extensions_explicit = parse_any(extensions_explicit_der)?;
-    let extensions_seq = parse_any(extensions_explicit.value())?;
-    if extensions_seq.tag() != Tag::Sequence {
-        return Err(Error::InvalidCertificate);
-    }
-
-    let mut attestation_info = None;
-    let mut extension_count = 0usize;
-    for ext_field in TlvIterator::new(extensions_seq.value()) {
-        let ext_der = ext_field?;
-        let parsed = parse_extension(ext_der)?;
-        let extn_id = parse_any(parsed.id_der)?;
-        if extn_id.value() == ANDROID_ATTESTATION_OID_BYTES {
-            if attestation_info.is_some() {
-                return Err(Error::DuplicateAttestationExtension);
+    let (new_extensions_explicit, captured_patch_levels) = match extensions_explicit_der {
+        Some(ext_der) => {
+            let extensions_explicit = parse_any(ext_der)?;
+            let extensions_seq = parse_any(extensions_explicit.value())?;
+            if extensions_seq.tag() != Tag::Sequence {
+                return Err(Error::InvalidCertificate);
             }
-            attestation_info = Some((
-                extension_count,
-                parsed.id_der,
-                parsed.critical_der,
-                parsed.value_bytes,
-            ));
+
+            let mut attestation_info = None;
+            let mut extension_count = 0usize;
+            for ext_field in TlvIterator::new(extensions_seq.value()) {
+                let ext_der = ext_field?;
+                let parsed = parse_extension(ext_der)?;
+                let extn_id = parse_any(parsed.id_der)?;
+                if extn_id.value() == ANDROID_ATTESTATION_OID_BYTES {
+                    if attestation_info.is_some() {
+                        return Err(Error::DuplicateAttestationExtension);
+                    }
+                    attestation_info = Some((
+                        extension_count,
+                        parsed.id_der,
+                        parsed.critical_der,
+                        parsed.value_bytes,
+                    ));
+                }
+                extension_count = extension_count
+                    .checked_add(1)
+                    .ok_or(Error::InvalidCertificate)?;
+            }
+
+            if let Some((index, id_der, critical_der, extn_value)) = attestation_info {
+                let rewritten = rewrite_extension(&RewriteRequest {
+                    extension_der: extn_value,
+                    patch_levels: request.patch_levels,
+                    id_overrides: request.id_overrides,
+                    module_hash: request.module_hash,
+                    verified_boot_key: request.verified_boot_key,
+                    verified_boot_hash: request.verified_boot_hash,
+                })
+                .map_err(|_| Error::AttestationRewrite)?;
+
+                let new_extn_value_der = Any::new(Tag::OctetString, rewritten.extension_der)
+                    .map_err(|_| Error::Encoding)?
+                    .to_der()
+                    .map_err(|_| Error::Encoding)?;
+
+                let new_ext = match critical_der {
+                    Some(crit) => encode_sequence(&[id_der, crit, &new_extn_value_der])?,
+                    None => encode_sequence(&[id_der, &new_extn_value_der])?,
+                };
+
+                let new_extensions_seq =
+                    encode_sequence_replacing_tlv(extensions_seq.value(), index, &new_ext)?;
+                (
+                    encode_explicit(3, &new_extensions_seq)?,
+                    rewritten.captured_patch_levels,
+                )
+            } else if request.subject_public_key_info.is_some() {
+                (
+                    ext_der.to_vec(),
+                    CapturedPatchLevels {
+                        system: None,
+                        vendor: None,
+                        boot: None,
+                    },
+                )
+            } else {
+                return Err(Error::MissingAttestationExtension);
+            }
         }
-        extension_count = extension_count
-            .checked_add(1)
-            .ok_or(Error::InvalidCertificate)?;
-    }
-
-    let (index, id_der, critical_der, extn_value) =
-        attestation_info.ok_or(Error::MissingAttestationExtension)?;
-
-    let rewritten = rewrite_extension(&RewriteRequest {
-        extension_der: extn_value,
-        patch_levels: request.patch_levels,
-        id_overrides: request.id_overrides,
-        module_hash: request.module_hash,
-        verified_boot_key: request.verified_boot_key,
-        verified_boot_hash: request.verified_boot_hash,
-    })
-    .map_err(|_| Error::AttestationRewrite)?;
-
-    let new_extn_value_der = Any::new(Tag::OctetString, rewritten.extension_der)
-        .map_err(|_| Error::Encoding)?
-        .to_der()
-        .map_err(|_| Error::Encoding)?;
-
-    let new_ext = match critical_der {
-        Some(crit) => encode_sequence(&[id_der, crit, &new_extn_value_der])?,
-        None => encode_sequence(&[id_der, &new_extn_value_der])?,
+        None => {
+            if request.subject_public_key_info.is_some() {
+                (
+                    Vec::new(),
+                    CapturedPatchLevels {
+                        system: None,
+                        vendor: None,
+                        boot: None,
+                    },
+                )
+            } else {
+                return Err(Error::MissingAttestationExtension);
+            }
+        }
     };
-
-    let new_extensions_seq =
-        encode_sequence_replacing_tlv(extensions_seq.value(), index, &new_ext)?;
-    let new_extensions_explicit = encode_explicit(3, &new_extensions_seq)?;
 
     let algorithm_der = signature_algorithm_der(request.issuer.algorithm());
     let mut tbs_out: [&[u8]; 10] = [&[]; 10];
@@ -439,8 +468,10 @@ pub fn rewrite_certificate_prepared(
         tbs_out[tbs_len] = uid;
         tbs_len += 1;
     }
-    tbs_out[tbs_len] = &new_extensions_explicit;
-    tbs_len += 1;
+    if !new_extensions_explicit.is_empty() {
+        tbs_out[tbs_len] = &new_extensions_explicit;
+        tbs_len += 1;
+    }
 
     let tbs_der = encode_sequence(&tbs_out[..tbs_len])?;
 
@@ -450,7 +481,7 @@ pub fn rewrite_certificate_prepared(
     }
     Ok(CertificateRewriteResult {
         leaf_der,
-        captured_patch_levels: rewritten.captured_patch_levels,
+        captured_patch_levels,
     })
 }
 

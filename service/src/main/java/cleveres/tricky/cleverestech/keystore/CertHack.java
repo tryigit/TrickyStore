@@ -1319,55 +1319,79 @@ public final class CertHack {
                 return replacement == null ? caList : replacement;
             }
 
-            if (!Utils.hasAndroidAttestationExtension(caList[0])) return caList;
+            boolean hasAttestExt = Utils.hasAndroidAttestationExtension(caList[0]);
+            boolean isStrongbox;
+            byte[] verifiedBootKey;
+            byte[] verifiedBootHash;
+            Config.AttestationPatchLevels patchLevels;
+            Map<Integer, byte[]> idOverrides;
+            byte[] moduleHash;
 
-            attestInspection = CertificateBackend.inspect(leafEncoded);
-            if (attestInspection == null) return caList;
-            int attLevel = attestInspection.getAttestationSecurityLevel();
-            int kmLevel = attestInspection.getKeymintSecurityLevel();
-            boolean isTee = attLevel == CertificateBackend.SECURITY_LEVEL_TEE
-                    && kmLevel == CertificateBackend.SECURITY_LEVEL_TEE;
-            boolean isStrongbox =
-                    (attLevel == CertificateBackend.SECURITY_LEVEL_TEE
-                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX)
-                    || (attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
-                            && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX);
-            boolean isTeeOrStrongbox = isTee || isStrongbox;
-            if (!isTeeOrStrongbox) {
-                synchronized (cache) {
-                    if (state == currentState && currentState.certificateCacheEpoch == cacheEpoch) {
-                        cache.putIfAbsent(cacheKey, CachedCertificateChain.passthrough());
+            if (hasAttestExt) {
+                attestInspection = CertificateBackend.inspect(leafEncoded);
+                if (attestInspection == null) return caList;
+                int attLevel = attestInspection.getAttestationSecurityLevel();
+                int kmLevel = attestInspection.getKeymintSecurityLevel();
+                boolean isTee = attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                        && kmLevel == CertificateBackend.SECURITY_LEVEL_TEE;
+                isStrongbox =
+                        (attLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                                && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX)
+                        || (attLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX
+                                && kmLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX);
+                boolean isTeeOrStrongbox = isTee || isStrongbox;
+                if (!isTeeOrStrongbox) {
+                    synchronized (cache) {
+                        if (state == currentState && currentState.certificateCacheEpoch == cacheEpoch) {
+                            cache.putIfAbsent(cacheKey, CachedCertificateChain.passthrough());
+                        }
                     }
+                    return caList;
                 }
-                return caList;
-            }
 
-            boolean needsCapturedPatchLevels = PolicyState.INSTANCE.isFeatureEnabled(
-                    PolicyState.Feature.SECURITY_PATCH, uid);
-            byte[] originalBootKey = usableBootDigest(attestInspection.getOriginalBootKey());
-            if (originalBootKey != null) {
-                capturedHardwareBootKey = originalBootKey.clone();
+                boolean needsCapturedPatchLevels = PolicyState.INSTANCE.isFeatureEnabled(
+                        PolicyState.Feature.SECURITY_PATCH, uid);
+                byte[] originalBootKey = usableBootDigest(attestInspection.getOriginalBootKey());
+                if (originalBootKey != null) {
+                    capturedHardwareBootKey = originalBootKey.clone();
+                }
+                byte[] originalBootHash = usableBootDigest(attestInspection.getOriginalBootHash());
+                if (originalBootHash != null) {
+                    capturedHardwareBootHash = originalBootHash.clone();
+                }
+                verifiedBootKey = selectVerifiedBootDigest(
+                        UtilKt.getBootKey(),
+                        originalBootKey != null ? originalBootKey : capturedHardwareBootKey,
+                        UtilKt.getPersistentBootKey());
+                verifiedBootHash = selectVerifiedBootDigest(
+                        UtilKt.getBootHash(),
+                        originalBootHash != null ? originalBootHash : capturedHardwareBootHash,
+                        UtilKt.getPersistentBootHash());
+                patchLevels = needsCapturedPatchLevels
+                        ? PolicyState.INSTANCE.resolveAttestationPatchLevels(
+                                uid,
+                                attestInspection.getSystemPatch(),
+                                attestInspection.getVendorPatch(),
+                                attestInspection.getBootPatch())
+                        : keepPatchLevels();
+                idOverrides = presentIdOverrides(uid, attestInspection.getPresentIdMask());
+                moduleHash = attestInspection.getSupportsModuleHash()
+                        ? Config.INSTANCE.getModuleHash()
+                        : null;
+            } else {
+                isStrongbox = false;
+                verifiedBootKey = selectVerifiedBootDigest(
+                        UtilKt.getBootKey(),
+                        capturedHardwareBootKey,
+                        UtilKt.getPersistentBootKey());
+                verifiedBootHash = selectVerifiedBootDigest(
+                        UtilKt.getBootHash(),
+                        capturedHardwareBootHash,
+                        UtilKt.getPersistentBootHash());
+                patchLevels = keepPatchLevels();
+                idOverrides = Collections.emptyMap();
+                moduleHash = null;
             }
-            byte[] originalBootHash = usableBootDigest(attestInspection.getOriginalBootHash());
-            if (originalBootHash != null) {
-                capturedHardwareBootHash = originalBootHash.clone();
-            }
-            byte[] verifiedBootKey = selectVerifiedBootDigest(
-                    UtilKt.getBootKey(),
-                    originalBootKey != null ? originalBootKey : capturedHardwareBootKey,
-                    UtilKt.getPersistentBootKey());
-            byte[] verifiedBootHash = selectVerifiedBootDigest(
-                    UtilKt.getBootHash(),
-                    originalBootHash != null ? originalBootHash : capturedHardwareBootHash,
-                    UtilKt.getPersistentBootHash());
-            Config.AttestationPatchLevels patchLevels = needsCapturedPatchLevels
-                    ? PolicyState.INSTANCE.resolveAttestationPatchLevels(
-                            uid,
-                            attestInspection.getSystemPatch(),
-                            attestInspection.getVendorPatch(),
-                            attestInspection.getBootPatch())
-                    : keepPatchLevels();
-
             List<KeyBox> list;
             var appConfig = Config.INSTANCE.getAppConfig(uid);
             if (appConfig != null && appConfig.getKeyboxFilename() != null) {
@@ -1414,10 +1438,6 @@ public final class CertHack {
                 return caList;
             }
 
-            Map<Integer, byte[]> idOverrides = presentIdOverrides(uid, attestInspection.getPresentIdMask());
-            byte[] moduleHash = attestInspection.getSupportsModuleHash()
-                    ? Config.INSTANCE.getModuleHash()
-                    : null;
             if (attestKeyId == null || attestKeyId.length != 32) {
                 return caList;
             }

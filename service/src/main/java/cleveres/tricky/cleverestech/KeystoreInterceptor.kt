@@ -297,14 +297,15 @@ object KeystoreInterceptor : BinderInterceptor() {
 
             // Cache miss fallback for full chains: verify attestation extension before invoking CertHack.
             val originalLeaf = Utils.getLeafCertificate(metadata)
+            val isAttestKey = isAttestKeyEntry(metadata)
             if (
                 originalLeaf == null ||
-                !Utils.hasAndroidAttestationExtension(originalLeaf)
+                (!Utils.hasAndroidAttestationExtension(originalLeaf) && !isAttestKey)
             ) {
                 return Skip
             }
 
-            val attestKeyId = requestedKeyId?.takeIf { isAttestKeyEntry(metadata) }
+            val attestKeyId = requestedKeyId?.takeIf { isAttestKey }
             val originalChain = Utils.getCertificateChain(response)
             val newChain =
                 originalChain?.let { chain ->

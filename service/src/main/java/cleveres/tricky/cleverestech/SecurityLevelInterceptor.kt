@@ -123,7 +123,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             val parsed = Utils.parseKeyMetadataParcel(reply)
             if (parsed != null) {
                 val originalLeaf = cleveres.tricky.cleverestech.keystore.LazyX509Certificate(parsed.leafEncoded, false)
-                if (!Utils.hasAndroidAttestationExtension(originalLeaf)) {
+                if (!Utils.hasAndroidAttestationExtension(originalLeaf) && !context.isAttestKeyPurpose) {
                     return Skip
                 }
 
@@ -209,7 +209,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             val originalLeaf = Utils.getLeafCertificate(metadata)
             if (
                 originalLeaf == null ||
-                !Utils.hasAndroidAttestationExtension(originalLeaf)
+                (!Utils.hasAndroidAttestationExtension(originalLeaf) && !context.isAttestKeyPurpose)
             ) {
                 return Skip
             }

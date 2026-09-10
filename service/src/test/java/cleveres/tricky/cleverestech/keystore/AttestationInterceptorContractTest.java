@@ -560,6 +560,43 @@ public class AttestationInterceptorContractTest {
     }
 
     @Test
+    public void attestKeyGenerationWithoutAttestationExtensionIsRewrittenAndRegistered() throws Exception {
+        KeyPair c = keyPair("EC");
+        X509Certificate nonAttested = certificate(c, c, "attest-leaf", "attest-issuer", false);
+        KeyMetadata metadata = metadata(nonAttested, null);
+
+        Parcel request = mock(Parcel.class);
+        java.util.concurrent.atomic.AtomicInteger pos = new java.util.concurrent.atomic.AtomicInteger(28);
+        when(request.dataPosition()).thenAnswer(inv -> pos.get());
+        org.mockito.Mockito.doAnswer(inv -> {
+            pos.set(inv.getArgument(0));
+            return null;
+        }).when(request).setDataPosition(anyInt());
+        when(request.dataAvail()).thenReturn(128);
+        when(request.dataSize()).thenReturn(128);
+
+        java.util.Iterator<Integer> attestInts = java.util.Arrays.asList(
+                1, 16, 0,
+                0,
+                1, 1, 20, 536870913, 7, 7
+        ).iterator();
+        when(request.readInt()).thenAnswer(inv -> attestInts.hasNext() ? attestInts.next() : 0);
+
+        Parcel reply = generatedReply(metadata);
+        Certificate[] replacement = new Certificate[] {nonAttested, nonAttested};
+        try (MockedStatic<CertHack> backend = mockStatic(CertHack.class)) {
+            backend.when(CertHack::canHack).thenReturn(true);
+            backend.when(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()))
+                    .thenReturn(replacement);
+
+            BinderInterceptor.Result result = generate(request, reply);
+            assertTrue(result instanceof BinderInterceptor.OverrideReply);
+            backend.verify(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()));
+            ((BinderInterceptor.OverrideReply) result).getReply().recycle();
+        }
+    }
+
+    @Test
     public void strongBoxKeyGenerationRewritesNormallyWhenStrongBoxKeyboxAvailable() throws Exception {
         KeyPair issuer = keyPair("EC");
         X509Certificate child = certificate(keyPair("EC"), issuer, "strongbox_child", "issuer");
