@@ -16,12 +16,6 @@ open class BinderInterceptor : Binder() {
 
     data class OverrideReply(val code: Int = 0, val reply: Parcel) : Result()
 
-    /**
-     * POST callbacks are separate Binder transactions and may execute on a different Binder worker
-     * thread than PRE. Interceptors that classify a response using request fields must therefore ask
-     * the native bridge to retain the bounded original request instead of carrying PRE state in a
-     * ThreadLocal. The registration helper enforces this even if a caller requests payload omission.
-     */
     open val requiresPostRequestPayload: Boolean = false
 
     companion object {

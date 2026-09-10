@@ -892,14 +892,6 @@ public final class CertHack {
         }
     }
 
-    /**
-     * Evicts one caller's attest-key subtree: the stale root entry recorded under the
-     * rotated identifier plus every descendant linked to it. The root itself must go too:
-     * it retains the same backend identifier as the replacement root, so a later
-     * trim-eviction of the stale entry would delete the newly installed backend key
-     * instead. Descriptor identities already embed the caller UID, and entries are
-     * additionally scoped by it so unrelated callers are never touched.
-     */
     private static void evictDescendants(State.CertificateCache cache, int callingUid, byte[] parentKeyId) {
         if (cache == null || parentKeyId == null) return;
         List<CacheKey> keysToRemove = new ArrayList<>();
@@ -1431,12 +1423,6 @@ public final class CertHack {
             }
             keyId = prepared.keyId.clone();
 
-            // Evict only this attest-key subtree instead of clearing the whole graph. A
-            // global clear on every attest-key generation wipes unrelated keys, other
-            // UIDs, and previously completed pairs that checkers re-read later, which
-            // systematically breaks multi-key attest graphs while RKP keys (which never
-            // clear here) keep working. The Rust remove cascades to descendants, and the
-            // insert below replaces this same subtree, so re-keying stays correct.
             evictDescendants(cache, uid, attestKeyId);
             CertificateBackend.AttestKeyRemoveResult subtreeRemoved =
                     CertificateBackend.removeAttestKey(uid, attestKeyId);

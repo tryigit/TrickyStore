@@ -33,13 +33,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/**
- * Generating one attest key must not destroy other pairs: the attest-key path evicts only
- * its own subtree instead of clearing the whole certificate graph. A global clear on every
- * generation wipes unrelated keys, other UIDs, and previously completed pairs that checkers
- * re-read later, which systematically breaks multi-key attest graphs while RKP keys (which
- * never clear here) keep working.
- */
 class AttestSubtreeEvictionTest {
     private val uid = 44_601
     private val bootKey = ByteArray(32) { 0x51 }
@@ -108,9 +101,6 @@ class AttestSubtreeEvictionTest {
             events.add("clear")
             true
         }
-        // Keybox publication above may run a real backend clear while no override is
-        // installed yet, which marks the graph unhealthy. Discard all setup-time side
-        // effects so the test observes only the generation under test.
         removeCalls.clear()
         clearCalls = 0
         CertHack.resetGraphHealthForTesting()

@@ -131,8 +131,6 @@ public class AttestationInterceptorContractTest {
             Parcel reply = mock(Parcel.class);
             when(reply.readTypedObject(KeyEntryResponse.CREATOR)).thenReturn(response);
 
-            // No PRE call happens on any thread: POST must re-parse the retained request
-            // by itself instead of relying on a PRE-populated ThreadLocal.
             BinderInterceptor.Result result = KeystoreInterceptor.INSTANCE.onPostTransact(target,
                     field(KeystoreInterceptor.class, "getKeyEntryTransaction").getInt(null),
                     0, 44_501, 42, descriptorRequest("post-reparse-k1"), reply, 0);
@@ -140,7 +138,6 @@ public class AttestationInterceptorContractTest {
             assertNotNull(touchedKeyId.get());
             assertArrayEquals(expectedKeyId, touchedKeyId.get());
         } finally {
-            // Registry entries use a test-unique UID (44_501), so no reset is needed.
             cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
             keystore.set(null, previous);
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
@@ -178,8 +175,6 @@ public class AttestationInterceptorContractTest {
             Parcel obtained = mock(Parcel.class);
             parcels.when(Parcel::obtain).thenReturn(obtained);
 
-            // Managed child with a cache-miss leaf-only readback must still be rewritten
-            // so it stays consistent with its rewritten parent. No PRE call happens.
             KeyMetadata metadata = metadata(childLeaf, null);
             KeyEntryResponse response = new KeyEntryResponse();
             response.metadata = metadata;
@@ -191,7 +186,6 @@ public class AttestationInterceptorContractTest {
             assertTrue(result instanceof BinderInterceptor.OverrideReply);
             assertArrayEquals(replacement.getEncoded(), metadata.certificate);
 
-            // Unknown leaf-only key: no registry parent, genuine leaf preserved.
             KeyMetadata ordinaryMetadata = metadata(childLeaf, null);
             KeyEntryResponse ordinaryResponse = new KeyEntryResponse();
             ordinaryResponse.metadata = ordinaryMetadata;
@@ -204,7 +198,6 @@ public class AttestationInterceptorContractTest {
             assertSame(BinderInterceptor.Skip.INSTANCE, ordinaryResult);
             assertSame(before, ordinaryMetadata.certificate);
         } finally {
-            // Registry entries use a test-unique UID (44_502), so no reset is needed.
             cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
             keystore.set(null, previous);
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
@@ -230,7 +223,6 @@ public class AttestationInterceptorContractTest {
         X509Certificate childLeaf = certificate(subject, parent, "child-no-touch", "parent");
         X509Certificate replacement = certificate(subject, parent, "replacement", "parent");
 
-        // Remember as child key (isAttestKey = false)
         cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.INSTANCE.remember(
                 44_503, childId, parentId, null, false);
 
@@ -552,11 +544,6 @@ public class AttestationInterceptorContractTest {
                 0, 10_001, 42, request, reply, 0);
     }
 
-    /**
-     * Builds a getKeyEntry request mock carrying one KeyDescriptor that
-     * {@link Utils#extractKeyDescriptorIdentity} can parse into
-     * {@link Utils#computeKeyDescriptorIdentity(int, int, long, String, byte[])}.
-     */
     private static Parcel descriptorRequest(String alias) {
         Parcel request = mock(Parcel.class);
         when(request.dataPosition()).thenReturn(28);

@@ -44,13 +44,6 @@ object KeystoreInterceptor : BinderInterceptor() {
 
     @Volatile private var lifecycleEpoch = 0L
 
-    /**
-     * PRE and POST are separate Binder callbacks and may execute on different Binder worker
-     * threads: cross-process Binder calls land on arbitrary pool threads. POST therefore
-     * re-parses the retained original request instead of relying on a ThreadLocal populated by
-     * PRE. Registration enforces retention via requiresPostRequestPayload even though
-     * CAP_OMIT_POST_REQUEST_PAYLOAD is requested below.
-     */
     override val requiresPostRequestPayload: Boolean = true
 
     private fun captureGetKeyEntryIdentity(data: Parcel, callingUid: Int): ByteArray? {
@@ -78,12 +71,6 @@ object KeystoreInterceptor : BinderInterceptor() {
         return false
     }
 
-    /**
-     * Rewrites a managed leaf-only child readback (a key attested by an app ATTEST_KEY, whose
-     * issuer chain belongs to the caller) against its registry-recorded parent. Returns the
-     * rewritten leaf DER, or null to preserve the genuine leaf. Ordinary leaf-only keys have
-     * no registry parent and always return null here, as do non-attested leaves.
-     */
     private fun tryRewriteManagedLeafOnlyChild(
         callingUid: Int,
         requestedKeyId: ByteArray?,
@@ -111,11 +98,6 @@ object KeystoreInterceptor : BinderInterceptor() {
         }
     }
 
-    /**
-     * Mirrors the generateKey child rewrite with rehydration: if the recorded parent went
-     * stale (e.g. Rust-only backend restart), rebuild the ancestry once and retry instead
-     * of serving a genuine leaf against a rewritten parent.
-     */
     private fun rewriteManagedChildWithParentRecovery(
         original: Array<Certificate>,
         callingUid: Int,
@@ -175,9 +157,6 @@ object KeystoreInterceptor : BinderInterceptor() {
             return Skip
         }
         if (code == getKeyEntryTransaction) {
-            // Request classification is deferred to POST, which re-parses the retained
-            // request. Granted-chain reads are still admitted so unrelated callers can hit
-            // the cache.
             val targeted = Config.needHack(callingUid)
             val mayReadGrantedChain =
                 callingUid >= FIRST_APPLICATION_UID && CertHack.hasCachedCertificateChains()
@@ -199,8 +178,6 @@ object KeystoreInterceptor : BinderInterceptor() {
         if (target != keystore || code != getKeyEntryTransaction) {
             return Skip
         }
-        // Re-parse the retained request: POST may run on a different Binder worker than PRE,
-        // so a PRE-populated ThreadLocal would be lost here.
         val requestedKeyId = captureGetKeyEntryIdentity(data, callingUid)
 
         if (reply == null || resultCode != 0 || !CertHack.canHack()) return Skip
@@ -250,13 +227,6 @@ object KeystoreInterceptor : BinderInterceptor() {
                 if (!Config.needHack(callingUid)) {
                     return Skip
                 }
-                // Leaf-only entries have no issuer chain to replace in place, so ordinary
-                // leaf-only keys skip here on the allocation-free fast path. A managed
-                // attest-graph child (a leaf-only key attested by an app ATTEST_KEY) still
-                // needs its leaf rewritten to match its rewritten parent, so fall through
-                // to the compatibility path only when its parent is known. The registry
-                // probe is a cheap map lookup that keeps repeated ordinary reads fast.
-                // POST is emitted only after PRE accepted this transaction.
                 if (parsed.hasLeafOnlyCertificate() &&
                     (requestedKeyId == null ||
                         ManagedAttestKeyRegistry.getParentKeyId(callingUid, requestedKeyId) == null)
@@ -306,9 +276,6 @@ object KeystoreInterceptor : BinderInterceptor() {
             }
 
             if (!targeted || !isFullChain) {
-                // Targeted leaf-only managed children are rewritten against their
-                // registry-recorded parent so the served leaf stays consistent with the
-                // rewritten parent certificate. Anything else keeps the genuine leaf.
                 if (targeted && isLeafOnly) {
                     val rewrittenLeaf =
                         tryRewriteManagedLeafOnlyChild(callingUid, requestedKeyId, metadata)
