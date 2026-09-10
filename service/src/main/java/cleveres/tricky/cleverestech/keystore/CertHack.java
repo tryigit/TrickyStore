@@ -1698,6 +1698,7 @@ public final class CertHack {
             }
             if (isAttestKey && childKeyId != null) {
                 evictDescendants(cache, uid, childKeyId);
+                if (graphStateUnhealthy) return caList;
             }
 
             byte[] rewrittenDer = CertificateBackend.rewriteChildKey(

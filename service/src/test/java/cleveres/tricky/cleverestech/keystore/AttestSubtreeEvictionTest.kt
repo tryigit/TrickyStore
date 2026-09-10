@@ -241,6 +241,39 @@ class AttestSubtreeEvictionTest {
         assertSame("unknown platform level must fail closed to the genuine leaf", teeOriginal, rejected)
     }
 
+    @Test
+    fun `child eviction backend failure fails closed and marks graph unhealthy`() {
+        val childKeyId = ByteArray(32) { (it + 41).toByte() }
+        val staleKey = cacheKey(byteArrayOf(71, 72, 73))
+        putCacheEntry(
+            staleKey,
+            byteArrayOf(81, 82),
+            uid = uid,
+            attestKeyId = childKeyId,
+            parentKeyId = null,
+        )
+        assertTrue(containsCacheKey(staleKey))
+        CertificateBackend.removeAttestKeyOverride = { _, _ ->
+            CertificateBackend.AttestKeyRemoveResult.UNAVAILABLE
+        }
+        val parentKeyId = ByteArray(32) { (it + 43).toByte() }
+        val leaf = extensionlessLeaf("child-unavailable-eviction")
+        val original = arrayOf<Certificate>(leaf)
+        val result =
+            CertHack.hackChildKeyCertificate(
+                original,
+                uid,
+                true,
+                true,
+                parentKeyId,
+                childKeyId,
+                CertificateBackend.SECURITY_LEVEL_STRONGBOX,
+            )
+
+        assertSame("backend failure during child eviction must fail closed", original, result)
+        assertTrue(CertHack.isGraphStateUnhealthyForTesting())
+    }
+
     private fun extensionlessLeaf(commonName: String): X509Certificate {
         val provider = BouncyCastleProvider()
         val generator = KeyPairGenerator.getInstance("EC")
