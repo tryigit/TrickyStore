@@ -1591,10 +1591,6 @@ public final class CertHack {
                 }
             }
 
-            if (isAttestKey && childKeyId != null) {
-                evictDescendants(cache, uid, childKeyId);
-            }
-
             boolean hasAttestExt = Utils.hasAndroidAttestationExtension(caList[0]);
             byte[] verifiedBootKey;
             byte[] verifiedBootHash;
@@ -1699,6 +1695,9 @@ public final class CertHack {
             if (childPlatformLevel != CertificateBackend.SECURITY_LEVEL_TEE
                     && childPlatformLevel != CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
                 return caList;
+            }
+            if (isAttestKey && childKeyId != null) {
+                evictDescendants(cache, uid, childKeyId);
             }
 
             byte[] rewrittenDer = CertificateBackend.rewriteChildKey(
