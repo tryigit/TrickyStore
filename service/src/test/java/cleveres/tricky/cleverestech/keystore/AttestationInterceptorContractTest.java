@@ -205,6 +205,65 @@ public class AttestationInterceptorContractTest {
     }
 
     @Test
+    public void leafOnlyManagedChildReadbackRewritesEvenWhenRegistryIsSaturated() throws Exception {
+        Binder target = new Binder();
+        Field keystore = field(KeystoreInterceptor.class, "keystore");
+        Object previous = keystore.get(null);
+        keystore.set(null, target);
+        Field globalModeField = field(Config.class, "isGlobalMode");
+        boolean prevGlobalMode = (boolean) globalModeField.get(Config.INSTANCE);
+        globalModeField.set(Config.INSTANCE, true);
+        int uid = 44_508;
+        Config.INSTANCE.setPackagesForTesting(uid, new String[] {"com.test.saturated"});
+        byte[] parentId = new byte[32];
+        parentId[0] = 7;
+        parentId[1] = 8;
+        byte[] childId = Utils.computeKeyDescriptorIdentity(uid, 0, -1L, "saturated-child", null);
+        KeyPair parent = keyPair("EC");
+        KeyPair subject = keyPair("EC");
+        X509Certificate childLeaf = certificate(subject, parent, "saturated-child", "parent");
+        X509Certificate replacement = certificate(subject, parent, "replacement", "parent");
+
+        for (int i = 1; i <= 260; i++) {
+            byte[] dummy = new byte[32];
+            dummy[0] = (byte) (i >> 8);
+            dummy[1] = (byte) i;
+            dummy[2] = 5;
+            cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.INSTANCE.remember(uid, dummy);
+        }
+
+        cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.INSTANCE.remember(
+                uid, childId, parentId, null, false);
+        cleveres.tricky.cleverestech.CertificateBackend.setTouchAttestKeyOverrideForTesting(
+                (u, id) -> cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.PRESENT);
+        try (MockedStatic<CertHack> backend = mockStatic(CertHack.class);
+             MockedStatic<Parcel> parcels = mockStatic(Parcel.class)) {
+            backend.when(CertHack::canHack).thenReturn(true);
+            backend.when(() -> CertHack.hackChildKeyCertificate(
+                    any(), anyInt(), anyBoolean(), anyBoolean(), any(), any()))
+                    .thenReturn(new Certificate[] {replacement});
+            Parcel obtained = mock(Parcel.class);
+            parcels.when(Parcel::obtain).thenReturn(obtained);
+
+            KeyMetadata metadata = metadata(childLeaf, null);
+            KeyEntryResponse response = new KeyEntryResponse();
+            response.metadata = metadata;
+            Parcel reply = mock(Parcel.class);
+            when(reply.readTypedObject(KeyEntryResponse.CREATOR)).thenReturn(response);
+            BinderInterceptor.Result result = KeystoreInterceptor.INSTANCE.onPostTransact(target,
+                    field(KeystoreInterceptor.class, "getKeyEntryTransaction").getInt(null),
+                    0, uid, 42, descriptorRequest("saturated-child"), reply, 0);
+            assertTrue(result instanceof BinderInterceptor.OverrideReply);
+            assertArrayEquals(replacement.getEncoded(), metadata.certificate);
+        } finally {
+            cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.resetForTesting();
+            keystore.set(null, previous);
+            globalModeField.set(Config.INSTANCE, prevGlobalMode);
+        }
+    }
+
+    @Test
     public void childKeyReadbackDoesNotTouchRustBackendAndRewritesUsingRegistryParent() throws Exception {
         Binder target = new Binder();
         Field keystore = field(KeystoreInterceptor.class, "keystore");
