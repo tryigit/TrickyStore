@@ -1350,11 +1350,13 @@ mod tests {
 
     struct TestRoot {
         path: PathBuf,
+        _restore_scope: config_file_broker::tests::RestoreTestScope,
     }
 
     impl TestRoot {
         /// Creates a new temporary test root directory.
         fn new() -> Self {
+            let restore_scope = config_file_broker::tests::RestoreTestScope::new();
             static COUNTER: AtomicU64 = AtomicU64::new(1);
             let path = std::env::temp_dir().join(format!(
                 "ct-daemon-lanes-{}-{}",
@@ -1362,7 +1364,10 @@ mod tests {
                 COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir(&path).unwrap();
-            Self { path }
+            Self {
+                path,
+                _restore_scope: restore_scope,
+            }
         }
 
         /// Opens the test root as a TrustedDir.

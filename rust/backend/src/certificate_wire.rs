@@ -863,12 +863,14 @@ mod tests {
 
     #[test]
     fn attest_key_wire_propagates_platform_security_level() {
-        let tee = parse_attest_key_rewrite_request(&minimal_attest_key_request(1)).unwrap();
+        let tee_request = minimal_attest_key_request(1);
+        let tee = parse_attest_key_rewrite_request(&tee_request).unwrap();
         assert_eq!(
             tee.keymint_security_level,
             SecurityLevel::TrustedEnvironment
         );
-        let sb = parse_attest_key_rewrite_request(&minimal_attest_key_request(2)).unwrap();
+        let sb_request = minimal_attest_key_request(2);
+        let sb = parse_attest_key_rewrite_request(&sb_request).unwrap();
         assert_eq!(sb.keymint_security_level, SecurityLevel::StrongBox);
         assert!(parse_attest_key_rewrite_request(&minimal_attest_key_request(0)).is_err());
         assert!(parse_attest_key_rewrite_request(&minimal_attest_key_request(3)).is_err());
@@ -879,12 +881,14 @@ mod tests {
 
     #[test]
     fn child_key_wire_propagates_platform_security_level() {
-        let tee = parse_child_key_rewrite_request(&minimal_child_key_request(1, 1)).unwrap();
+        let tee_request = minimal_child_key_request(1, 1);
+        let tee = parse_child_key_rewrite_request(&tee_request).unwrap();
         assert_eq!(
             tee.keymint_security_level,
             SecurityLevel::TrustedEnvironment
         );
-        let sb = parse_child_key_rewrite_request(&minimal_child_key_request(1, 2)).unwrap();
+        let sb_request = minimal_child_key_request(1, 2);
+        let sb = parse_child_key_rewrite_request(&sb_request).unwrap();
         assert_eq!(sb.keymint_security_level, SecurityLevel::StrongBox);
         assert!(parse_child_key_rewrite_request(&minimal_child_key_request(1, 0)).is_err());
         assert!(parse_child_key_rewrite_request(&minimal_child_key_request(0, 0)).is_err());
