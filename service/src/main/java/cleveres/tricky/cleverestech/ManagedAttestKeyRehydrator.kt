@@ -43,6 +43,7 @@ internal object ManagedAttestKeyRehydrator {
                         callingUid,
                         false,
                         entry.keyId,
+                        entry.platformSecurityLevel,
                     )
                 } else {
                     CertHack.hackChildKeyCertificate(
@@ -52,6 +53,7 @@ internal object ManagedAttestKeyRehydrator {
                         true,
                         entry.parentKeyId,
                         entry.keyId,
+                        entry.platformSecurityLevel,
                     )
                 }
             if (rewritten === original) return false

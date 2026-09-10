@@ -197,6 +197,72 @@ class AttestSubtreeEvictionTest {
         assertTrue(CertHack.isGraphStateUnhealthyForTesting())
     }
 
+    @Test
+    fun `extensionless attest key propagates strongbox level instead of defaulting to tee`() {
+        var capturedLevel = -1
+        CertificateBackend.rewriteAttestKeyOverride = { _, _, request ->
+            capturedLevel = request.platformSecurityLevel
+            events.add("rewrite")
+            byteArrayOf(0x30, 0x01, 0x00)
+        }
+        val sbKeyId = ByteArray(32) { (it + 21).toByte() }
+        val sbLeaf = extensionlessLeaf("extensionless-sb-attest-key")
+        val sbOriginal = arrayOf<Certificate>(sbLeaf)
+
+        val rewrittenSb =
+            CertHack.hackAttestKeyCertificateChain(
+                sbOriginal,
+                uid,
+                true,
+                sbKeyId,
+                CertificateBackend.SECURITY_LEVEL_STRONGBOX,
+            )
+        assertTrue("StrongBox extensionless attest key must be rewritten", rewrittenSb !== sbOriginal)
+        assertEquals(CertificateBackend.SECURITY_LEVEL_STRONGBOX, capturedLevel)
+
+        clearCertificateCache()
+        val teeKeyId = ByteArray(32) { (it + 31).toByte() }
+        val teeLeaf = extensionlessLeaf("extensionless-tee-attest-key")
+        val teeOriginal = arrayOf<Certificate>(teeLeaf)
+        val rewrittenTee =
+            CertHack.hackAttestKeyCertificateChain(
+                teeOriginal,
+                uid,
+                true,
+                teeKeyId,
+                CertificateBackend.SECURITY_LEVEL_TEE,
+            )
+        assertTrue("TEE extensionless attest key must be rewritten", rewrittenTee !== teeOriginal)
+        assertEquals(CertificateBackend.SECURITY_LEVEL_TEE, capturedLevel)
+
+        clearCertificateCache()
+        val rejected =
+            CertHack.hackAttestKeyCertificateChain(teeOriginal, uid, true, teeKeyId, 0)
+        assertSame("unknown platform level must fail closed to the genuine leaf", teeOriginal, rejected)
+    }
+
+    private fun extensionlessLeaf(commonName: String): X509Certificate {
+        val provider = BouncyCastleProvider()
+        val generator = KeyPairGenerator.getInstance("EC")
+        generator.initialize(256)
+        val subject = generator.generateKeyPair()
+        val issuer = generator.generateKeyPair()
+        val builder =
+            JcaX509v3CertificateBuilder(
+                X500Name("CN=$commonName-issuer"),
+                BigInteger.ONE,
+                Date(0),
+                Date(4_102_444_800_000L),
+                X500Name("CN=$commonName"),
+                subject.public,
+            )
+        return JcaX509CertificateConverter().setProvider(provider).getCertificate(
+            builder.build(
+                JcaContentSignerBuilder("SHA256withECDSA").setProvider(provider).build(issuer.private),
+            ),
+        )
+    }
+
     private fun attestedLeaf(commonName: String): X509Certificate {
         val provider = BouncyCastleProvider()
         val generator = KeyPairGenerator.getInstance("EC")

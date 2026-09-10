@@ -697,6 +697,7 @@ public class AttestationRequestContractTest {
                 descriptor.clone(),
                 new byte[] {1},
                 true,
+                1,
                 0, 0,
                 0, 0,
                 0, 0,

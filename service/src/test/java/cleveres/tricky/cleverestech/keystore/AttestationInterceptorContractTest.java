@@ -69,6 +69,9 @@ public class AttestationInterceptorContractTest {
                     .thenReturn(rewrittenChain);
             backend.when(() -> CertHack.hackChildKeyCertificate(any(), anyInt(), anyBoolean(), anyBoolean()))
                     .thenReturn(rewrittenChain);
+            backend.when(() -> CertHack.hackChildKeyCertificate(
+                            any(), anyInt(), anyBoolean(), anyBoolean(), any(), any(), anyInt()))
+                    .thenReturn(rewrittenChain);
 
             // Test both default RKP request (false) and custom AttestKey request (true)
             for (boolean explicitAttestKey : new boolean[] {false, true}) {
@@ -86,7 +89,9 @@ public class AttestationInterceptorContractTest {
             backend.verify(CertHack::canHack, org.mockito.Mockito.times(2));
             backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()),
                     org.mockito.Mockito.times(1));
-            backend.verify(() -> CertHack.hackChildKeyCertificate(any(), anyInt(), anyBoolean(), anyBoolean()),
+            backend.verify(
+                    () -> CertHack.hackChildKeyCertificate(
+                            any(), anyInt(), anyBoolean(), anyBoolean(), any(), any(), anyInt()),
                     org.mockito.Mockito.times(1));
         } finally {
             globalModeField.set(Config.INSTANCE, prevGlobalMode);
@@ -172,6 +177,9 @@ public class AttestationInterceptorContractTest {
             backend.when(() -> CertHack.hackChildKeyCertificate(
                     any(), anyInt(), anyBoolean(), anyBoolean(), any(), any()))
                     .thenReturn(new Certificate[] {replacement});
+            backend.when(() -> CertHack.hackChildKeyCertificate(
+                    any(), anyInt(), anyBoolean(), anyBoolean(), any(), any(), anyInt()))
+                    .thenReturn(new Certificate[] {replacement});
             Parcel obtained = mock(Parcel.class);
             parcels.when(Parcel::obtain).thenReturn(obtained);
 
@@ -242,6 +250,9 @@ public class AttestationInterceptorContractTest {
             backend.when(() -> CertHack.hackChildKeyCertificate(
                     any(), anyInt(), anyBoolean(), anyBoolean(), any(), any()))
                     .thenReturn(new Certificate[] {replacement});
+            backend.when(() -> CertHack.hackChildKeyCertificate(
+                    any(), anyInt(), anyBoolean(), anyBoolean(), any(), any(), anyInt()))
+                    .thenReturn(new Certificate[] {replacement});
             Parcel obtained = mock(Parcel.class);
             parcels.when(Parcel::obtain).thenReturn(obtained);
 
@@ -300,6 +311,9 @@ public class AttestationInterceptorContractTest {
             backend.when(() -> CertHack.hackChildKeyCertificate(
                     any(), anyInt(), anyBoolean(), anyBoolean(), any(), any()))
                     .thenReturn(new Certificate[] {replacement});
+            backend.when(() -> CertHack.hackChildKeyCertificate(
+                    any(), anyInt(), anyBoolean(), anyBoolean(), any(), any(), anyInt()))
+                    .thenReturn(new Certificate[] {replacement});
             Parcel obtained = mock(Parcel.class);
             parcels.when(Parcel::obtain).thenReturn(obtained);
 
@@ -345,6 +359,8 @@ public class AttestationInterceptorContractTest {
                     .thenReturn(rewrittenChain);
             backend.when(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()))
                     .thenReturn(rewrittenChain);
+            backend.when(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any(), anyInt()))
+                    .thenReturn(rewrittenChain);
 
             Parcel request = mock(Parcel.class);
             java.util.concurrent.atomic.AtomicInteger pos = new java.util.concurrent.atomic.AtomicInteger(28);
@@ -370,7 +386,7 @@ public class AttestationInterceptorContractTest {
             BinderInterceptor.Result postResult = generate(request, reply);
             assertTrue(postResult instanceof BinderInterceptor.OverrideReply);
 
-            backend.verify(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()),
+            backend.verify(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any(), anyInt()),
                     org.mockito.Mockito.times(1));
             backend.verify(() -> CertHack.hackCertificateChain(any(), anyInt(), anyBoolean()), never());
             backend.verify(() -> CertHack.hackChildKeyCertificate(any(), anyInt(), anyBoolean(), anyBoolean()), never());
@@ -589,10 +605,12 @@ public class AttestationInterceptorContractTest {
             backend.when(CertHack::canHack).thenReturn(true);
             backend.when(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()))
                     .thenReturn(replacement);
+            backend.when(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any(), anyInt()))
+                    .thenReturn(replacement);
 
             BinderInterceptor.Result result = generate(request, reply);
             assertTrue(result instanceof BinderInterceptor.OverrideReply);
-            backend.verify(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any()));
+            backend.verify(() -> CertHack.hackAttestKeyCertificateChain(any(), anyInt(), anyBoolean(), any(), anyInt()));
             assertTrue(cleveres.tricky.cleverestech.ManagedAttestKeyRegistry.INSTANCE.isAttestKey(10_001, expectedKeyId));
             ((BinderInterceptor.OverrideReply) result).getReply().recycle();
         } finally {

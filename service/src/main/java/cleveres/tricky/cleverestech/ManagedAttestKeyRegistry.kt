@@ -30,6 +30,7 @@ internal object ManagedAttestKeyRegistry {
         val keyId: ByteArray,
         val parentKeyId: ByteArray?,
         val genuineLeafDer: ByteArray,
+        val platformSecurityLevel: Int = 0,
     )
 
     private class Identity private constructor(
@@ -55,6 +56,7 @@ internal object ManagedAttestKeyRegistry {
         parentKeyId: ByteArray?,
         genuineLeafDer: ByteArray?,
         val isAttestKey: Boolean,
+        val platformSecurityLevel: Int = 0,
     ) {
         val parentKeyId = parentKeyId?.clone()
         var genuineLeafDer = genuineLeafDer?.clone()
@@ -79,6 +81,7 @@ internal object ManagedAttestKeyRegistry {
         parentKeyId: ByteArray?,
         genuineLeafDer: ByteArray?,
         isAttestKey: Boolean = true,
+        platformSecurityLevel: Int = 0,
     ) {
         if (!isValid(callingUid, keyId)) return
         if (parentKeyId != null && !isValid(callingUid, parentKeyId)) return
@@ -118,7 +121,21 @@ internal object ManagedAttestKeyRegistry {
             }
         }
 
-        val stored = Entry(parentKeyId, effectiveLeafDer ?: (if (isAttestKey) old?.genuineLeafDer else null), isAttestKey)
+        val effectiveLevel =
+            if (platformSecurityLevel == 1 || platformSecurityLevel == 2) {
+                platformSecurityLevel
+            } else if (isAttestKey) {
+                old?.platformSecurityLevel ?: 0
+            } else {
+                0
+            }
+        val stored =
+            Entry(
+                parentKeyId,
+                effectiveLeafDer ?: (if (isAttestKey) old?.genuineLeafDer else null),
+                isAttestKey,
+                effectiveLevel,
+            )
         entries[Identity.stored(callingUid, nonNullKeyId)] = stored
         retainedProofBytes += stored.proofBytes()
         trimProofBytesLocked()
@@ -144,6 +161,12 @@ internal object ManagedAttestKeyRegistry {
     }
 
     @Synchronized
+    fun getPlatformSecurityLevel(callingUid: Int, keyId: ByteArray?): Int {
+        if (!isValid(callingUid, keyId)) return 0
+        return entries[Identity.lookup(callingUid, requireNotNull(keyId))]?.platformSecurityLevel ?: 0
+    }
+
+    @Synchronized
     fun rehydrationPath(callingUid: Int, keyId: ByteArray?): List<RehydrationEntry>? {
         if (!isValid(callingUid, keyId)) return null
         var current = requireNotNull(keyId).clone()
@@ -162,6 +185,7 @@ internal object ManagedAttestKeyRegistry {
                     keyId = current.clone(),
                     parentKeyId = entry.parentKeyId?.clone(),
                     genuineLeafDer = leaf.clone(),
+                    platformSecurityLevel = entry.platformSecurityLevel,
                 ),
             )
             val parent = entry.parentKeyId ?: break

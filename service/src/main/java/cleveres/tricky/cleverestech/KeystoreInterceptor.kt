@@ -80,15 +80,17 @@ object KeystoreInterceptor : BinderInterceptor() {
         val parentKeyId =
             ManagedAttestKeyRegistry.getParentKeyId(callingUid, requestedKeyId) ?: return null
         val originalLeaf = Utils.getLeafCertificate(metadata) ?: return null
-        if (!Utils.hasAndroidAttestationExtension(originalLeaf)) return null
+        val isAttestKey = isAttestKeyEntry(metadata)
+        if (!Utils.hasAndroidAttestationExtension(originalLeaf) && !isAttestKey) return null
         val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
         val rewritten =
             rewriteManagedChildWithParentRecovery(
                 originalLeafOnly,
                 callingUid,
-                isAttestKeyEntry(metadata),
+                isAttestKey,
                 parentKeyId,
                 requestedKeyId,
+                metadata.keySecurityLevel,
             )
         if (rewritten === originalLeafOnly || rewritten.isEmpty()) return null
         return try {
@@ -104,6 +106,7 @@ object KeystoreInterceptor : BinderInterceptor() {
         isAttestKey: Boolean,
         parentKeyId: ByteArray,
         childKeyId: ByteArray?,
+        platformSecurityLevel: Int,
     ): Array<Certificate> {
         KeyboxActivation.lockPublishedSnapshot()
         return try {
@@ -115,6 +118,7 @@ object KeystoreInterceptor : BinderInterceptor() {
                     true,
                     parentKeyId,
                     childKeyId,
+                    platformSecurityLevel,
                 )
             if (first !== original || !ManagedAttestKeyRegistry.isKnown(callingUid, parentKeyId)) {
                 return first
@@ -131,6 +135,7 @@ object KeystoreInterceptor : BinderInterceptor() {
                 true,
                 parentKeyId,
                 childKeyId,
+                platformSecurityLevel,
             )
         } finally {
             KeyboxActivation.unlockPublishedSnapshot()
@@ -321,6 +326,7 @@ object KeystoreInterceptor : BinderInterceptor() {
                                 callingUid,
                                 false,
                                 attestKeyId,
+                                metadata.keySecurityLevel,
                             )
                         } else {
                             CertHack.hackCertificateChain(chain, callingUid, false)
@@ -334,6 +340,8 @@ object KeystoreInterceptor : BinderInterceptor() {
                         attestKeyId,
                         null,
                         metadata.certificate,
+                        true,
+                        metadata.keySecurityLevel,
                     )
                 }
                 if (!CertHack.applyCachedCertificateChain(metadata)) {

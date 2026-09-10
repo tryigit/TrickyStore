@@ -137,6 +137,28 @@ class ManagedAttestKeyRegistryTest {
     }
 
     @Test
+    fun `platform security level survives remember and rehydration`() {
+        val uid = 10_123
+        val root = ByteArray(32) { 0x31 }
+        val child = ByteArray(32) { 0x32 }
+        ManagedAttestKeyRegistry.remember(uid, root, null, byteArrayOf(1), true, 2)
+        ManagedAttestKeyRegistry.remember(uid, child, root, byteArrayOf(2), true, 2)
+
+        assertEquals(2, ManagedAttestKeyRegistry.getPlatformSecurityLevel(uid, root))
+        assertEquals(2, ManagedAttestKeyRegistry.getPlatformSecurityLevel(uid, child))
+        assertEquals(0, ManagedAttestKeyRegistry.getPlatformSecurityLevel(uid, ByteArray(32) { 0x33 }))
+
+        val path = requireNotNull(ManagedAttestKeyRegistry.rehydrationPath(uid, child))
+        assertEquals(2, path.size)
+        assertEquals(2, path[0].platformSecurityLevel)
+        assertEquals(2, path[1].platformSecurityLevel)
+
+        // Unknown levels never overwrite a known level on compatible re-remember.
+        ManagedAttestKeyRegistry.remember(uid, child, root, byteArrayOf(2), true, 0)
+        assertEquals(2, ManagedAttestKeyRegistry.getPlatformSecurityLevel(uid, child))
+    }
+
+    @Test
     fun `registry saturation retains parent key id and admits new children`() {
         val uid = 10_123
         fun descriptor(index: Int): ByteArray =

@@ -1278,21 +1278,27 @@ public final class CertHack {
     }
 
     public static Certificate[] hackAttestKeyCertificateChain(Certificate[] caList, int uid) {
-        return hackAttestKeyCertificateChain(caList, uid, false, null);
+        return hackAttestKeyCertificateChain(caList, uid, false, null, 0);
     }
 
     public static Certificate[] hackAttestKeyCertificateChain(
             Certificate[] caList, int uid, boolean leafOnlySafe) {
-        return hackAttestKeyCertificateChain(caList, uid, leafOnlySafe, null);
+        return hackAttestKeyCertificateChain(caList, uid, leafOnlySafe, null, 0);
     }
 
     public static Certificate[] hackAttestKeyCertificateChain(
             Certificate[] caList, int uid, byte[] attestKeyId) {
-        return hackAttestKeyCertificateChain(caList, uid, false, attestKeyId);
+        return hackAttestKeyCertificateChain(caList, uid, false, attestKeyId, 0);
     }
 
     public static Certificate[] hackAttestKeyCertificateChain(
             Certificate[] caList, int uid, boolean leafOnlySafe, byte[] attestKeyId) {
+        return hackAttestKeyCertificateChain(caList, uid, leafOnlySafe, attestKeyId, 0);
+    }
+
+    public static Certificate[] hackAttestKeyCertificateChain(
+            Certificate[] caList, int uid, boolean leafOnlySafe, byte[] attestKeyId,
+            int platformSecurityLevel) {
         if (caList == null || caList.length == 0 || caList[0] == null) {
             throw new UnsupportedOperationException("Certificate chain is empty");
         }
@@ -1348,6 +1354,10 @@ public final class CertHack {
                     }
                     return caList;
                 }
+                if (platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                        || platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
+                    if (kmLevel != platformSecurityLevel) return caList;
+                }
 
                 boolean needsCapturedPatchLevels = PolicyState.INSTANCE.isFeatureEnabled(
                         PolicyState.Feature.SECURITY_PATCH, uid);
@@ -1379,7 +1389,13 @@ public final class CertHack {
                         ? Config.INSTANCE.getModuleHash()
                         : null;
             } else {
-                isStrongbox = false;
+                if (platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
+                    isStrongbox = true;
+                } else if (platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_TEE) {
+                    isStrongbox = false;
+                } else {
+                    return caList;
+                }
                 verifiedBootKey = selectVerifiedBootDigest(
                         UtilKt.getBootKey(),
                         capturedHardwareBootKey,
@@ -1441,6 +1457,18 @@ public final class CertHack {
             if (attestKeyId == null || attestKeyId.length != 32) {
                 return caList;
             }
+            int attestPlatformLevel;
+            if (!hasAttestExt) {
+                attestPlatformLevel = platformSecurityLevel;
+            } else if (attestInspection != null) {
+                attestPlatformLevel = attestInspection.getKeymintSecurityLevel();
+            } else {
+                return caList;
+            }
+            if (attestPlatformLevel != CertificateBackend.SECURITY_LEVEL_TEE
+                    && attestPlatformLevel != CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
+                return caList;
+            }
             keyId = prepared.keyId.clone();
 
             evictDescendants(cache, uid, attestKeyId);
@@ -1463,6 +1491,7 @@ public final class CertHack {
                     leafEncoded,
                     keyId,
                     signingAlgorithm,
+                    attestPlatformLevel,
                     patchDisposition(patchLevels.getSystem()), patchLevels.getSystem().getValue(),
                     patchDisposition(patchLevels.getVendor()), patchLevels.getVendor().getValue(),
                     patchDisposition(patchLevels.getBoot()), patchLevels.getBoot().getValue(),
@@ -1511,21 +1540,27 @@ public final class CertHack {
 
     public static Certificate[] hackChildKeyCertificate(
             Certificate[] caList, int uid, boolean isAttestKey) {
-        return hackChildKeyCertificate(caList, uid, isAttestKey, false, null, null);
+        return hackChildKeyCertificate(caList, uid, isAttestKey, false, null, null, 0);
     }
 
     public static Certificate[] hackChildKeyCertificate(
             Certificate[] caList, int uid, boolean isAttestKey, boolean leafOnlySafe) {
-        return hackChildKeyCertificate(caList, uid, isAttestKey, leafOnlySafe, null, null);
+        return hackChildKeyCertificate(caList, uid, isAttestKey, leafOnlySafe, null, null, 0);
     }
 
     public static Certificate[] hackChildKeyCertificate(
             Certificate[] caList, int uid, boolean isAttestKey, byte[] parentKeyId, byte[] childKeyId) {
-        return hackChildKeyCertificate(caList, uid, isAttestKey, false, parentKeyId, childKeyId);
+        return hackChildKeyCertificate(caList, uid, isAttestKey, false, parentKeyId, childKeyId, 0);
     }
 
     public static Certificate[] hackChildKeyCertificate(
             Certificate[] caList, int uid, boolean isAttestKey, boolean leafOnlySafe, byte[] parentKeyId, byte[] childKeyId) {
+        return hackChildKeyCertificate(caList, uid, isAttestKey, leafOnlySafe, parentKeyId, childKeyId, 0);
+    }
+
+    public static Certificate[] hackChildKeyCertificate(
+            Certificate[] caList, int uid, boolean isAttestKey, boolean leafOnlySafe, byte[] parentKeyId, byte[] childKeyId,
+            int platformSecurityLevel) {
         if (caList == null || caList.length == 0 || caList[0] == null) {
             return caList;
         }
@@ -1591,6 +1626,10 @@ public final class CertHack {
                     }
                     return caList;
                 }
+                if (platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_TEE
+                        || platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
+                    if (kmLevel != platformSecurityLevel) return caList;
+                }
 
                 boolean needsCapturedPatchLevels = PolicyState.INSTANCE.isFeatureEnabled(
                         PolicyState.Feature.SECURITY_PATCH, uid);
@@ -1627,6 +1666,10 @@ public final class CertHack {
                         ? Config.INSTANCE.getModuleHash()
                         : null;
             } else if (isAttestKey) {
+                if (platformSecurityLevel != CertificateBackend.SECURITY_LEVEL_TEE
+                        && platformSecurityLevel != CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
+                    return caList;
+                }
                 verifiedBootKey = selectVerifiedBootDigest(
                         UtilKt.getBootKey(),
                         capturedHardwareBootKey,
@@ -1651,6 +1694,18 @@ public final class CertHack {
             if (isAttestKey && (childKeyId == null || childKeyId.length != 32)) {
                 return caList;
             }
+            int childPlatformLevel;
+            if (!hasAttestExt) {
+                childPlatformLevel = platformSecurityLevel;
+            } else if (childInspection != null) {
+                childPlatformLevel = childInspection.getKeymintSecurityLevel();
+            } else {
+                return caList;
+            }
+            if (childPlatformLevel != CertificateBackend.SECURITY_LEVEL_TEE
+                    && childPlatformLevel != CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
+                return caList;
+            }
 
             byte[] rewrittenDer = CertificateBackend.rewriteChildKey(
                     uid,
@@ -1658,6 +1713,7 @@ public final class CertHack {
                     childKeyId,
                     leafEncoded,
                     isAttestKey,
+                    childPlatformLevel,
                     patchDisposition(patchLevels.getSystem()), patchLevels.getSystem().getValue(),
                     patchDisposition(patchLevels.getVendor()), patchLevels.getVendor().getValue(),
                     patchDisposition(patchLevels.getBoot()), patchLevels.getBoot().getValue(),

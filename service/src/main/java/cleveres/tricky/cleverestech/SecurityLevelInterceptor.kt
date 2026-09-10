@@ -50,6 +50,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         isAttestKey: Boolean,
         parentKeyId: ByteArray,
         childKeyId: ByteArray?,
+        platformSecurityLevel: Int,
     ): Array<Certificate> {
         KeyboxActivation.lockPublishedSnapshot()
         return try {
@@ -61,6 +62,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                     true,
                     parentKeyId,
                     childKeyId,
+                    platformSecurityLevel,
                 )
             if (first !== original || !ManagedAttestKeyRegistry.isKnown(callingUid, parentKeyId)) {
                 return first
@@ -79,6 +81,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 true,
                 parentKeyId,
                 childKeyId,
+                platformSecurityLevel,
             )
         } finally {
             KeyboxActivation.unlockPublishedSnapshot()
@@ -128,6 +131,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 }
 
                 val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
+                val platformSecurityLevel = parsed.keySecurityLevel
                 val rewritten =
                     if (!context.usesDefaultAttestationKey) {
                         val parentId = context.parentKeyId
@@ -140,6 +144,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                                 callingUid,
                                 context.isAttestKeyPurpose,
                                 true,
+                                null,
+                                null,
+                                platformSecurityLevel,
                             )
                         } else {
                             rewriteChildWithParentRecovery(
@@ -148,6 +155,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                                 context.isAttestKeyPurpose,
                                 parentId,
                                 context.generatedKeyId,
+                                platformSecurityLevel,
                             )
                         }
                     } else if (context.isAttestKeyPurpose) {
@@ -157,6 +165,8 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                                 originalLeafOnly,
                                 callingUid,
                                 true,
+                                null,
+                                platformSecurityLevel,
                             )
                         } else {
                             CertHack.hackAttestKeyCertificateChain(
@@ -164,6 +174,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                                 callingUid,
                                 true,
                                 keyId,
+                                platformSecurityLevel,
                             )
                         }
                     } else {
@@ -183,6 +194,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                         context.parentKeyId,
                         parsed.leafEncoded,
                         context.isAttestKeyPurpose,
+                        platformSecurityLevel,
                     )
                 }
 
@@ -215,6 +227,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             }
 
             val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
+            val platformSecurityLevel = metadata.keySecurityLevel
             val rewritten =
                 if (!context.usesDefaultAttestationKey) {
                     val parentId = context.parentKeyId
@@ -227,6 +240,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                             callingUid,
                             context.isAttestKeyPurpose,
                             true,
+                            null,
+                            null,
+                            platformSecurityLevel,
                         )
                     } else {
                         rewriteChildWithParentRecovery(
@@ -235,6 +251,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                             context.isAttestKeyPurpose,
                             parentId,
                             context.generatedKeyId,
+                            platformSecurityLevel,
                         )
                     }
                 } else if (context.isAttestKeyPurpose) {
@@ -244,6 +261,8 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                             originalLeafOnly,
                             callingUid,
                             true,
+                            null,
+                            platformSecurityLevel,
                         )
                     } else {
                         CertHack.hackAttestKeyCertificateChain(
@@ -251,6 +270,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                             callingUid,
                             true,
                             keyId,
+                            platformSecurityLevel,
                         )
                     }
                 } else {
@@ -270,6 +290,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                     context.parentKeyId,
                     metadata.certificate,
                     context.isAttestKeyPurpose,
+                    platformSecurityLevel,
                 )
             }
 

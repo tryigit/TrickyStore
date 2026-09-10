@@ -9,7 +9,7 @@ use cleverestricky_certificate_core::{
 use zeroize::Zeroize;
 
 const INSPECT_WIRE_VERSION: u8 = 2;
-pub(crate) const REWRITE_WIRE_VERSION: u8 = 2;
+pub(crate) const REWRITE_WIRE_VERSION: u8 = 3;
 const SIGNING_EC_P256_SHA256: u8 = 1;
 const SIGNING_RSA_PKCS1_SHA256: u8 = 2;
 const PATCH_KEEP: u8 = 0;
@@ -18,8 +18,8 @@ const PATCH_REPLACE: u8 = 2;
 const MAX_ID_OVERRIDES: usize = 9;
 const REWRITE_FIXED_BYTES: usize = 1 + 1 + 3 * 5 + 1 + 2 + 4 + KEY_ID_BYTES + 2 * 32;
 const ATTEST_KEY_REWRITE_FIXED_BYTES: usize =
-    1 + 4 + 1 + 3 * 5 + 1 + 2 + 4 + KEY_ID_BYTES + 32 + 2 * 32;
-const CHILD_KEY_REWRITE_FIXED_BYTES: usize = 1 + 4 + 1 + 3 * 5 + 1 + 2 + 4 + 32 + 32 + 2 * 32;
+    1 + 4 + 1 + 1 + 3 * 5 + 1 + 2 + 4 + KEY_ID_BYTES + 32 + 2 * 32;
+const CHILD_KEY_REWRITE_FIXED_BYTES: usize = 1 + 4 + 1 + 1 + 3 * 5 + 1 + 2 + 4 + 32 + 32 + 2 * 32;
 const MAX_ID_WIRE_BYTES: usize = MAX_ID_OVERRIDES * (2 + 2 + MAX_ATTESTATION_ID_BYTES);
 
 pub const MAX_INSPECT_REQUEST_BYTES: usize = MAX_CERTIFICATE_DER_BYTES;
@@ -83,6 +83,14 @@ fn validate_hardware_provenance(provenance: &CertificateInspection) -> Result<()
         return Err("certificate rewrite provenance is not hardware compatible");
     }
     Ok(())
+}
+
+fn parse_keymint_security_level(encoded: u8) -> Result<SecurityLevel, &'static str> {
+    match encoded {
+        1 => Ok(SecurityLevel::TrustedEnvironment),
+        2 => Ok(SecurityLevel::StrongBox),
+        _ => Err("unsupported platform security level"),
+    }
 }
 
 fn derive_attest_issuer(
@@ -153,9 +161,12 @@ pub fn rewrite_attest_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'
         let keymint_security_level = match inspect_certificate(parsed.genuine_leaf_der) {
             Ok(provenance) => {
                 validate_hardware_provenance(&provenance)?;
+                if provenance.keymint_security_level != parsed.keymint_security_level {
+                    return Err("platform security level does not match attestation provenance");
+                }
                 provenance.keymint_security_level
             }
-            Err(CertCoreError::MissingAttestationExtension) => SecurityLevel::TrustedEnvironment,
+            Err(CertCoreError::MissingAttestationExtension) => parsed.keymint_security_level,
             Err(_) => return Err("attest key rewrite provenance rejected"),
         };
 
@@ -218,10 +229,13 @@ pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'s
         let keymint_security_level = match inspect_certificate(parsed.genuine_leaf_der) {
             Ok(provenance) => {
                 validate_hardware_provenance(&provenance)?;
+                if provenance.keymint_security_level != parsed.keymint_security_level {
+                    return Err("platform security level does not match attestation provenance");
+                }
                 provenance.keymint_security_level
             }
             Err(CertCoreError::MissingAttestationExtension) if parsed.is_attest_key => {
-                SecurityLevel::TrustedEnvironment
+                parsed.keymint_security_level
             }
             Err(_) => return Err("child key rewrite provenance rejected"),
         };
@@ -389,6 +403,7 @@ fn parse_rewrite_request(request: &[u8]) -> Result<ParsedRewrite<'_>, &'static s
 struct ParsedAttestKeyRewrite<'a> {
     calling_uid: u32,
     signing_algorithm: SigningAlgorithm,
+    keymint_security_level: SecurityLevel,
     patch_levels: PatchLevels,
     id_overrides: Vec<AttestationIdOverride<'a>>,
     module_hash: Option<&'a [u8]>,
@@ -412,6 +427,7 @@ fn parse_attest_key_rewrite_request(
         SIGNING_RSA_PKCS1_SHA256 => SigningAlgorithm::RsaPkcs1Sha256,
         _ => return Err("unsupported certificate signing algorithm"),
     };
+    let keymint_security_level = parse_keymint_security_level(cursor.read_u8()?)?;
     let patch_levels = PatchLevels {
         system: read_patch(&mut cursor)?,
         vendor: read_patch(&mut cursor)?,
@@ -491,6 +507,7 @@ fn parse_attest_key_rewrite_request(
     Ok(ParsedAttestKeyRewrite {
         calling_uid,
         signing_algorithm,
+        keymint_security_level,
         patch_levels,
         id_overrides,
         module_hash,
@@ -505,6 +522,7 @@ fn parse_attest_key_rewrite_request(
 struct ParsedChildKeyRewrite<'a> {
     calling_uid: u32,
     is_attest_key: bool,
+    keymint_security_level: SecurityLevel,
     patch_levels: PatchLevels,
     id_overrides: Vec<AttestationIdOverride<'a>>,
     module_hash: Option<&'a [u8]>,
@@ -528,6 +546,7 @@ fn parse_child_key_rewrite_request(
         1 => true,
         _ => return Err("invalid child attest key flag"),
     };
+    let keymint_security_level = parse_keymint_security_level(cursor.read_u8()?)?;
     let patch_levels = PatchLevels {
         system: read_patch(&mut cursor)?,
         vendor: read_patch(&mut cursor)?,
@@ -610,6 +629,7 @@ fn parse_child_key_rewrite_request(
     Ok(ParsedChildKeyRewrite {
         calling_uid,
         is_attest_key,
+        keymint_security_level,
         patch_levels,
         id_overrides,
         module_hash,
@@ -799,6 +819,78 @@ mod tests {
         invalid_patch[2] = PATCH_KEEP;
         invalid_patch[3..7].copy_from_slice(&7i32.to_be_bytes());
         assert!(parse_rewrite_request(&invalid_patch).is_err());
+    }
+
+    fn minimal_attest_key_request(security_level: u8) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.push(REWRITE_WIRE_VERSION);
+        output.extend_from_slice(&44_501u32.to_be_bytes());
+        output.push(SIGNING_EC_P256_SHA256);
+        output.push(security_level);
+        patch(PATCH_KEEP, 0, &mut output);
+        patch(PATCH_KEEP, 0, &mut output);
+        patch(PATCH_KEEP, 0, &mut output);
+        output.push(0);
+        output.extend_from_slice(&0u16.to_be_bytes());
+        output.extend_from_slice(&1u32.to_be_bytes());
+        output.extend_from_slice(&[0x33; KEY_ID_BYTES]);
+        output.extend_from_slice(&[0x44; 32]);
+        output.extend_from_slice(&[0x11; 32]);
+        output.extend_from_slice(&[0x22; 32]);
+        output.push(1);
+        output
+    }
+
+    fn minimal_child_key_request(is_attest_key: u8, security_level: u8) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.push(REWRITE_WIRE_VERSION);
+        output.extend_from_slice(&44_502u32.to_be_bytes());
+        output.push(is_attest_key);
+        output.push(security_level);
+        patch(PATCH_KEEP, 0, &mut output);
+        patch(PATCH_KEEP, 0, &mut output);
+        patch(PATCH_KEEP, 0, &mut output);
+        output.push(0);
+        output.extend_from_slice(&0u16.to_be_bytes());
+        output.extend_from_slice(&1u32.to_be_bytes());
+        output.extend_from_slice(&[0x55; 32]);
+        output.extend_from_slice(&[0x66; 32]);
+        output.extend_from_slice(&[0x11; 32]);
+        output.extend_from_slice(&[0x22; 32]);
+        output.push(1);
+        output
+    }
+
+    #[test]
+    fn attest_key_wire_propagates_platform_security_level() {
+        let tee = parse_attest_key_rewrite_request(&minimal_attest_key_request(1)).unwrap();
+        assert_eq!(
+            tee.keymint_security_level,
+            SecurityLevel::TrustedEnvironment
+        );
+        let sb = parse_attest_key_rewrite_request(&minimal_attest_key_request(2)).unwrap();
+        assert_eq!(sb.keymint_security_level, SecurityLevel::StrongBox);
+        assert!(parse_attest_key_rewrite_request(&minimal_attest_key_request(0)).is_err());
+        assert!(parse_attest_key_rewrite_request(&minimal_attest_key_request(3)).is_err());
+        let mut old_version = minimal_attest_key_request(1);
+        old_version[0] = 2;
+        assert!(parse_attest_key_rewrite_request(&old_version).is_err());
+    }
+
+    #[test]
+    fn child_key_wire_propagates_platform_security_level() {
+        let tee = parse_child_key_rewrite_request(&minimal_child_key_request(1, 1)).unwrap();
+        assert_eq!(
+            tee.keymint_security_level,
+            SecurityLevel::TrustedEnvironment
+        );
+        let sb = parse_child_key_rewrite_request(&minimal_child_key_request(1, 2)).unwrap();
+        assert_eq!(sb.keymint_security_level, SecurityLevel::StrongBox);
+        assert!(parse_child_key_rewrite_request(&minimal_child_key_request(1, 0)).is_err());
+        assert!(parse_child_key_rewrite_request(&minimal_child_key_request(0, 0)).is_err());
+        let mut old_version = minimal_child_key_request(1, 1);
+        old_version[0] = 2;
+        assert!(parse_child_key_rewrite_request(&old_version).is_err());
     }
 
     #[test]
