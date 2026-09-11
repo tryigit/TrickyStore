@@ -2205,7 +2205,7 @@
         'keystore_interceptor', 'telephony_interceptor', 'keybox_count', 'app_config_bytes',
         'process_cpu_percent', 'process_rss_kb', 'identity_engine', 'global_mode',
         'automatic_keybox_check', 'identity_refresh_on_boot', 'telephony',
-        'drm_passthrough', 'build_identity', 'region_property_view'
+        'drm_passthrough', 'build_identity', 'region_property_view', 'attest_fail_ring'
     ]);
 
     function sanitizeDiagnosticValue(value) {
@@ -2240,7 +2240,8 @@
             telephony: source.telephony,
             drm_passthrough: source.drm_passthrough,
             build_identity: source.spoof_build_identity,
-            region_property_view: source.spoof_region_cn
+            region_property_view: source.spoof_region_cn,
+            attest_fail_ring: source.attest_fail_ring
         };
         return ['CleveresTricky diagnostics', 'schema=2']
             .concat(DIAGNOSTIC_FIELDS.map(field => `${field}=${sanitizeDiagnosticValue(values[field])}`))
