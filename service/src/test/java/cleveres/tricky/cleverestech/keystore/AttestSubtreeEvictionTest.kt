@@ -269,23 +269,23 @@ class AttestSubtreeEvictionTest {
 
         assertSame("zero parent must fail closed to the genuine leaf", original, result)
         assertTrue("failed validation must not evict unrelated entries", containsCacheKey(victimKey))
-        assertEquals("1:36", CertHack.attestFailureSnapshot())
+        assertEquals("1:44601:36", CertHack.attestFailureSnapshot())
     }
 
     @Test
     fun `self parenting attest key fails closed before child eviction`() {
         CertHack.resetAttestFailureRingForTesting()
+        val selfId = ByteArray(32) { (it + 47).toByte() }
         val victimKey = cacheKey(byteArrayOf(82, 83, 84))
         putCacheEntry(
             victimKey,
             byteArrayOf(92, 93),
             uid = uid,
             attestKeyId = null,
-            parentKeyId = ByteArray(32) { (it + 46).toByte() },
+            parentKeyId = selfId,
         )
         assertTrue(containsCacheKey(victimKey))
 
-        val selfId = ByteArray(32) { (it + 47).toByte() }
         val leaf = attestedLeaf("self-parent-child")
         val original = arrayOf<Certificate>(leaf)
         val result =
@@ -300,8 +300,11 @@ class AttestSubtreeEvictionTest {
             )
 
         assertSame("self parenting must fail closed to the genuine leaf", original, result)
-        assertTrue("failed validation must not evict unrelated entries", containsCacheKey(victimKey))
-        assertEquals("1:36", CertHack.attestFailureSnapshot())
+        assertTrue(
+            "failed validation must not evict the child subtree entry",
+            containsCacheKey(victimKey),
+        )
+        assertEquals("1:44601:36", CertHack.attestFailureSnapshot())
     }
 
     @Test

@@ -54,7 +54,7 @@ public class AttestFailureRingTest {
                 CertHack.hackAttestKeyCertificateChain(input, 10_001, true, attestKeyId, 0);
 
         assertSame(input, result);
-        assertEquals("1:5", CertHack.attestFailureSnapshot());
+        assertEquals("1:10001:5", CertHack.attestFailureSnapshot());
     }
 
     @Test
@@ -70,7 +70,7 @@ public class AttestFailureRingTest {
                         input, 10_001, false, true, parentKeyId, null, 0);
 
         assertSame(input, result);
-        assertEquals("1:29", CertHack.attestFailureSnapshot());
+        assertEquals("1:10001:29", CertHack.attestFailureSnapshot());
     }
 
     @Test
@@ -189,7 +189,7 @@ public class AttestFailureRingTest {
                     CertHack.hackAttestKeyCertificateChain(input, uid, true, attestKeyId, 1);
 
             assertSame(input, result);
-            assertEquals("1:40", CertHack.attestFailureSnapshot());
+            assertEquals("1:10001:40", CertHack.attestFailureSnapshot());
         } finally {
             cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
             synchronized (cache) {
@@ -209,6 +209,8 @@ public class AttestFailureRingTest {
             CertHack.hackAttestKeyCertificateChain(
                     new Certificate[] {leaf}, 10_001, true, attestKeyId, 0);
         }
-        assertEquals("10:5,5,5,5,5,5,5,5", CertHack.attestFailureSnapshot());
+        assertEquals(
+                "10:10001:5,10001:5,10001:5,10001:5,10001:5",
+                CertHack.attestFailureSnapshot());
     }
 }

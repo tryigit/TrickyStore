@@ -111,19 +111,24 @@ public final class CertHack {
         return true;
     }
     private static final int ATTEST_FAILURE_RING_SIZE = 16;
-    private static final int ATTEST_FAILURE_SNAPSHOT_CODES = 8;
+    private static final int ATTEST_FAILURE_SNAPSHOT_CODES = 5;
     private static final Object attestFailureLock = new Object();
-    private static final int[] attestFailureRing = new int[ATTEST_FAILURE_RING_SIZE];
+    private static final long[] attestFailureRing = new long[ATTEST_FAILURE_RING_SIZE];
     private static long attestFailureTotal = 0;
 
-    static void noteAttestFailure(int code) {
+    static void noteAttestFailure(int callingUid, int code) {
         synchronized (attestFailureLock) {
-            attestFailureRing[Math.floorMod(attestFailureTotal, ATTEST_FAILURE_RING_SIZE)] = code;
+            long packed = ((long) callingUid << 32) | (code & 0xffffffffL);
+            attestFailureRing[Math.floorMod(attestFailureTotal, ATTEST_FAILURE_RING_SIZE)] = packed;
             attestFailureTotal++;
         }
     }
 
-    /** Bounded snapshot for diagnostics: "total:last-8-codes", codes only. */
+    /**
+     * Bounded snapshot for diagnostics: "total:uid:code,..." for the last
+     * entries. UIDs are numeric caller identities (no package names, no key
+     * material) so failures can be attributed to the generating app.
+     */
     public static String attestFailureSnapshot() {
         synchronized (attestFailureLock) {
             StringBuilder snapshot = new StringBuilder();
@@ -132,7 +137,8 @@ public final class CertHack {
             for (long index = 0; index < kept; index++) {
                 if (index > 0) snapshot.append(',');
                 int slot = Math.floorMod(attestFailureTotal - kept + index, ATTEST_FAILURE_RING_SIZE);
-                snapshot.append(attestFailureRing[slot]);
+                long packed = attestFailureRing[slot];
+                snapshot.append((int) (packed >> 32)).append(':').append((int) packed);
             }
             return snapshot.toString();
         }
@@ -141,7 +147,7 @@ public final class CertHack {
     @VisibleForTesting
     static void resetAttestFailureRingForTesting() {
         synchronized (attestFailureLock) {
-            Arrays.fill(attestFailureRing, 0);
+            Arrays.fill(attestFailureRing, 0L);
             attestFailureTotal = 0;
         }
     }
@@ -1096,7 +1102,7 @@ public final class CertHack {
                         cache.remove(cacheKey);
                     }
                 }
-                noteAttestFailure(40);
+                noteAttestFailure(cached.attestKeyCallingUid, 40);
                 return CachedCertificateChain.passthrough();
             }
             return null;
@@ -1409,7 +1415,7 @@ public final class CertHack {
             State currentState = state;
             byte[] leafEncoded = caList[0].getEncoded();
             if (leafEncoded.length == 0 || leafEncoded.length > MAX_LEAF_CERTIFICATE_BYTES) {
-                noteAttestFailure(1);
+                noteAttestFailure(uid, 1);
                 return caList;
             }
             CacheKey cacheKey = new CacheKey(leafEncoded);
@@ -1437,7 +1443,7 @@ public final class CertHack {
             if (hasAttestExt) {
                 attestInspection = CertificateBackend.inspect(leafEncoded);
                 if (attestInspection == null) {
-                    noteAttestFailure(2);
+                    noteAttestFailure(uid, 2);
                     return caList;
                 }
                 int attLevel = attestInspection.getAttestationSecurityLevel();
@@ -1456,11 +1462,11 @@ public final class CertHack {
                             cache.putIfAbsent(cacheKey, CachedCertificateChain.passthrough());
                         }
                     }
-                    noteAttestFailure(3);
+                    noteAttestFailure(uid, 3);
                     return caList;
                 }
                 if (platformSecurityLevel != 0 && kmLevel != platformSecurityLevel) {
-                    noteAttestFailure(4);
+                    noteAttestFailure(uid, 4);
                     return caList;
                 }
 
@@ -1499,7 +1505,7 @@ public final class CertHack {
                 } else if (platformSecurityLevel == CertificateBackend.SECURITY_LEVEL_TEE) {
                     isStrongbox = false;
                 } else {
-                    noteAttestFailure(5);
+                    noteAttestFailure(uid, 5);
                     return caList;
                 }
                 verifiedBootKey = selectVerifiedBootDigest(
@@ -1547,7 +1553,7 @@ public final class CertHack {
                 }
             }
             if (list.isEmpty()) {
-                noteAttestFailure(6);
+                noteAttestFailure(uid, 6);
                 return caList;
             }
 
@@ -1556,17 +1562,17 @@ public final class CertHack {
             if (prepared == null) throw new UnsupportedOperationException("Keybox metadata is unavailable");
             int signingAlgorithm = signingWireAlgorithm(prepared.signatureAlgorithm);
             if (signingAlgorithm == 0) {
-                noteAttestFailure(7);
+                noteAttestFailure(uid, 7);
                 return caList;
             }
 
             if (verifiedBootKey == null || verifiedBootHash == null) {
-                noteAttestFailure(8);
+                noteAttestFailure(uid, 8);
                 return caList;
             }
 
             if (attestKeyId == null || attestKeyId.length != 32) {
-                noteAttestFailure(9);
+                noteAttestFailure(uid, 9);
                 return caList;
             }
             int attestPlatformLevel;
@@ -1575,16 +1581,16 @@ public final class CertHack {
             } else if (attestInspection != null) {
                 attestPlatformLevel = attestInspection.getKeymintSecurityLevel();
             } else {
-                noteAttestFailure(10);
+                noteAttestFailure(uid, 10);
                 return caList;
             }
             if (attestPlatformLevel != CertificateBackend.SECURITY_LEVEL_TEE
                     && attestPlatformLevel != CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
-                noteAttestFailure(11);
+                noteAttestFailure(uid, 11);
                 return caList;
             }
             if (failsBackendWirePreconditions(null, null, false, idOverrides, moduleHash)) {
-                noteAttestFailure(16);
+                noteAttestFailure(uid, 16);
                 return caList;
             }
             keyId = prepared.keyId.clone();
@@ -1594,12 +1600,12 @@ public final class CertHack {
                     CertificateBackend.removeAttestKey(uid, attestKeyId);
             if (subtreeRemoved == CertificateBackend.AttestKeyRemoveResult.UNAVAILABLE) {
                 graphStateUnhealthy = true;
-                noteAttestFailure(12);
+                noteAttestFailure(uid, 12);
                 return caList;
             }
             synchronized (cache) {
                 if (state != currentState) {
-                    noteAttestFailure(13);
+                    noteAttestFailure(uid, 13);
                     return caList;
                 }
                 cacheEpoch = currentState.certificateCacheEpoch;
@@ -1620,7 +1626,7 @@ public final class CertHack {
                     verifiedBootKey,
                     verifiedBootHash);
             if (rewrittenDer == null || rewrittenDer.length == 0 || rewrittenDer.length > MAX_LEAF_CERTIFICATE_BYTES) {
-                noteAttestFailure(14);
+                noteAttestFailure(uid, 14);
                 return caList;
             }
             byte[] encodedIssuerChain = currentState.encodedIssuerChain(prepared);
@@ -1651,7 +1657,7 @@ public final class CertHack {
             }
             return result;
         } catch (Throwable t) {
-            noteAttestFailure(15);
+            noteAttestFailure(uid, 15);
             return caList;
         } finally {
             if (keyId != null) Arrays.fill(keyId, (byte) 0);
@@ -1692,7 +1698,7 @@ public final class CertHack {
             State currentState = state;
             byte[] leafEncoded = caList[0].getEncoded();
             if (leafEncoded.length == 0 || leafEncoded.length > MAX_LEAF_CERTIFICATE_BYTES) {
-                noteAttestFailure(21);
+                noteAttestFailure(uid, 21);
                 return caList;
             }
             CacheKey cacheKey = new CacheKey(leafEncoded);
@@ -1713,7 +1719,7 @@ public final class CertHack {
                 if (clearCertificateCache()) {
                     graphStateUnhealthy = false;
                 } else {
-                    noteAttestFailure(22);
+                    noteAttestFailure(uid, 22);
                     return caList;
                 }
             }
@@ -1728,7 +1734,7 @@ public final class CertHack {
             if (hasAttestExt) {
                 childInspection = CertificateBackend.inspect(leafEncoded);
                 if (childInspection == null) {
-                    noteAttestFailure(23);
+                    noteAttestFailure(uid, 23);
                     return caList;
                 }
                 int attLevel = childInspection.getAttestationSecurityLevel();
@@ -1747,11 +1753,11 @@ public final class CertHack {
                             cache.putIfAbsent(cacheKey, CachedCertificateChain.passthrough());
                         }
                     }
-                    noteAttestFailure(24);
+                    noteAttestFailure(uid, 24);
                     return caList;
                 }
                 if (platformSecurityLevel != 0 && kmLevel != platformSecurityLevel) {
-                    noteAttestFailure(25);
+                    noteAttestFailure(uid, 25);
                     return caList;
                 }
 
@@ -1774,7 +1780,7 @@ public final class CertHack {
                         originalBootHash != null ? originalBootHash : capturedHardwareBootHash,
                         UtilKt.getPersistentBootHash());
                 if (verifiedBootKey == null || verifiedBootHash == null) {
-                    noteAttestFailure(26);
+                    noteAttestFailure(uid, 26);
                     return caList;
                 }
 
@@ -1793,7 +1799,7 @@ public final class CertHack {
             } else if (isAttestKey) {
                 if (platformSecurityLevel != CertificateBackend.SECURITY_LEVEL_TEE
                         && platformSecurityLevel != CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
-                    noteAttestFailure(27);
+                    noteAttestFailure(uid, 27);
                     return caList;
                 }
                 verifiedBootKey = selectVerifiedBootDigest(
@@ -1805,23 +1811,23 @@ public final class CertHack {
                         capturedHardwareBootHash,
                         UtilKt.getPersistentBootHash());
                 if (verifiedBootKey == null || verifiedBootHash == null) {
-                    noteAttestFailure(28);
+                    noteAttestFailure(uid, 28);
                     return caList;
                 }
                 patchLevels = keepPatchLevels();
                 idOverrides = Collections.emptyMap();
                 moduleHash = null;
             } else {
-                noteAttestFailure(29);
+                noteAttestFailure(uid, 29);
                 return caList;
             }
 
             if (parentKeyId == null || parentKeyId.length != 32) {
-                noteAttestFailure(30);
+                noteAttestFailure(uid, 30);
                 return caList;
             }
             if (isAttestKey && (childKeyId == null || childKeyId.length != 32)) {
-                noteAttestFailure(31);
+                noteAttestFailure(uid, 31);
                 return caList;
             }
             int childPlatformLevel;
@@ -1834,18 +1840,18 @@ public final class CertHack {
             }
             if (childPlatformLevel != CertificateBackend.SECURITY_LEVEL_TEE
                     && childPlatformLevel != CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
-                noteAttestFailure(32);
+                noteAttestFailure(uid, 32);
                 return caList;
             }
             if (failsBackendWirePreconditions(
                     parentKeyId, childKeyId, isAttestKey, idOverrides, moduleHash)) {
-                noteAttestFailure(36);
+                noteAttestFailure(uid, 36);
                 return caList;
             }
             if (isAttestKey && childKeyId != null) {
                 evictDescendants(cache, uid, childKeyId);
                 if (graphStateUnhealthy) {
-                    noteAttestFailure(33);
+                    noteAttestFailure(uid, 33);
                     return caList;
                 }
             }
@@ -1865,7 +1871,7 @@ public final class CertHack {
                     verifiedBootKey,
                     verifiedBootHash);
             if (rewrittenDer == null || rewrittenDer.length == 0 || rewrittenDer.length > MAX_LEAF_CERTIFICATE_BYTES) {
-                noteAttestFailure(34);
+                noteAttestFailure(uid, 34);
                 return caList;
             }
 
@@ -1905,7 +1911,7 @@ public final class CertHack {
             }
             return result;
         } catch (Throwable t) {
-            noteAttestFailure(35);
+            noteAttestFailure(uid, 35);
             return caList;
         } finally {
             if (childInspection != null) childInspection.wipe();
