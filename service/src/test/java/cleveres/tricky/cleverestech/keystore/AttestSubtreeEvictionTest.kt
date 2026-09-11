@@ -273,6 +273,38 @@ class AttestSubtreeEvictionTest {
     }
 
     @Test
+    fun `self parenting attest key fails closed before child eviction`() {
+        CertHack.resetAttestFailureRingForTesting()
+        val victimKey = cacheKey(byteArrayOf(82, 83, 84))
+        putCacheEntry(
+            victimKey,
+            byteArrayOf(92, 93),
+            uid = uid,
+            attestKeyId = null,
+            parentKeyId = ByteArray(32) { (it + 46).toByte() },
+        )
+        assertTrue(containsCacheKey(victimKey))
+
+        val selfId = ByteArray(32) { (it + 47).toByte() }
+        val leaf = attestedLeaf("self-parent-child")
+        val original = arrayOf<Certificate>(leaf)
+        val result =
+            CertHack.hackChildKeyCertificate(
+                original,
+                uid,
+                true,
+                true,
+                selfId,
+                selfId.clone(),
+                CertificateBackend.SECURITY_LEVEL_TEE,
+            )
+
+        assertSame("self parenting must fail closed to the genuine leaf", original, result)
+        assertTrue("failed validation must not evict unrelated entries", containsCacheKey(victimKey))
+        assertEquals("1:36", CertHack.attestFailureSnapshot())
+    }
+
+    @Test
     fun `child eviction backend failure fails closed and marks graph unhealthy`() {
         val childKeyId = ByteArray(32) { (it + 41).toByte() }
         val staleKey = cacheKey(byteArrayOf(71, 72, 73))

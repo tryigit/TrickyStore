@@ -115,6 +115,20 @@ public class AttestFailureRingTest {
     }
 
     @Test
+    public void backendPreconditionsRejectSelfParentingAttestKeys() {
+        byte[] keyId = new byte[32];
+        keyId[0] = 1;
+        Map<Integer, byte[]> emptyOverrides = Collections.emptyMap();
+
+        assertTrue(
+                CertHack.failsBackendWirePreconditions(
+                        keyId, keyId.clone(), true, emptyOverrides, null));
+        assertFalse(
+                CertHack.failsBackendWirePreconditions(
+                        keyId, keyId.clone(), false, emptyOverrides, null));
+    }
+
+    @Test
     public void ringKeepsLastEightCodesWithMonotonicTotal() throws Exception {
         Certificate leaf = mock(Certificate.class);
         when(leaf.getEncoded()).thenReturn(new byte[] {7, 7, 7});

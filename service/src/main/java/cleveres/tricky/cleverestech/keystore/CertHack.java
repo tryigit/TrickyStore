@@ -86,6 +86,14 @@ public final class CertHack {
                 && (childKeyId.length != 32 || (isAttestKey && isAllZero(childKeyId)))) {
             return true;
         }
+        if (isAttestKey
+                && parentKeyId != null
+                && parentKeyId.length == 32
+                && childKeyId != null
+                && childKeyId.length == 32
+                && Arrays.equals(parentKeyId, childKeyId)) {
+            return true;
+        }
         for (Map.Entry<Integer, byte[]> idOverride : idOverrides.entrySet()) {
             byte[] value = idOverride.getValue();
             if (value == null || value.length == 0 || value.length > 4 * 1024) {
