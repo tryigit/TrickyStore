@@ -63,6 +63,7 @@ public final class CertHack {
      * 30 parent descriptor invalid, 31 child descriptor invalid,
      * 32 child level invalid, 33 eviction-time graph unhealthy, and
      * 36 backend preconditions rejected pre-eviction (16 on attest path).
+     * 40 stale managed entry kept genuine when the backend clear failed.
      */
 
     /**
@@ -1095,6 +1096,7 @@ public final class CertHack {
                         cache.remove(cacheKey);
                     }
                 }
+                noteAttestFailure(40);
                 return CachedCertificateChain.passthrough();
             }
             return null;

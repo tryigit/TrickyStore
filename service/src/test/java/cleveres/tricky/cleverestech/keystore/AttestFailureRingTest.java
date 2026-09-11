@@ -8,6 +8,8 @@ import static org.mockito.Mockito.when;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.security.cert.Certificate;
 import java.util.Collections;
 import java.util.HashMap;
@@ -126,6 +128,74 @@ public class AttestFailureRingTest {
         assertFalse(
                 CertHack.failsBackendWirePreconditions(
                         keyId, keyId.clone(), false, emptyOverrides, null));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void staleManagedEntryWithFailedClearRecordsCodeForty() throws Exception {
+        Field stateField = CertHack.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        Object state = stateField.get(null);
+        Field cacheField = state.getClass().getDeclaredField("certificateCache");
+        cacheField.setAccessible(true);
+        Map<Object, Object> cache = (Map<Object, Object>) cacheField.get(state);
+
+        Constructor<?> keyConstructor =
+                Class.forName(CertHack.class.getName() + "$CacheKey")
+                        .getDeclaredConstructor(byte[].class);
+        keyConstructor.setAccessible(true);
+        Constructor<?> valueConstructor =
+                Class.forName(CertHack.class.getName() + "$CachedCertificateChain")
+                        .getDeclaredConstructor(
+                                Certificate[].class,
+                                byte[].class,
+                                byte[].class,
+                                boolean.class,
+                                boolean.class,
+                                int.class,
+                                byte[].class,
+                                byte[].class);
+        valueConstructor.setAccessible(true);
+
+        int uid = 10_001;
+        byte[] attestKeyId = new byte[32];
+        attestKeyId[0] = 9;
+        Certificate mockCert = mock(Certificate.class);
+        Certificate[] mockChain = new Certificate[] {mockCert};
+        Object key = keyConstructor.newInstance((Object) new byte[] {5, 5, 5});
+        Object value =
+                valueConstructor.newInstance(
+                        mockChain, new byte[] {5}, new byte[] {6}, true, true, uid, attestKeyId,
+                        null);
+
+        cleveres.tricky.cleverestech.CertificateBackend.setTouchAttestKeyOverrideForTesting(
+                (u, id) ->
+                        cleveres.tricky.cleverestech.CertificateBackend.AttestKeyTouchResult.ABSENT);
+        cleveres.tricky.cleverestech.CertificateBackend.setClearAttestKeyStoreOverrideForTesting(
+                () -> false);
+        cleveres.tricky.cleverestech.CertificateBackend.setRemoveAttestKeyOverrideForTesting(
+                (u, id) ->
+                        cleveres.tricky.cleverestech.CertificateBackend.AttestKeyRemoveResult
+                                .REMOVED);
+        try {
+            synchronized (cache) {
+                cache.put(key, value);
+            }
+
+            Certificate leaf = mock(Certificate.class);
+            when(leaf.getEncoded()).thenReturn(new byte[] {5, 5, 5});
+            Certificate[] input = new Certificate[] {leaf};
+            Certificate[] result =
+                    CertHack.hackAttestKeyCertificateChain(input, uid, true, attestKeyId, 1);
+
+            assertSame(input, result);
+            assertEquals("1:40", CertHack.attestFailureSnapshot());
+        } finally {
+            cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
+            synchronized (cache) {
+                cache.clear();
+            }
+        }
     }
 
     @Test
