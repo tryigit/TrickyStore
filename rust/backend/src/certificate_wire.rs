@@ -140,6 +140,7 @@ pub fn rewrite_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'static str>
                 verified_boot_key: parsed.verified_boot_key,
                 verified_boot_hash: parsed.verified_boot_hash,
                 subject_public_key_info: None,
+                keymint_security_level: None,
             })
             .map(|rewritten| rewritten.leaf_der)
             .map_err(|_| "certificate rewrite rejected")
@@ -201,6 +202,7 @@ pub fn rewrite_attest_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'
                 verified_boot_key: parsed.verified_boot_key,
                 verified_boot_hash: parsed.verified_boot_hash,
                 subject_public_key_info: Some(&public_key_spki_der),
+                keymint_security_level: Some(parsed.keymint_security_level),
             })
             .map(|rewritten| rewritten.leaf_der)
             .map_err(|_| "attest key certificate rewrite rejected")?;
@@ -277,6 +279,7 @@ pub fn rewrite_child_key_and_encode(mut request: Vec<u8>) -> Result<Vec<u8>, &'s
             verified_boot_key: parsed.verified_boot_key,
             verified_boot_hash: parsed.verified_boot_hash,
             subject_public_key_info: spki_override.as_deref(),
+            keymint_security_level: Some(parsed.keymint_security_level),
         })
         .map(|rewritten| rewritten.leaf_der)
         .map_err(|_| "child certificate rewrite rejected")?;

@@ -100,6 +100,7 @@ fn attest_key_and_child_key_rootoftrust_and_signature_convergence() {
             verified_boot_key: &BOOT_KEY,
             verified_boot_hash: &BOOT_HASH,
             subject_public_key_info: None,
+            keymint_security_level: None,
         },
     )
     .expect("rewrite K2 child leaf");

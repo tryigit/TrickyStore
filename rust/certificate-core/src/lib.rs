@@ -1,10 +1,12 @@
 // Additional GPLv3 section 7(b) attribution term for tryigit-owned material: see ../../NOTICE.
 #![forbid(unsafe_code)]
 
+use crate::inspection::SecurityLevel;
 use attestation_der::asn1::{Any, AnyRef, BitString};
 use attestation_der::{Decode as X509Decode, Encode as X509Encode, Tag, TagNumber, Tagged};
 use cleverestricky_attestation_core::{
     rewrite_extension, AttestationIdOverride, CapturedPatchLevels, PatchLevels, RewriteRequest,
+    RewriteResult,
 };
 use p256::ecdsa::{
     Signature as EcSignature, SigningKey as EcSigningKey, VerifyingKey as EcVerifyingKey,
@@ -74,6 +76,11 @@ pub struct PreparedCertificateRewriteRequest<'a> {
     pub verified_boot_key: &'a [u8; 32],
     pub verified_boot_hash: &'a [u8; 32],
     pub subject_public_key_info: Option<&'a [u8]>,
+    /// Platform KeyMint level for managed attest issuance. Required when the
+    /// genuine leaf carries no attestation extension so a verified
+    /// RootOfTrust can be synthesized instead of emitting an extensionless
+    /// leaf. `None` keeps extensionless input failing closed.
+    pub keymint_security_level: Option<SecurityLevel>,
 }
 
 enum PreparedSigner {
@@ -271,6 +278,7 @@ pub fn rewrite_certificate(
         verified_boot_key: request.verified_boot_key,
         verified_boot_hash: request.verified_boot_hash,
         subject_public_key_info: request.subject_public_key_info,
+        keymint_security_level: None,
     })
 }
 
@@ -415,13 +423,17 @@ pub fn rewrite_certificate_prepared(
                     rewritten.captured_patch_levels,
                 )
             } else if request.subject_public_key_info.is_some() {
+                // The genuine leaf carries extensions but no attestation
+                // extension. Synthesize and append it (see below) instead of
+                // emitting a leaf that detectors read as
+                // deviceLocked=false/Unverified.
+                let synthesized = synthesize_managed_attest_extension(request)?;
+                let new_ext = encode_attestation_extension(&synthesized.extension_der)?;
+                let new_extensions_seq =
+                    encode_sequence_appending_tlv(extensions_seq.value(), &new_ext)?;
                 (
-                    ext_der.to_vec(),
-                    CapturedPatchLevels {
-                        system: None,
-                        vendor: None,
-                        boot: None,
-                    },
+                    encode_explicit(3, &new_extensions_seq)?,
+                    synthesized.captured_patch_levels,
                 )
             } else {
                 return Err(Error::MissingAttestationExtension);
@@ -429,13 +441,13 @@ pub fn rewrite_certificate_prepared(
         }
         None => {
             if request.subject_public_key_info.is_some() {
+                // Same synthesis for leaves without any extensions field.
+                let synthesized = synthesize_managed_attest_extension(request)?;
+                let new_ext = encode_attestation_extension(&synthesized.extension_der)?;
+                let new_extensions_seq = encode_sequence(&[new_ext.as_slice()])?;
                 (
-                    Vec::new(),
-                    CapturedPatchLevels {
-                        system: None,
-                        vendor: None,
-                        boot: None,
-                    },
+                    encode_explicit(3, &new_extensions_seq)?,
+                    synthesized.captured_patch_levels,
                 )
             } else {
                 return Err(Error::MissingAttestationExtension);
@@ -734,6 +746,119 @@ fn encode_sequence_replacing_tlv(
             field
         });
     }
+    Ok(encoded)
+}
+
+/// Builds a verified attestation extension for a managed attest key whose
+/// genuine leaf carries none. Vendor KeyMint stacks have been observed to
+/// return no attestation extension for ATTEST_KEY issuance; emitting the leaf
+/// as-is (or extensionless) makes detectors read deviceLocked=false with
+/// verifiedBootState=Unverified while RKP leaves read true/Verified. The
+/// synthesized KeyDescription claims TEE attestation with the platform KeyMint
+/// level (an accepted hardware pairing) and a RootOfTrust built from the
+/// verified boot digests. Ordinary rewrites (no replacement subject key, or
+/// no platform level) keep failing closed with MissingAttestationExtension.
+fn synthesize_managed_attest_extension(
+    request: &PreparedCertificateRewriteRequest<'_>,
+) -> Result<RewriteResult, Error> {
+    let keymint_level = request
+        .keymint_security_level
+        .ok_or(Error::MissingAttestationExtension)?;
+    if !matches!(
+        keymint_level,
+        SecurityLevel::TrustedEnvironment | SecurityLevel::StrongBox
+    ) {
+        return Err(Error::AttestationRewrite);
+    }
+    // Minimal KeyDescription input: fixed versions, empty challenge/uniqueId
+    // and software lists, and a structurally valid placeholder RootOfTrust in
+    // the TEE list that the rewrite below replaces with the verified digests
+    // (the placeholder bytes never reach the output).
+    let version = 400i32.to_der().map_err(|_| Error::Encoding)?;
+    let attestation_level = Any::new(
+        Tag::Enumerated,
+        vec![SecurityLevel::TrustedEnvironment.wire_value()],
+    )
+    .map_err(|_| Error::Encoding)?
+    .to_der()
+    .map_err(|_| Error::Encoding)?;
+    let keymint_level_der = Any::new(Tag::Enumerated, vec![keymint_level.wire_value()])
+        .map_err(|_| Error::Encoding)?
+        .to_der()
+        .map_err(|_| Error::Encoding)?;
+    let empty_octets = Any::new(Tag::OctetString, Vec::new())
+        .map_err(|_| Error::Encoding)?
+        .to_der()
+        .map_err(|_| Error::Encoding)?;
+    let empty_list = encode_sequence(&[])?;
+    let placeholder_root = {
+        let key = Any::new(Tag::OctetString, vec![0u8; 32])
+            .map_err(|_| Error::Encoding)?
+            .to_der()
+            .map_err(|_| Error::Encoding)?;
+        let locked = true.to_der().map_err(|_| Error::Encoding)?;
+        let state = Any::new(Tag::Enumerated, vec![0])
+            .map_err(|_| Error::Encoding)?
+            .to_der()
+            .map_err(|_| Error::Encoding)?;
+        let hash = Any::new(Tag::OctetString, vec![0u8; 32])
+            .map_err(|_| Error::Encoding)?
+            .to_der()
+            .map_err(|_| Error::Encoding)?;
+        encode_explicit(704, &encode_sequence(&[&key, &locked, &state, &hash])?)?
+    };
+    let tee_list = encode_sequence(&[placeholder_root.as_slice()])?;
+    let input = encode_sequence(&[
+        version.as_slice(),
+        attestation_level.as_slice(),
+        version.as_slice(),
+        keymint_level_der.as_slice(),
+        empty_octets.as_slice(),
+        empty_octets.as_slice(),
+        empty_list.as_slice(),
+        tee_list.as_slice(),
+    ])?;
+    rewrite_extension(&RewriteRequest {
+        extension_der: &input,
+        patch_levels: request.patch_levels,
+        id_overrides: request.id_overrides,
+        module_hash: request.module_hash,
+        verified_boot_key: request.verified_boot_key,
+        verified_boot_hash: request.verified_boot_hash,
+    })
+    .map_err(|_| Error::AttestationRewrite)
+}
+
+/// Wraps a rewritten attestation extension value in its non-critical
+/// Extension container, mirroring genuine KeyMint issuance.
+fn encode_attestation_extension(value_der: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut id_der = Vec::with_capacity(2 + ANDROID_ATTESTATION_OID_BYTES.len());
+    id_der.push(0x06);
+    id_der.push(u8::try_from(ANDROID_ATTESTATION_OID_BYTES.len()).map_err(|_| Error::Encoding)?);
+    id_der.extend_from_slice(ANDROID_ATTESTATION_OID_BYTES);
+    let value = Any::new(Tag::OctetString, value_der.to_vec())
+        .map_err(|_| Error::Encoding)?
+        .to_der()
+        .map_err(|_| Error::Encoding)?;
+    encode_sequence(&[id_der.as_slice(), value.as_slice()])
+}
+
+fn encode_sequence_appending_tlv(encoded_fields: &[u8], appended: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut total_len = appended.len();
+    for field in TlvIterator::new(encoded_fields) {
+        let field = field?;
+        total_len = total_len.checked_add(field.len()).ok_or(Error::Encoding)?;
+    }
+    if total_len > MAX_CERTIFICATE_DER_BYTES {
+        return Err(Error::Bounds);
+    }
+    let mut encoded = Vec::with_capacity(total_len + 5);
+    encoded.push(0x30);
+    push_der_length(&mut encoded, total_len)?;
+    for field in TlvIterator::new(encoded_fields) {
+        encoded.extend_from_slice(field?);
+    }
+    encoded.extend_from_slice(appended);
     Ok(encoded)
 }
 
