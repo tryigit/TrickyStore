@@ -1,6 +1,7 @@
 package cleveres.tricky.cleverestech
 
 import androidx.annotation.VisibleForTesting
+import java.util.ArrayDeque
 import java.util.Arrays
 import java.util.LinkedHashMap
 
@@ -29,6 +30,7 @@ internal object ManagedAttestKeyRegistry {
         val keyId: ByteArray,
         val parentKeyId: ByteArray?,
         val genuineLeafDer: ByteArray,
+        val platformSecurityLevel: Int = 0,
     )
 
     private class Identity private constructor(
@@ -53,6 +55,8 @@ internal object ManagedAttestKeyRegistry {
     private class Entry(
         parentKeyId: ByteArray?,
         genuineLeafDer: ByteArray?,
+        val isAttestKey: Boolean,
+        val platformSecurityLevel: Int = 0,
     ) {
         val parentKeyId = parentKeyId?.clone()
         var genuineLeafDer = genuineLeafDer?.clone()
@@ -66,43 +70,72 @@ internal object ManagedAttestKeyRegistry {
 
     @Synchronized
     fun remember(callingUid: Int, keyId: ByteArray?) {
-        if (!isValid(callingUid, keyId)) return
-        val nonNullKeyId = requireNotNull(keyId)
-        val lookup = Identity.lookup(callingUid, nonNullKeyId)
-        val old = entries.remove(lookup)
-        if (old == null && entries.size >= MAX_ENTRIES) {
-            conservativeMode = true
-            return
-        }
-        if (old != null) retainedProofBytes -= old.proofBytes()
-        val stored = old ?: Entry(null, null)
-        entries[Identity.stored(callingUid, nonNullKeyId)] = stored
-        retainedProofBytes += stored.proofBytes()
-        trimProofBytesLocked()
+        remember(callingUid, keyId, null, null, true)
     }
 
+    @JvmOverloads
     @Synchronized
     fun remember(
         callingUid: Int,
         keyId: ByteArray?,
         parentKeyId: ByteArray?,
         genuineLeafDer: ByteArray?,
+        isAttestKey: Boolean = true,
+        platformSecurityLevel: Int = 0,
     ) {
         if (!isValid(callingUid, keyId)) return
         if (parentKeyId != null && !isValid(callingUid, parentKeyId)) return
-        if (parentKeyId != null && Arrays.equals(keyId, parentKeyId)) return
-        if (genuineLeafDer != null && (genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_LEAF_BYTES)) return
-
         val nonNullKeyId = requireNotNull(keyId)
+        if (parentKeyId != null && (Arrays.equals(nonNullKeyId, parentKeyId) || hasAncestor(callingUid, parentKeyId, nonNullKeyId))) return
+        val effectiveLeafDer = if (isAttestKey) genuineLeafDer else null
+        if (effectiveLeafDer != null && (effectiveLeafDer.isEmpty() || effectiveLeafDer.size > MAX_LEAF_BYTES)) return
+
         val lookup = Identity.lookup(callingUid, nonNullKeyId)
-        val old = entries.remove(lookup)
-        if (old == null && entries.size >= MAX_ENTRIES) {
-            conservativeMode = true
-            return
+        val parentLookup = if (parentKeyId != null) Identity.lookup(callingUid, parentKeyId) else null
+        val parentExistedBefore = parentLookup != null && entries.containsKey(parentLookup)
+        val protectedAncestry = HashSet<Identity>()
+        if (parentKeyId != null) {
+            var curr: ByteArray? = parentKeyId
+            var depth = 0
+            while (curr != null && depth < MAX_ANCESTRY_DEPTH) {
+                val id = Identity.lookup(callingUid, curr)
+                if (!protectedAncestry.add(id)) break
+                val entry = entries[id] ?: break
+                curr = entry.parentKeyId
+                depth++
+            }
         }
+
+        val old = entries.remove(lookup)
         if (old != null) retainedProofBytes -= old.proofBytes()
 
-        val stored = Entry(parentKeyId, genuineLeafDer ?: old?.genuineLeafDer)
+        if (old == null && entries.size >= MAX_ENTRIES) {
+            conservativeMode = true
+            while (entries.size >= MAX_ENTRIES) {
+                if (!evictOldestSubtreeLocked(protectedAncestry)) {
+                    return
+                }
+            }
+            if (parentExistedBefore && !entries.containsKey(parentLookup)) {
+                return
+            }
+        }
+
+        val effectiveLevel =
+            if (platformSecurityLevel == 1 || platformSecurityLevel == 2) {
+                platformSecurityLevel
+            } else if (isAttestKey) {
+                old?.platformSecurityLevel ?: 0
+            } else {
+                0
+            }
+        val stored =
+            Entry(
+                parentKeyId,
+                effectiveLeafDer ?: (if (isAttestKey) old?.genuineLeafDer else null),
+                isAttestKey,
+                effectiveLevel,
+            )
         entries[Identity.stored(callingUid, nonNullKeyId)] = stored
         retainedProofBytes += stored.proofBytes()
         trimProofBytesLocked()
@@ -112,6 +145,25 @@ internal object ManagedAttestKeyRegistry {
     fun isKnown(callingUid: Int, keyId: ByteArray?): Boolean {
         if (!isValid(callingUid, keyId)) return false
         return conservativeMode || entries[Identity.lookup(callingUid, requireNotNull(keyId))] != null
+    }
+
+    @Synchronized
+    fun isAttestKey(callingUid: Int, keyId: ByteArray?): Boolean {
+        if (!isValid(callingUid, keyId)) return false
+        val entry = entries[Identity.lookup(callingUid, requireNotNull(keyId))] ?: return false
+        return entry.isAttestKey
+    }
+
+    @Synchronized
+    fun getParentKeyId(callingUid: Int, keyId: ByteArray?): ByteArray? {
+        if (!isValid(callingUid, keyId)) return null
+        return entries[Identity.lookup(callingUid, requireNotNull(keyId))]?.parentKeyId?.clone()
+    }
+
+    @Synchronized
+    fun getPlatformSecurityLevel(callingUid: Int, keyId: ByteArray?): Int {
+        if (!isValid(callingUid, keyId)) return 0
+        return entries[Identity.lookup(callingUid, requireNotNull(keyId))]?.platformSecurityLevel ?: 0
     }
 
     @Synchronized
@@ -126,12 +178,14 @@ internal object ManagedAttestKeyRegistry {
             val lookup = Identity.lookup(callingUid, current)
             if (!seen.add(Identity.stored(callingUid, current))) return null
             val entry = entries[lookup] ?: return null
+            if (!entry.isAttestKey) return null
             val leaf = entry.genuineLeafDer ?: return null
             reversed.add(
                 RehydrationEntry(
                     keyId = current.clone(),
                     parentKeyId = entry.parentKeyId?.clone(),
                     genuineLeafDer = leaf.clone(),
+                    platformSecurityLevel = entry.platformSecurityLevel,
                 ),
             )
             val parent = entry.parentKeyId ?: break
@@ -153,6 +207,53 @@ internal object ManagedAttestKeyRegistry {
         if (retainedProofBytes < 0) retainedProofBytes = 0
     }
 
+    private fun hasAncestor(callingUid: Int, startKeyId: ByteArray, targetKeyId: ByteArray): Boolean {
+        var current: ByteArray? = startKeyId
+        val seen = HashSet<Identity>()
+        var depth = 0
+        while (depth < MAX_ANCESTRY_DEPTH) {
+            val key = current ?: break
+            if (Arrays.equals(key, targetKeyId)) return true
+            val lookup = Identity.lookup(callingUid, key)
+            if (!seen.add(lookup)) return true
+            val entry = entries[lookup] ?: break
+            current = entry.parentKeyId
+            depth++
+        }
+        return depth >= MAX_ANCESTRY_DEPTH
+    }
+
+    private fun evictOldestSubtreeLocked(protected: Set<Identity>): Boolean {
+        for (entry in entries.entries) {
+            if (!protected.contains(entry.key)) {
+                removeSubtreeLocked(entry.key.uid, entry.key.keyId)
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun removeSubtreeLocked(uid: Int, rootKeyId: ByteArray) {
+        val toRemove = ArrayDeque<ByteArray>()
+        toRemove.add(rootKeyId)
+        while (toRemove.isNotEmpty()) {
+            val target = toRemove.removeFirst()
+            val lookup = Identity.lookup(uid, target)
+            val removed = entries.remove(lookup)
+            if (removed != null) {
+                retainedProofBytes -= removed.proofBytes()
+            }
+            val children = mutableListOf<ByteArray>()
+            for ((identity, entry) in entries) {
+                if (identity.uid == uid && entry.parentKeyId != null && Arrays.equals(entry.parentKeyId, target)) {
+                    children.add(identity.keyId)
+                }
+            }
+            toRemove.addAll(children)
+        }
+        if (retainedProofBytes < 0) retainedProofBytes = 0
+    }
+
     private fun isValid(callingUid: Int, keyId: ByteArray?): Boolean =
         callingUid >= 0 &&
             keyId != null &&
@@ -160,8 +261,9 @@ internal object ManagedAttestKeyRegistry {
             keyId.any { it != 0.toByte() }
 
     @VisibleForTesting
+    @JvmStatic
     @Synchronized
-    internal fun resetForTesting() {
+    fun resetForTesting() {
         entries.clear()
         retainedProofBytes = 0
         conservativeMode = false

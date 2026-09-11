@@ -16,6 +16,8 @@ open class BinderInterceptor : Binder() {
 
     data class OverrideReply(val code: Int = 0, val reply: Parcel) : Result()
 
+    open val requiresPostRequestPayload: Boolean = false
+
     companion object {
         private const val PRE_TRANSACT = 1
         private const val POST_TRANSACT = 2
@@ -61,6 +63,12 @@ open class BinderInterceptor : Binder() {
                 Logger.e("Refusing invalid Binder transaction filter")
                 return false
             }
+            val effectiveCapabilities =
+                if (interceptor.requiresPostRequestPayload) {
+                    capabilities and CAP_OMIT_POST_REQUEST_PAYLOAD.inv()
+                } else {
+                    capabilities
+                }
 
             val data = Parcel.obtain()
             val reply = Parcel.obtain()
@@ -69,8 +77,8 @@ open class BinderInterceptor : Binder() {
                 data.writeStrongBinder(interceptor)
                 data.writeInt(codes.size)
                 codes.forEach(data::writeInt)
-                if (capabilities != 0) {
-                    data.writeInt(capabilities)
+                if (effectiveCapabilities != 0) {
+                    data.writeInt(effectiveCapabilities)
                 }
                 val handled = controlEndpoint.transact(REGISTER_INTERCEPTOR, data, reply, 0)
                 val status = if (reply.dataAvail() >= Int.SIZE_BYTES) reply.readInt() else -1

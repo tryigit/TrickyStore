@@ -60,6 +60,198 @@ class CertificateBackendWireTest {
     }
 
     @Test
+    fun `attest key rewrite propagates platform security level and rejects unknown levels`() {
+        var capturedLevel = -1
+        var writes = 0
+        CertificateBackend.rewriteAttestKeyOverride = { _, _, request ->
+            capturedLevel = request.platformSecurityLevel
+            writes++
+            byteArrayOf(0x30, 0x01, 0x00)
+        }
+
+        val attestKeyId = ByteArray(32) { 0x44 }
+        val keyId = ByteArray(16) { 0x33 }
+        val resultSb =
+            CertificateBackend.rewriteAttestKey(
+                callingUid = 44_501,
+                attestKeyId = attestKeyId,
+                genuineLeafDer = byteArrayOf(1),
+                keyId = keyId,
+                signingAlgorithm = CertificateBackend.SIGNING_EC_P256_SHA256,
+                platformSecurityLevel = CertificateBackend.SECURITY_LEVEL_STRONGBOX,
+                systemDisposition = CertificateBackend.PATCH_KEEP,
+                systemValue = 0,
+                vendorDisposition = CertificateBackend.PATCH_KEEP,
+                vendorValue = 0,
+                bootDisposition = CertificateBackend.PATCH_KEEP,
+                bootValue = 0,
+                idOverrides = emptyMap(),
+                moduleHash = null,
+                verifiedBootKey = ByteArray(32) { 0x11 },
+                verifiedBootHash = ByteArray(32) { 0x22 },
+            )
+        assertArrayEquals(byteArrayOf(0x30, 0x01, 0x00), resultSb)
+        assertEquals(CertificateBackend.SECURITY_LEVEL_STRONGBOX, capturedLevel)
+        assertEquals(1, writes)
+
+        val resultTee =
+            CertificateBackend.rewriteAttestKey(
+                callingUid = 44_501,
+                attestKeyId = attestKeyId,
+                genuineLeafDer = byteArrayOf(1),
+                keyId = keyId,
+                signingAlgorithm = CertificateBackend.SIGNING_EC_P256_SHA256,
+                platformSecurityLevel = CertificateBackend.SECURITY_LEVEL_TEE,
+                systemDisposition = CertificateBackend.PATCH_KEEP,
+                systemValue = 0,
+                vendorDisposition = CertificateBackend.PATCH_KEEP,
+                vendorValue = 0,
+                bootDisposition = CertificateBackend.PATCH_KEEP,
+                bootValue = 0,
+                idOverrides = emptyMap(),
+                moduleHash = null,
+                verifiedBootKey = ByteArray(32) { 0x11 },
+                verifiedBootHash = ByteArray(32) { 0x22 },
+            )
+        assertArrayEquals(byteArrayOf(0x30, 0x01, 0x00), resultTee)
+        assertEquals(CertificateBackend.SECURITY_LEVEL_TEE, capturedLevel)
+
+        assertNull(
+            CertificateBackend.rewriteAttestKey(
+                callingUid = 44_501,
+                attestKeyId = attestKeyId,
+                genuineLeafDer = byteArrayOf(1),
+                keyId = keyId,
+                signingAlgorithm = CertificateBackend.SIGNING_EC_P256_SHA256,
+                platformSecurityLevel = CertificateBackend.SECURITY_LEVEL_SOFTWARE,
+                systemDisposition = CertificateBackend.PATCH_KEEP,
+                systemValue = 0,
+                vendorDisposition = CertificateBackend.PATCH_KEEP,
+                vendorValue = 0,
+                bootDisposition = CertificateBackend.PATCH_KEEP,
+                bootValue = 0,
+                idOverrides = emptyMap(),
+                moduleHash = null,
+                verifiedBootKey = ByteArray(32) { 0x11 },
+                verifiedBootHash = ByteArray(32) { 0x22 },
+            ),
+        )
+        assertNull(
+            CertificateBackend.rewriteAttestKey(
+                callingUid = 44_501,
+                attestKeyId = attestKeyId,
+                genuineLeafDer = byteArrayOf(1),
+                keyId = keyId,
+                signingAlgorithm = CertificateBackend.SIGNING_EC_P256_SHA256,
+                platformSecurityLevel = 3,
+                systemDisposition = CertificateBackend.PATCH_KEEP,
+                systemValue = 0,
+                vendorDisposition = CertificateBackend.PATCH_KEEP,
+                vendorValue = 0,
+                bootDisposition = CertificateBackend.PATCH_KEEP,
+                bootValue = 0,
+                idOverrides = emptyMap(),
+                moduleHash = null,
+                verifiedBootKey = ByteArray(32) { 0x11 },
+                verifiedBootHash = ByteArray(32) { 0x22 },
+            ),
+        )
+    }
+
+    @Test
+    fun `child key rewrite propagates platform security level and rejects unknown levels`() {
+        var capturedLevel = -1
+        CertificateBackend.rewriteChildKeyOverride = { _, _, _, _, level, _, _, _ ->
+            capturedLevel = level
+            byteArrayOf(0x30, 0x01, 0x00)
+        }
+
+        val parentKeyId = ByteArray(32) { 0x55 }
+        val childKeyId = ByteArray(32) { 0x66 }
+        val result =
+            CertificateBackend.rewriteChildKey(
+                callingUid = 44_502,
+                parentKeyId = parentKeyId,
+                childKeyId = childKeyId,
+                genuineLeafDer = byteArrayOf(1),
+                isAttestKey = true,
+                platformSecurityLevel = CertificateBackend.SECURITY_LEVEL_STRONGBOX,
+                systemDisposition = CertificateBackend.PATCH_KEEP,
+                systemValue = 0,
+                vendorDisposition = CertificateBackend.PATCH_KEEP,
+                vendorValue = 0,
+                bootDisposition = CertificateBackend.PATCH_KEEP,
+                bootValue = 0,
+                idOverrides = emptyMap(),
+                moduleHash = null,
+                verifiedBootKey = ByteArray(32) { 0x11 },
+                verifiedBootHash = ByteArray(32) { 0x22 },
+            )
+        assertArrayEquals(byteArrayOf(0x30, 0x01, 0x00), result)
+        assertEquals(CertificateBackend.SECURITY_LEVEL_STRONGBOX, capturedLevel)
+
+        assertNull(
+            CertificateBackend.rewriteChildKey(
+                callingUid = 44_502,
+                parentKeyId = parentKeyId,
+                childKeyId = childKeyId,
+                genuineLeafDer = byteArrayOf(1),
+                isAttestKey = true,
+                platformSecurityLevel = 0,
+                systemDisposition = CertificateBackend.PATCH_KEEP,
+                systemValue = 0,
+                vendorDisposition = CertificateBackend.PATCH_KEEP,
+                vendorValue = 0,
+                bootDisposition = CertificateBackend.PATCH_KEEP,
+                bootValue = 0,
+                idOverrides = emptyMap(),
+                moduleHash = null,
+                verifiedBootKey = ByteArray(32) { 0x11 },
+                verifiedBootHash = ByteArray(32) { 0x22 },
+            ),
+        )
+    }
+
+    @Test
+    fun `attest key wire version 3 carries platform level after signing algorithm`() {
+        var payload: ByteArray? = null
+        CertificateBackend.rewriteTransportOverride = { declaredLength, writePayload ->
+            val output = ByteArrayOutputStream()
+            writePayload(output)
+            payload = output.toByteArray()
+            assertEquals(declaredLength, payload!!.size)
+            byteArrayOf(0x30, 0x00)
+        }
+        // Use the transport override path (no rewriteAttestKeyOverride) to capture raw wire bytes.
+        CertificateBackend.rewriteAttestKeyOverride = null
+        val result =
+            CertificateBackend.rewriteAttestKey(
+                callingUid = 44_501,
+                attestKeyId = ByteArray(32) { 0x44 },
+                genuineLeafDer = byteArrayOf(1),
+                keyId = ByteArray(16) { 0x33 },
+                signingAlgorithm = CertificateBackend.SIGNING_EC_P256_SHA256,
+                platformSecurityLevel = CertificateBackend.SECURITY_LEVEL_STRONGBOX,
+                systemDisposition = CertificateBackend.PATCH_KEEP,
+                systemValue = 0,
+                vendorDisposition = CertificateBackend.PATCH_KEEP,
+                vendorValue = 0,
+                bootDisposition = CertificateBackend.PATCH_KEEP,
+                bootValue = 0,
+                idOverrides = emptyMap(),
+                moduleHash = null,
+                verifiedBootKey = ByteArray(32) { 0x11 },
+                verifiedBootHash = ByteArray(32) { 0x22 },
+            )
+        assertArrayEquals(byteArrayOf(0x30, 0x00), result)
+        val bytes = requireNotNull(payload)
+        assertEquals(3, bytes[0].toInt())
+        // version(1) + uid(4) + signingAlg(1) + level(1)
+        assertEquals(CertificateBackend.SIGNING_EC_P256_SHA256, bytes[5].toInt())
+        assertEquals(CertificateBackend.SECURITY_LEVEL_STRONGBOX, bytes[6].toInt())
+    }
+
+    @Test
     fun `inspection response decodes strict fields and wipes transport bytes`() {
         val response = ByteArray(85)
         response[0] = 2

@@ -47,6 +47,7 @@ object CertificateBackend {
         val moduleHash: ByteArray?,
         val verifiedBootKey: ByteArray,
         val verifiedBootHash: ByteArray,
+        val platformSecurityLevel: Int = 0,
     )
 
     @VisibleForTesting
@@ -59,7 +60,7 @@ object CertificateBackend {
     internal var rewriteAttestKeyOverride: ((Int, ByteArray, RewriteRequest) -> ByteArray?)? = null
 
     @VisibleForTesting
-    internal var rewriteChildKeyOverride: ((Int, ByteArray, ByteArray?, Boolean, ByteArray, ByteArray, ByteArray) -> ByteArray?)? = null
+    internal var rewriteChildKeyOverride: ((Int, ByteArray, ByteArray?, Boolean, Int, ByteArray, ByteArray, ByteArray) -> ByteArray?)? = null
 
     @VisibleForTesting
     internal var clearAttestKeyStoreOverride: (() -> Boolean)? = null
@@ -200,6 +201,7 @@ object CertificateBackend {
         genuineLeafDer: ByteArray,
         keyId: ByteArray,
         signingAlgorithm: Int,
+        platformSecurityLevel: Int,
         systemDisposition: Int,
         systemValue: Int,
         vendorDisposition: Int,
@@ -217,6 +219,7 @@ object CertificateBackend {
             genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_CERTIFICATE_DER_BYTES ||
             keyId.size != KEY_ID_BYTES || keyId.all { it == 0.toByte() } ||
             signingAlgorithm !in SIGNING_EC_P256_SHA256..SIGNING_RSA_PKCS1_SHA256 ||
+            platformSecurityLevel !in SECURITY_LEVEL_TEE..SECURITY_LEVEL_STRONGBOX ||
             !validPatch(systemDisposition, systemValue) ||
             !validPatch(vendorDisposition, vendorValue) ||
             !validPatch(bootDisposition, bootValue) ||
@@ -266,6 +269,7 @@ object CertificateBackend {
                         moduleHash = moduleHash,
                         verifiedBootKey = verifiedBootKey,
                         verifiedBootHash = verifiedBootHash,
+                        platformSecurityLevel = platformSecurityLevel,
                     ),
                 )
             return if (result != null && (result.isEmpty() || result.size > MAX_REWRITTEN_LEAF_BYTES)) null else result
@@ -275,6 +279,7 @@ object CertificateBackend {
             output.write(REWRITE_WIRE_VERSION)
             writeI32(output, callingUid)
             output.write(signingAlgorithm)
+            output.write(platformSecurityLevel)
             writePatch(output, systemDisposition, systemValue)
             writePatch(output, vendorDisposition, vendorValue)
             writePatch(output, bootDisposition, bootValue)
@@ -293,6 +298,10 @@ object CertificateBackend {
             if (moduleHash != null) output.write(moduleHash)
             output.write(genuineLeafDer)
         }
+        rewriteTransportOverride?.let {
+            val result = it(payloadLength, writePayload)
+            return if (result != null && (result.isEmpty() || result.size > MAX_REWRITTEN_LEAF_BYTES)) null else result
+        }
         return NativeBackend.transact(
             OP_ATTEST_KEY_REWRITE,
             payloadLength,
@@ -309,6 +318,7 @@ object CertificateBackend {
         childKeyId: ByteArray?,
         genuineLeafDer: ByteArray,
         isAttestKey: Boolean,
+        platformSecurityLevel: Int,
         systemDisposition: Int,
         systemValue: Int,
         vendorDisposition: Int,
@@ -327,6 +337,7 @@ object CertificateBackend {
             (isAttestKey && childKeyId.contentEquals(parentKeyId)) ||
             (!isAttestKey && childKeyId != null && childKeyId.size != ATTEST_DESCRIPTOR_KEY_ID_BYTES) ||
             genuineLeafDer.isEmpty() || genuineLeafDer.size > MAX_CERTIFICATE_DER_BYTES ||
+            platformSecurityLevel !in SECURITY_LEVEL_TEE..SECURITY_LEVEL_STRONGBOX ||
             !validPatch(systemDisposition, systemValue) ||
             !validPatch(vendorDisposition, vendorValue) ||
             !validPatch(bootDisposition, bootValue) ||
@@ -364,6 +375,7 @@ object CertificateBackend {
                     parentKeyId,
                     childKeyId,
                     isAttestKey,
+                    platformSecurityLevel,
                     genuineLeafDer,
                     verifiedBootKey,
                     verifiedBootHash,
@@ -376,6 +388,7 @@ object CertificateBackend {
             output.write(REWRITE_WIRE_VERSION)
             writeI32(output, callingUid)
             output.write(if (isAttestKey) 1 else 0)
+            output.write(platformSecurityLevel)
             writePatch(output, systemDisposition, systemValue)
             writePatch(output, vendorDisposition, vendorValue)
             writePatch(output, bootDisposition, bootValue)
@@ -393,6 +406,10 @@ object CertificateBackend {
             }
             if (moduleHash != null) output.write(moduleHash)
             output.write(genuineLeafDer)
+        }
+        rewriteTransportOverride?.let {
+            val result = it(payloadLength, writePayload)
+            return if (result != null && (result.isEmpty() || result.size > MAX_REWRITTEN_LEAF_BYTES)) null else result
         }
         return NativeBackend.transact(
             OP_CHILD_KEY_REWRITE,
@@ -701,7 +718,7 @@ object CertificateBackend {
     private const val OP_ATTEST_KEY_TOUCH = 35
     private const val OP_ATTEST_KEY_REMOVE = 36
     private const val INSPECT_WIRE_VERSION = 2
-    private const val REWRITE_WIRE_VERSION = 2
+    private const val REWRITE_WIRE_VERSION = 3
     private const val INSPECT_RESPONSE_BYTES = 85
     private const val ATTEST_KEY_CLEAR_REQUEST_BYTES = 1
     private const val ATTEST_KEY_CLEAR_RESPONSE_BYTES = 1
@@ -724,8 +741,8 @@ object CertificateBackend {
     private const val BOOT_DIGEST_BYTES = 32
     private const val ID_HEADER_BYTES = 4
     private const val REWRITE_FIXED_BYTES = 104
-    private const val ATTEST_KEY_REWRITE_FIXED_BYTES = 140
-    private const val CHILD_KEY_REWRITE_FIXED_BYTES = 156
+    private const val ATTEST_KEY_REWRITE_FIXED_BYTES = 141
+    private const val CHILD_KEY_REWRITE_FIXED_BYTES = 157
     private const val MAX_ID_WIRE_BYTES = MAX_ID_OVERRIDES * (ID_HEADER_BYTES + MAX_ATTESTATION_ID_BYTES)
     private const val MAX_REWRITE_REQUEST_BYTES =
         REWRITE_FIXED_BYTES +

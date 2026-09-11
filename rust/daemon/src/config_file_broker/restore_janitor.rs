@@ -307,6 +307,7 @@ mod tests {
 
     #[test]
     fn mutation_lease_drop_releases_during_unwind() {
+        let _restore_scope = super::super::tests::RestoreTestScope::new();
         let token = "ffffffffffffffffffffffffffffffff";
         let stale_touch = Instant::now() - Duration::from_secs(60);
         {

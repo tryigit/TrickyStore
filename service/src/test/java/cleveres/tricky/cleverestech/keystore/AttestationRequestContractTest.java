@@ -372,7 +372,7 @@ public class AttestationRequestContractTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    public void nestedAttestKeyInvalidatesDescendantsWithoutPurgingParent() throws Exception {
+    public void invalidChildRequestPreservesDescendantsAndParent() throws Exception {
         Field stateField = CertHack.class.getDeclaredField("state");
         stateField.setAccessible(true);
         Object state = stateField.get(null);
@@ -420,14 +420,15 @@ public class AttestationRequestContractTest {
             Certificate[] intermediateCaList = new Certificate[] {intermediateCert};
 
             // Call hackChildKeyCertificate with isAttestKey = true and childKeyId = intermediateKeyId
-            // The intermediate mock has no attestation extension, so it will exit early after descendant eviction
+            // The intermediate mock has no attestation extension and no platform level, so the
+            // request is invalid and must fail closed before descendant eviction
             CertHack.hackChildKeyCertificate(intermediateCaList, uid, true, true, rootKeyId, intermediateKeyId);
 
             synchronized (cache) {
                 // Root parent MUST remain in cache
                 assertTrue(cache.containsKey(rootKey));
-                // Grandchild of intermediate MUST be evicted from cache
-                assertFalse(cache.containsKey(grandchildKey));
+                // Invalid requests MUST NOT evict pre-existing managed descendants
+                assertTrue(cache.containsKey(grandchildKey));
             }
         } finally {
             CertHack.resetGraphHealthForTesting();
@@ -697,6 +698,7 @@ public class AttestationRequestContractTest {
                 descriptor.clone(),
                 new byte[] {1},
                 true,
+                1,
                 0, 0,
                 0, 0,
                 0, 0,

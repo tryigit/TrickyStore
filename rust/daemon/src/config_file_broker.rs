@@ -1253,18 +1253,55 @@ fn invalid(message: &'static str) -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    // Separate roots still share process-wide restore capacity and relative-path reservations.
+    // Keep this lock distinct from the registry mutex so in-test concurrency stays observable.
+    static TEST_REGISTRY_SCOPE: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct RestoreTestScope {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl RestoreTestScope {
+        pub(crate) fn new() -> Self {
+            let guard = TEST_REGISTRY_SCOPE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Self { _guard: guard }
+        }
+    }
+
+    impl Drop for RestoreTestScope {
+        fn drop(&mut self) {
+            let registry = restore_transactions();
+            let poisoned = registry.is_poisoned();
+            let mut transactions = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let empty = transactions.is_empty();
+            transactions.clear();
+            registry.clear_poison();
+            drop(transactions);
+            if !std::thread::panicking() {
+                assert!(!poisoned, "test poisoned the restore registry");
+                assert!(empty, "test leaked active restore transactions");
+            }
+        }
+    }
+
     struct TestRoot {
         path: std::path::PathBuf,
+        _restore_scope: RestoreTestScope,
     }
 
     impl TestRoot {
         fn new() -> Self {
+            let restore_scope = RestoreTestScope::new();
             static COUNTER: AtomicU64 = AtomicU64::new(1);
             let path = std::env::temp_dir().join(format!(
                 "ct-config-broker-{}-{}",
@@ -1272,7 +1309,10 @@ mod tests {
                 COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir(&path).unwrap();
-            Self { path }
+            Self {
+                path,
+                _restore_scope: restore_scope,
+            }
         }
 
         fn trusted(&self) -> TrustedDir {
@@ -1541,6 +1581,32 @@ mod tests {
         assert_eq!(fs::read(&outside).unwrap(), b"outside");
         assert_eq!(fs::read(test.path.join("target.txt")).unwrap(), b"inside");
         let _ = fs::remove_file(outside);
+    }
+
+    #[test]
+    fn restore_transaction_capacity_rejects_overflow_and_recovers_after_abort() {
+        let test = TestRoot::new();
+        let root = test.trusted();
+        let tokens: Vec<String> = (1..=4).map(|index| format!("{index:032x}")).collect();
+        for token in &tokens {
+            handle_from(&root, &restore_pair(ACTION_RESTORE_BEGIN, token, "4096")).unwrap();
+        }
+        let overflow = "00000000000000000000000000000005";
+        let error =
+            handle_from(&root, &restore_pair(ACTION_RESTORE_BEGIN, overflow, "4096")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "restore transaction capacity exhausted");
+        {
+            let transactions = restore_transactions().lock().unwrap();
+            assert_eq!(transactions.len(), 4);
+            assert!(!transactions.contains_key(overflow));
+        }
+        handle_from(&root, &request(ACTION_RESTORE_ABORT, &tokens[0], b"")).unwrap();
+        handle_from(&root, &restore_pair(ACTION_RESTORE_BEGIN, overflow, "4096")).unwrap();
+        for token in tokens.iter().skip(1).map(String::as_str).chain([overflow]) {
+            handle_from(&root, &request(ACTION_RESTORE_ABORT, token, b"")).unwrap();
+        }
+        assert!(restore_transactions().lock().unwrap().is_empty());
     }
 
     #[test]

@@ -22,16 +22,9 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             getTransactCode(IKeystoreSecurityLevel.Stub::class.java, "generateKey")
 
         val INTERCEPTED_CODES = validTransactCodes(generateKeyTransaction)
-
-        private class PreTransactContext(
-            val isDefaultAttestationKey: Boolean,
-            val isAttestKeyPurpose: Boolean,
-            val generatedKeyId: ByteArray?,
-            val parentKeyId: ByteArray?,
-        )
-
-        private val CURRENT_CONTEXT = ThreadLocal<PreTransactContext?>()
     }
+
+    override val requiresPostRequestPayload: Boolean = true
 
     override fun onPreTransact(
         target: IBinder,
@@ -41,36 +34,17 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         callingPid: Int,
         data: Parcel,
     ): Result {
-        if (
-            code == generateKeyTransaction &&
-            CertHack.canHack() &&
-            Config.needHack(callingUid)
-        ) {
-            val reqInfo = Utils.parseGenerateKeyRequest(data, callingUid)
-            if (reqInfo != null) {
-                CURRENT_CONTEXT.set(
-                    PreTransactContext(
-                        isDefaultAttestationKey = reqInfo.usesDefaultAttestationKey,
-                        isAttestKeyPurpose = reqInfo.isAttestKeyPurpose,
-                        generatedKeyId = reqInfo.generatedKeyId,
-                        parentKeyId = reqInfo.parentKeyId,
-                    ),
-                )
-                return Continue
+        if (code == generateKeyTransaction) {
+            if (!CertHack.canHack()) {
+                CertHack.noteAttestFailure(callingUid, 41)
+                return Skip
             }
-            val isDefault = Utils.usesDefaultAttestationKey(data)
-            val isAttestKey = Utils.hasAttestKeyPurpose(data)
-            CURRENT_CONTEXT.set(
-                PreTransactContext(
-                    isDefaultAttestationKey = isDefault,
-                    isAttestKeyPurpose = isAttestKey,
-                    generatedKeyId = null,
-                    parentKeyId = null,
-                ),
-            )
+            if (!Config.needHack(callingUid)) {
+                return Skip
+            }
+
             return Continue
         }
-        CURRENT_CONTEXT.remove()
         return Skip
     }
 
@@ -80,6 +54,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         isAttestKey: Boolean,
         parentKeyId: ByteArray,
         childKeyId: ByteArray?,
+        platformSecurityLevel: Int,
     ): Array<Certificate> {
         KeyboxActivation.lockPublishedSnapshot()
         return try {
@@ -91,6 +66,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                     true,
                     parentKeyId,
                     childKeyId,
+                    platformSecurityLevel,
                 )
             if (first !== original || !ManagedAttestKeyRegistry.isKnown(callingUid, parentKeyId)) {
                 return first
@@ -109,6 +85,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 true,
                 parentKeyId,
                 childKeyId,
+                platformSecurityLevel,
             )
         } finally {
             KeyboxActivation.unlockPublishedSnapshot()
@@ -125,58 +102,55 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         reply: Parcel?,
         resultCode: Int,
     ): Result {
-        // The native hook only sends POST_TRANSACT after PRE_TRANSACT returned Continue.
-        // Target scope was therefore already resolved above; do not repeat Config.needHack()
-        // or CertHack.canHack() on the latency-sensitive generateKey reply path.
         if (
             code != generateKeyTransaction ||
             reply == null ||
             resultCode != 0
         ) {
-            CURRENT_CONTEXT.remove()
             return Skip
         }
 
-        val context = CURRENT_CONTEXT.get() ?: run {
-            val reqInfo = Utils.parseGenerateKeyRequest(data, callingUid)
-            if (reqInfo != null) {
-                PreTransactContext(
-                    isDefaultAttestationKey = reqInfo.usesDefaultAttestationKey,
-                    isAttestKeyPurpose = reqInfo.isAttestKeyPurpose,
-                    generatedKeyId = reqInfo.generatedKeyId,
-                    parentKeyId = reqInfo.parentKeyId,
-                )
-            } else {
-                PreTransactContext(
-                    isDefaultAttestationKey = Utils.usesDefaultAttestationKey(data),
-                    isAttestKeyPurpose = Utils.hasAttestKeyPurpose(data),
-                    generatedKeyId = null,
-                    parentKeyId = null,
-                )
-            }
+        val parsedContext = Utils.parseGenerateKeyRequest(data, callingUid)
+        val context = if (parsedContext != null) {
+            parsedContext
+        } else if (data.dataSize() == 0 || data.dataPosition() != 0) {
+            Utils.GenerateKeyRequestInfo(
+                Utils.usesDefaultAttestationKey(data),
+                Utils.hasAttestKeyPurpose(data),
+                null,
+                null,
+            )
+        } else {
+            return Skip
         }
 
         return try {
             reply.readException()
 
-            // Fast parcel check: parse just the byte offsets without allocating the full KeyMetadata.
             val parsed = Utils.parseKeyMetadataParcel(reply)
             if (parsed != null) {
                 val originalLeaf = cleveres.tricky.cleverestech.keystore.LazyX509Certificate(parsed.leafEncoded, false)
-                if (!Utils.hasAndroidAttestationExtension(originalLeaf)) {
+                if (!Utils.hasAndroidAttestationExtension(originalLeaf) && !context.isAttestKeyPurpose) {
                     return Skip
                 }
 
                 val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
+                val platformSecurityLevel = parsed.keySecurityLevel
                 val rewritten =
-                    if (!context.isDefaultAttestationKey) {
+                    if (!context.usesDefaultAttestationKey) {
                         val parentId = context.parentKeyId
+                        if (context.isAttestKeyPurpose && parentId == null) {
+                            return Skip
+                        }
                         if (parentId == null) {
                             CertHack.hackChildKeyCertificate(
                                 originalLeafOnly,
                                 callingUid,
                                 context.isAttestKeyPurpose,
                                 true,
+                                null,
+                                null,
+                                platformSecurityLevel,
                             )
                         } else {
                             rewriteChildWithParentRecovery(
@@ -185,6 +159,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                                 context.isAttestKeyPurpose,
                                 parentId,
                                 context.generatedKeyId,
+                                platformSecurityLevel,
                             )
                         }
                     } else if (context.isAttestKeyPurpose) {
@@ -194,6 +169,8 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                                 originalLeafOnly,
                                 callingUid,
                                 true,
+                                null,
+                                platformSecurityLevel,
                             )
                         } else {
                             CertHack.hackAttestKeyCertificateChain(
@@ -201,6 +178,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                                 callingUid,
                                 true,
                                 keyId,
+                                platformSecurityLevel,
                             )
                         }
                     } else {
@@ -213,19 +191,17 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 if (rewritten === originalLeafOnly) {
                     return Skip
                 }
-                if (context.isAttestKeyPurpose) {
+                if (context.isAttestKeyPurpose || context.parentKeyId != null) {
                     ManagedAttestKeyRegistry.remember(
                         callingUid,
                         context.generatedKeyId,
                         context.parentKeyId,
                         parsed.leafEncoded,
+                        context.isAttestKeyPurpose,
+                        platformSecurityLevel,
                     )
                 }
 
-                // hackCertificateChain publishes the completed rewrite bytes in its epoch-protected
-                // cache before returning. Reuse those exact bytes here instead of calling getEncoded()
-                // on the rewritten leaf and DER-encoding the issuer chain a second time. A state/epoch
-                // race can legitimately prevent publication, so retain the allocation-heavy fallback.
                 if (
                     CertHack.applyCachedCertificateChain(reply, parsed) ==
                         CertHack.CachedParcelAction.REWRITTEN
@@ -234,14 +210,13 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                 }
 
                 val newLeaf = rewritten[0].encoded
-                val newChain = if (!context.isDefaultAttestationKey) null else Utils.encodeIssuerChain(rewritten)
+                val newChain = if (!context.usesDefaultAttestationKey) null else Utils.encodeIssuerChain(rewritten)
                 if (!Utils.rewriteKeyMetadataParcel(reply, parsed, newLeaf, newChain)) {
                     return Skip
                 }
                 return OverrideReply(code = 0, reply = reply)
             }
 
-            // Contract-compliant fallback for non-standard parcels or test mocks.
             val metadata = reply.readTypedObject(KeyMetadata.CREATOR) ?: return Skip
             if (!Utils.isCertificateChainRewriteCandidate(metadata) && !Utils.hasRewritableLeafCertificate(metadata)) {
                 return Skip
@@ -250,21 +225,28 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             val originalLeaf = Utils.getLeafCertificate(metadata)
             if (
                 originalLeaf == null ||
-                !Utils.hasAndroidAttestationExtension(originalLeaf)
+                (!Utils.hasAndroidAttestationExtension(originalLeaf) && !context.isAttestKeyPurpose)
             ) {
                 return Skip
             }
 
             val originalLeafOnly = arrayOf<Certificate>(originalLeaf)
+            val platformSecurityLevel = metadata.keySecurityLevel
             val rewritten =
-                if (!context.isDefaultAttestationKey) {
+                if (!context.usesDefaultAttestationKey) {
                     val parentId = context.parentKeyId
+                    if (context.isAttestKeyPurpose && parentId == null) {
+                        return Skip
+                    }
                     if (parentId == null) {
                         CertHack.hackChildKeyCertificate(
                             originalLeafOnly,
                             callingUid,
                             context.isAttestKeyPurpose,
                             true,
+                            null,
+                            null,
+                            platformSecurityLevel,
                         )
                     } else {
                         rewriteChildWithParentRecovery(
@@ -273,6 +255,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                             context.isAttestKeyPurpose,
                             parentId,
                             context.generatedKeyId,
+                            platformSecurityLevel,
                         )
                     }
                 } else if (context.isAttestKeyPurpose) {
@@ -282,6 +265,8 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                             originalLeafOnly,
                             callingUid,
                             true,
+                            null,
+                            platformSecurityLevel,
                         )
                     } else {
                         CertHack.hackAttestKeyCertificateChain(
@@ -289,6 +274,7 @@ class SecurityLevelInterceptor : BinderInterceptor() {
                             callingUid,
                             true,
                             keyId,
+                            platformSecurityLevel,
                         )
                     }
                 } else {
@@ -301,17 +287,19 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             if (rewritten === originalLeafOnly) {
                 return Skip
             }
-            if (context.isAttestKeyPurpose) {
+            if (context.isAttestKeyPurpose || context.parentKeyId != null) {
                 ManagedAttestKeyRegistry.remember(
                     callingUid,
                     context.generatedKeyId,
                     context.parentKeyId,
                     metadata.certificate,
+                    context.isAttestKeyPurpose,
+                    platformSecurityLevel,
                 )
             }
 
             if (!CertHack.applyCachedCertificateChain(metadata)) {
-                if (!context.isDefaultAttestationKey) {
+                if (!context.usesDefaultAttestationKey) {
                     metadata.certificate = rewritten[0].encoded
                     metadata.certificateChain = null
                 } else {
@@ -325,8 +313,6 @@ class SecurityLevelInterceptor : BinderInterceptor() {
             OverrideReply(0, reply)
         } catch (_: Throwable) {
             Skip
-        } finally {
-            CURRENT_CONTEXT.remove()
         }
     }
 }

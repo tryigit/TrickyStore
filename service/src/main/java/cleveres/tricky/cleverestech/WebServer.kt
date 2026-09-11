@@ -2304,6 +2304,7 @@ class WebServer(
             json.put("native_runtime", readNativeRuntimeStatus())
             json.put("keystore_interceptor_running", KeystoreInterceptor.isRunning())
             json.put("telephony_interceptor_running", TelephonyInterceptor.isRunning())
+            json.put("attest_fail_ring", CertHack.attestFailureSnapshot())
             return secureResponse(Response.Status.OK, "application/json", json.toString())
         }
 
