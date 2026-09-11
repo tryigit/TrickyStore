@@ -61,17 +61,55 @@ public final class CertHack {
      * to the matching cause (21 leaf invalid through 34 rewrite rejected,
      * 35 unexpected throwable), with 29 extensionless non-attest leaf,
      * 30 parent descriptor invalid, 31 child descriptor invalid,
-     * 32 child level invalid and 33 eviction-time graph unhealthy.
+     * 32 child level invalid, 33 eviction-time graph unhealthy, and
+     * 36 backend preconditions rejected pre-eviction (16 on attest path).
      */
+
+    /**
+     * Mirrors the backend wire preconditions that only fail inside
+     * CertificateBackend serialization. Callers must run this before any
+     * eviction so a request the backend would reject never wipes a live
+     * subtree. Bounds match CertificateBackend.MAX_ATTESTATION_ID_BYTES and
+     * MAX_MODULE_HASH_BYTES.
+     */
+    @VisibleForTesting
+    static boolean failsBackendWirePreconditions(
+            byte[] parentKeyId,
+            byte[] childKeyId,
+            boolean isAttestKey,
+            Map<Integer, byte[]> idOverrides,
+            byte[] moduleHash) {
+        if (parentKeyId != null && (parentKeyId.length != 32 || isAllZero(parentKeyId))) {
+            return true;
+        }
+        if (childKeyId != null
+                && (childKeyId.length != 32 || (isAttestKey && isAllZero(childKeyId)))) {
+            return true;
+        }
+        for (Map.Entry<Integer, byte[]> idOverride : idOverrides.entrySet()) {
+            byte[] value = idOverride.getValue();
+            if (value == null || value.length == 0 || value.length > 4 * 1024) {
+                return true;
+            }
+        }
+        return moduleHash != null && (moduleHash.length == 0 || moduleHash.length > 1024);
+    }
+
+    private static boolean isAllZero(byte[] value) {
+        for (byte b : value) {
+            if (b != 0) return false;
+        }
+        return true;
+    }
     private static final int ATTEST_FAILURE_RING_SIZE = 16;
     private static final int ATTEST_FAILURE_SNAPSHOT_CODES = 8;
     private static final Object attestFailureLock = new Object();
     private static final int[] attestFailureRing = new int[ATTEST_FAILURE_RING_SIZE];
-    private static int attestFailureTotal = 0;
+    private static long attestFailureTotal = 0;
 
     static void noteAttestFailure(int code) {
         synchronized (attestFailureLock) {
-            attestFailureRing[attestFailureTotal % ATTEST_FAILURE_RING_SIZE] = code;
+            attestFailureRing[Math.floorMod(attestFailureTotal, ATTEST_FAILURE_RING_SIZE)] = code;
             attestFailureTotal++;
         }
     }
@@ -81,11 +119,10 @@ public final class CertHack {
         synchronized (attestFailureLock) {
             StringBuilder snapshot = new StringBuilder();
             snapshot.append(attestFailureTotal).append(':');
-            int kept = Math.min(attestFailureTotal, ATTEST_FAILURE_SNAPSHOT_CODES);
-            for (int index = 0; index < kept; index++) {
+            long kept = Math.min(attestFailureTotal, ATTEST_FAILURE_SNAPSHOT_CODES);
+            for (long index = 0; index < kept; index++) {
                 if (index > 0) snapshot.append(',');
-                int slot =
-                        (attestFailureTotal - kept + index) % ATTEST_FAILURE_RING_SIZE;
+                int slot = Math.floorMod(attestFailureTotal - kept + index, ATTEST_FAILURE_RING_SIZE);
                 snapshot.append(attestFailureRing[slot]);
             }
             return snapshot.toString();
@@ -1536,6 +1573,10 @@ public final class CertHack {
                 noteAttestFailure(11);
                 return caList;
             }
+            if (failsBackendWirePreconditions(null, null, false, idOverrides, moduleHash)) {
+                noteAttestFailure(16);
+                return caList;
+            }
             keyId = prepared.keyId.clone();
 
             evictDescendants(cache, uid, attestKeyId);
@@ -1784,6 +1825,11 @@ public final class CertHack {
             if (childPlatformLevel != CertificateBackend.SECURITY_LEVEL_TEE
                     && childPlatformLevel != CertificateBackend.SECURITY_LEVEL_STRONGBOX) {
                 noteAttestFailure(32);
+                return caList;
+            }
+            if (failsBackendWirePreconditions(
+                    parentKeyId, childKeyId, isAttestKey, idOverrides, moduleHash)) {
+                noteAttestFailure(36);
                 return caList;
             }
             if (isAttestKey && childKeyId != null) {

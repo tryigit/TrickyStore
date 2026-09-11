@@ -5,7 +5,13 @@ import static org.junit.Assert.assertSame;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
 import java.security.cert.Certificate;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -63,6 +69,49 @@ public class AttestFailureRingTest {
 
         assertSame(input, result);
         assertEquals("1:29", CertHack.attestFailureSnapshot());
+    }
+
+    @Test
+    public void backendPreconditionsMirrorWireRejects() {
+        byte[] validId = new byte[32];
+        validId[0] = 1;
+        Map<Integer, byte[]> emptyOverrides = Collections.emptyMap();
+
+        assertFalse(
+                CertHack.failsBackendWirePreconditions(null, null, false, emptyOverrides, null));
+        assertFalse(
+                CertHack.failsBackendWirePreconditions(
+                        validId, null, false, emptyOverrides, new byte[] {1}));
+        assertTrue(
+                CertHack.failsBackendWirePreconditions(
+                        new byte[32], null, false, emptyOverrides, null));
+        assertTrue(
+                CertHack.failsBackendWirePreconditions(
+                        new byte[31], null, false, emptyOverrides, null));
+        assertTrue(
+                CertHack.failsBackendWirePreconditions(
+                        validId, new byte[32], true, emptyOverrides, null));
+        assertFalse(
+                CertHack.failsBackendWirePreconditions(
+                        validId, null, false, emptyOverrides, null));
+
+        Map<Integer, byte[]> emptyOverride = new HashMap<>();
+        emptyOverride.put(714, new byte[0]);
+        assertTrue(
+                CertHack.failsBackendWirePreconditions(validId, null, false, emptyOverride, null));
+
+        Map<Integer, byte[]> oversizeOverride = new HashMap<>();
+        oversizeOverride.put(714, new byte[4 * 1024 + 1]);
+        assertTrue(
+                CertHack.failsBackendWirePreconditions(
+                        validId, null, false, oversizeOverride, null));
+
+        assertTrue(
+                CertHack.failsBackendWirePreconditions(
+                        validId, null, false, emptyOverrides, new byte[0]));
+        assertTrue(
+                CertHack.failsBackendWirePreconditions(
+                        validId, null, false, emptyOverrides, new byte[1025]));
     }
 
     @Test
