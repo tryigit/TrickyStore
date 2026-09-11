@@ -29,12 +29,14 @@ public class AttestFailureRingTest {
     public void setUp() {
         CertHack.resetAttestFailureRingForTesting();
         CertHack.resetGraphHealthForTesting();
+        CertHack.setKeyboxes(java.util.Collections.emptyList());
     }
 
     @After
     public void tearDown() {
         CertHack.resetAttestFailureRingForTesting();
         CertHack.resetGraphHealthForTesting();
+        CertHack.setKeyboxes(java.util.Collections.emptyList());
     }
 
     @Test
@@ -194,6 +196,58 @@ public class AttestFailureRingTest {
             cleveres.tricky.cleverestech.CertificateBackend.resetForTesting();
             synchronized (cache) {
                 cache.clear();
+            }
+        }
+    }
+
+    @Test
+    public void generateKeyPreSkipWithoutKeyboxesRecordsCodeFortyOne() throws Exception {
+        android.os.Binder target = new android.os.Binder();
+        Field codeField =
+                cleveres.tricky.cleverestech.SecurityLevelInterceptor.class.getDeclaredField(
+                        "generateKeyTransaction");
+        codeField.setAccessible(true);
+        int code = codeField.getInt(null);
+        android.os.Parcel request = mock(android.os.Parcel.class);
+
+        cleveres.tricky.cleverestech.binder.BinderInterceptor.Result result =
+                new cleveres.tricky.cleverestech.SecurityLevelInterceptor()
+                        .onPreTransact(target, code, 0, 10_001, 42, request);
+
+        assertSame(cleveres.tricky.cleverestech.binder.BinderInterceptor.Skip.INSTANCE, result);
+        assertEquals("1:10001:41", CertHack.attestFailureSnapshot());
+    }
+
+    @Test
+    public void getKeyEntryPreSkipWithoutKeyboxesRecordsCodeFortyTwo() throws Exception {
+        android.os.Binder target = new android.os.Binder();
+        Field keystoreField =
+                cleveres.tricky.cleverestech.KeystoreInterceptor.class.getDeclaredField("keystore");
+        keystoreField.setAccessible(true);
+        Object previous;
+        try {
+            previous = keystoreField.get(null);
+        } catch (Exception unavailable) {
+            previous = null;
+        }
+        Field codeField =
+                cleveres.tricky.cleverestech.KeystoreInterceptor.class.getDeclaredField(
+                        "getKeyEntryTransaction");
+        codeField.setAccessible(true);
+        int code = codeField.getInt(null);
+        android.os.Parcel request = mock(android.os.Parcel.class);
+        try {
+            keystoreField.set(null, target);
+            cleveres.tricky.cleverestech.binder.BinderInterceptor.Result result =
+                    cleveres.tricky.cleverestech.KeystoreInterceptor.INSTANCE.onPreTransact(
+                            target, code, 0, 10_001, 42, request);
+
+            assertSame(
+                    cleveres.tricky.cleverestech.binder.BinderInterceptor.Skip.INSTANCE, result);
+            assertEquals("1:10001:42", CertHack.attestFailureSnapshot());
+        } finally {
+            if (previous != null) {
+                keystoreField.set(null, previous);
             }
         }
     }

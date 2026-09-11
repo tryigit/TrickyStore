@@ -64,6 +64,8 @@ public final class CertHack {
      * 32 child level invalid, 33 eviction-time graph unhealthy, and
      * 36 backend preconditions rejected pre-eviction (16 on attest path).
      * 40 stale managed entry kept genuine when the backend clear failed.
+     * 41 generateKey skipped while the service cannot hack, 42 getKeyEntry
+     * skipped while the service cannot hack.
      */
 
     /**
@@ -116,7 +118,8 @@ public final class CertHack {
     private static final long[] attestFailureRing = new long[ATTEST_FAILURE_RING_SIZE];
     private static long attestFailureTotal = 0;
 
-    static void noteAttestFailure(int callingUid, int code) {
+    /** Cold failure paths only; safe to call from interceptors. */
+    public static void noteAttestFailure(int callingUid, int code) {
         synchronized (attestFailureLock) {
             long packed = ((long) callingUid << 32) | (code & 0xffffffffL);
             attestFailureRing[Math.floorMod(attestFailureTotal, ATTEST_FAILURE_RING_SIZE)] = packed;

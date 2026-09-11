@@ -35,7 +35,11 @@ class SecurityLevelInterceptor : BinderInterceptor() {
         data: Parcel,
     ): Result {
         if (code == generateKeyTransaction) {
-            if (!CertHack.canHack() || !Config.needHack(callingUid)) {
+            if (!CertHack.canHack()) {
+                CertHack.noteAttestFailure(callingUid, 41)
+                return Skip
+            }
+            if (!Config.needHack(callingUid)) {
                 return Skip
             }
 

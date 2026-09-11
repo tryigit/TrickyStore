@@ -159,6 +159,7 @@ object KeystoreInterceptor : BinderInterceptor() {
         // binder when the device provides one. Never substitute TEE and never manufacture an
         // unavailable result for hardware that is actually present.
         if (!CertHack.canHack()) {
+            CertHack.noteAttestFailure(callingUid, 42)
             return Skip
         }
         if (code == getKeyEntryTransaction) {
