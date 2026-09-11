@@ -246,9 +246,7 @@ public class AttestFailureRingTest {
                     cleveres.tricky.cleverestech.binder.BinderInterceptor.Skip.INSTANCE, result);
             assertEquals("1:10001:42", CertHack.attestFailureSnapshot());
         } finally {
-            if (previous != null) {
-                keystoreField.set(null, previous);
-            }
+            keystoreField.set(null, previous);
         }
     }
 
